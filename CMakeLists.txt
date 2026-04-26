@@ -127,6 +127,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/mem_to_reg.cpp
     lib/transform/multidriven_guard.cpp
     lib/transform/blackbox_guard.cpp
+    lib/transform/comb_lane_pack.cpp
     lib/transform/comb_loop_elim.cpp
     lib/transform/hier_flatten.cpp
     lib/transform/instance_inline.cpp
@@ -517,6 +518,17 @@ target_link_libraries(transform-comb-loop-elim
 )
 
 register_test_exe(transform-comb-loop-elim)
+
+add_executable(transform-comb-lane-pack
+    tests/transform/test_comb_lane_pack_pass.cpp
+)
+
+target_link_libraries(transform-comb-lane-pack
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-comb-lane-pack)
 
 add_executable(transform-activity-schedule
     tests/transform/test_activity_schedule_pass.cpp

@@ -1587,6 +1587,7 @@ namespace wolvrix::lib::emit
             std::unordered_map<ValueId, std::string, ValueIdHash> inputFieldByValue;
             std::unordered_map<ValueId, std::string, ValueIdHash> prevInputFieldByValue;
             std::unordered_map<ValueId, std::string, ValueIdHash> valueFieldByValue;
+            std::unordered_map<ValueId, std::string, ValueIdHash> staticConstStringFieldByValue;
             std::unordered_map<ValueId, std::string, ValueIdHash> localValueNameByValue;
             std::unordered_map<ValueId, ValueScalarSlotRef, ValueIdHash> valueScalarSlotByValue;
             std::unordered_map<ValueId, ValueWideSlotRef, ValueIdHash> valueWideSlotByValue;
@@ -1615,6 +1616,7 @@ namespace wolvrix::lib::emit
             std::vector<uint32_t> commitSupernodeIds;
             std::vector<uint8_t> supernodeHasComputePart;
             std::vector<uint8_t> supernodeHasCommitPart;
+            std::vector<std::string> staticConstStringDecls;
             std::vector<std::string> valueFieldDecls;
             std::vector<std::string> stateFieldDecls;
             std::vector<std::string> shadowFieldDecls;
@@ -1666,6 +1668,30 @@ namespace wolvrix::lib::emit
                    model.materializedValues.find(value) != model.materializedValues.end();
         }
 
+        std::optional<std::string> staticConstStringExpr(const Graph &graph, ValueId valueId)
+        {
+            if (graph.valueType(valueId) != ValueType::String)
+            {
+                return std::nullopt;
+            }
+            const OperationId defOpId = graph.valueDef(valueId);
+            if (!defOpId.valid())
+            {
+                return std::nullopt;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() != OperationKind::kConstant)
+            {
+                return std::nullopt;
+            }
+            return constantExpr(graph, defOp, valueId);
+        }
+
+        bool isStaticConstStringValue(const EmitModel &model, ValueId value) noexcept
+        {
+            return model.staticConstStringFieldByValue.find(value) != model.staticConstStringFieldByValue.end();
+        }
+
         ValueSlotScalarKind valueScalarSlotKindForWidth(int32_t width);
         std::string scalarLogicSlotCppType(ValueSlotScalarKind kind);
         std::size_t valueScalarSlotByteSize(ValueSlotScalarKind kind);
@@ -1676,6 +1702,8 @@ namespace wolvrix::lib::emit
                                              EmitModel &model)
         {
             model.valueFieldByValue.clear();
+            model.staticConstStringFieldByValue.clear();
+            model.staticConstStringDecls.clear();
             model.valueFieldDecls.clear();
             model.valueScalarSlotByValue.clear();
             model.valueWideSlotByValue.clear();
@@ -1692,6 +1720,13 @@ namespace wolvrix::lib::emit
                     continue;
                 }
                 const std::string fieldName = materializedValueFieldName(graph, valueId);
+                if (const auto staticExpr = staticConstStringExpr(graph, valueId))
+                {
+                    model.staticConstStringFieldByValue.emplace(valueId, fieldName);
+                    model.staticConstStringDecls.push_back("    inline static constexpr const char *" + fieldName +
+                                                           " = " + *staticExpr + ";");
+                    continue;
+                }
                 std::string fieldType = cppTypeForValue(graph, valueId);
                 if (graph.valueType(valueId) == ValueType::Logic && !isWideLogicValue(graph, valueId))
                 {
@@ -2812,6 +2847,10 @@ namespace wolvrix::lib::emit
             const std::string ref = resolvedScheduleValueExpr(model, value, context);
             if (dpiTypeIsString(typeName))
             {
+                if (isStaticConstStringValue(model, value))
+                {
+                    return ref;
+                }
                 return ref + ".c_str()";
             }
             if (dpiTypeIsShortReal(typeName))
@@ -3811,6 +3850,11 @@ namespace wolvrix::lib::emit
             {
                 return it->second;
             }
+            if (auto it = model.staticConstStringFieldByValue.find(value);
+                it != model.staticConstStringFieldByValue.end())
+            {
+                return it->second;
+            }
             if (auto it = model.valueFieldByValue.find(value); it != model.valueFieldByValue.end())
             {
                 return it->second;
@@ -4721,46 +4765,18 @@ namespace wolvrix::lib::emit
                    << ";\n";
         }
 
-        std::string inlineWordsLambdaExpr(int32_t resultWidth, const std::string &body)
-        {
-            const std::string arrayType = wordsArrayTypeForWidth(resultWidth);
-            std::ostringstream out;
-            out << "([&]() -> " << arrayType << " { "
-                << arrayType << " _out{}; "
-                << body
-                << "return _out; }())";
-            return out.str();
-        }
-
         std::string castScalarWordsInlineExpr(const std::string &expr,
                                               int32_t srcWidth,
                                               int32_t destWidth,
                                               bool srcSigned)
         {
             const std::size_t destWords = logicWordCount(destWidth);
-            std::ostringstream body;
-            body << "const std::uint64_t _src = static_cast<std::uint64_t>(" << expr << "); ";
-            if (destWords != 0)
-            {
-                body << "_out[0] = " << scalarTruncExpr("_src", static_cast<std::size_t>(srcWidth)) << "; ";
-                if (srcSigned && srcWidth > 0)
-                {
-                    const std::size_t signBit = static_cast<std::size_t>(srcWidth >= 64 ? 63 : srcWidth - 1);
-                    body << "if (((_out[0] >> " << signBit << ") & UINT64_C(1)) != 0) { ";
-                    if (srcWidth < 64)
-                    {
-                        body << "_out[0] |= ~" << scalarMaskExpr(static_cast<std::size_t>(srcWidth)) << "; ";
-                    }
-                    if (destWords > 1)
-                    {
-                        body << "for (std::size_t _i = 1; _i < " << destWords
-                             << "; ++_i) _out[_i] = ~UINT64_C(0); ";
-                    }
-                    body << "} ";
-                }
-            }
-            appendWordsTailTruncation(body, "_out", destWidth);
-            return inlineWordsLambdaExpr(destWidth, body.str());
+            std::ostringstream out;
+            out << "grhsim_cast_words<" << destWords << ">((" << expr << "), "
+                << srcWidth << ", "
+                << destWidth << ", "
+                << boolLiteral(srcSigned) << ")";
+            return out.str();
         }
 
         std::string castWideWordsInlineExpr(const std::string &expr,
@@ -4768,57 +4784,20 @@ namespace wolvrix::lib::emit
                                             int32_t destWidth,
                                             bool srcSigned)
         {
-            const std::size_t srcWords = logicWordCount(srcWidth);
             const std::size_t destWords = logicWordCount(destWidth);
-            const std::size_t limit = std::min(srcWords, destWords);
-            std::ostringstream body;
-            body << "const auto &_src = (" << expr << "); ";
-            if (limit != 0)
-            {
-                body << "for (std::size_t _i = 0; _i < " << limit << "; ++_i) _out[_i] = _src[_i]; ";
-            }
-            if (srcSigned && srcWidth > 0)
-            {
-                const std::size_t signWord = (static_cast<std::size_t>(srcWidth) - 1u) / 64u;
-                const std::size_t signBit = (static_cast<std::size_t>(srcWidth) - 1u) & 63u;
-                if (signWord < destWords)
-                {
-                    body << "if (((_out[" << signWord << "] >> " << signBit << ") & UINT64_C(1)) != 0) { ";
-                    if (signBit != 63u)
-                    {
-                        body << "_out[" << signWord << "] |= ~" << scalarMaskExpr(signBit + 1u) << "; ";
-                    }
-                    if (signWord + 1u < destWords)
-                    {
-                        body << "for (std::size_t _i = " << (signWord + 1u) << "; _i < " << destWords
-                             << "; ++_i) _out[_i] = ~UINT64_C(0); ";
-                    }
-                    body << "} ";
-                }
-            }
-            appendWordsTailTruncation(body, "_out", destWidth);
-            return inlineWordsLambdaExpr(destWidth, body.str());
+            std::ostringstream out;
+            out << "grhsim_cast_words<" << destWords << ">((" << expr << "), "
+                << srcWidth << ", "
+                << destWidth << ", "
+                << boolLiteral(srcSigned) << ")";
+            return out.str();
         }
 
         std::string addWordsInlineExpr(const std::string &lhsExpr,
                                        const std::string &rhsExpr,
                                        int32_t resultWidth)
         {
-            const std::size_t wordCount = logicWordCount(resultWidth);
-            std::ostringstream body;
-            body << "const auto &_lhs = (" << lhsExpr << "); "
-                 << "const auto &_rhs = (" << rhsExpr << "); "
-                 << "unsigned __int128 _carry = 0; ";
-            for (std::size_t i = 0; i < wordCount; ++i)
-            {
-                body << "{ const unsigned __int128 _sum = "
-                     << "static_cast<unsigned __int128>(_lhs[" << i << "]) + "
-                     << "static_cast<unsigned __int128>(_rhs[" << i << "]) + _carry; "
-                     << "_out[" << i << "] = static_cast<std::uint64_t>(_sum); "
-                     << "_carry = _sum >> 64u; } ";
-            }
-            appendWordsTailTruncation(body, "_out", resultWidth);
-            return inlineWordsLambdaExpr(resultWidth, body.str());
+            return "grhsim_add_words((" + lhsExpr + "), (" + rhsExpr + "), " + std::to_string(resultWidth) + ")";
         }
 
         std::string concatTwoWordsInlineExpr(const std::string &lhsExpr,
@@ -4828,58 +4807,13 @@ namespace wolvrix::lib::emit
                                              int32_t resultWidth)
         {
             const std::size_t destWords = logicWordCount(resultWidth);
-            const std::size_t boundedRhsWidth =
-                std::min(static_cast<std::size_t>(std::max(rhsWidth, 0)),
-                         static_cast<std::size_t>(std::max(resultWidth, 0)));
-            const std::size_t lhsInsertWidth =
-                boundedRhsWidth >= static_cast<std::size_t>(std::max(resultWidth, 0))
-                    ? 0u
-                    : std::min(static_cast<std::size_t>(std::max(lhsWidth, 0)),
-                               static_cast<std::size_t>(std::max(resultWidth, 0)) - boundedRhsWidth);
-            const std::size_t rhsWords = boundedRhsWidth == 0 ? 0u : bitWordCount(boundedRhsWidth);
-            const std::size_t lhsWords = lhsInsertWidth == 0 ? 0u : bitWordCount(lhsInsertWidth);
-            const std::size_t lhsDestWord = boundedRhsWidth / 64u;
-            const std::size_t lhsBitShift = boundedRhsWidth & 63u;
-
-            std::ostringstream body;
-            body << "const auto &_lhs = (" << lhsExpr << "); "
-                 << "const auto &_rhs = (" << rhsExpr << "); ";
-            for (std::size_t i = 0; i < rhsWords && i < destWords; ++i)
-            {
-                const std::size_t wordWidth =
-                    (i + 1u == rhsWords) ? (boundedRhsWidth - i * 64u) : 64u;
-                const std::string wordExpr =
-                    wordWidth >= 64u ? ("_rhs[" + std::to_string(i) + "]")
-                                     : scalarTruncExpr("_rhs[" + std::to_string(i) + "]", wordWidth);
-                body << "_out[" << i << "] |= " << wordExpr << "; ";
-            }
-            for (std::size_t i = 0; i < lhsWords; ++i)
-            {
-                const std::size_t wordWidth =
-                    (i + 1u == lhsWords) ? (lhsInsertWidth - i * 64u) : 64u;
-                const std::string wordExpr =
-                    wordWidth >= 64u ? ("_lhs[" + std::to_string(i) + "]")
-                                     : scalarTruncExpr("_lhs[" + std::to_string(i) + "]", wordWidth);
-                if (lhsDestWord + i < destWords)
-                {
-                    if (lhsBitShift == 0u)
-                    {
-                        body << "_out[" << (lhsDestWord + i) << "] |= " << wordExpr << "; ";
-                    }
-                    else
-                    {
-                        body << "_out[" << (lhsDestWord + i) << "] |= (" << wordExpr << " << "
-                             << lhsBitShift << "); ";
-                    }
-                }
-                if (lhsBitShift != 0u && lhsDestWord + i + 1u < destWords)
-                {
-                    body << "_out[" << (lhsDestWord + i + 1u) << "] |= (" << wordExpr << " >> "
-                         << (64u - lhsBitShift) << "); ";
-                }
-            }
-            appendWordsTailTruncation(body, "_out", resultWidth);
-            return inlineWordsLambdaExpr(resultWidth, body.str());
+            std::ostringstream out;
+            out << "grhsim_concat_words<" << destWords << ">((" << lhsExpr << "), "
+                << lhsWidth << ", "
+                << "(" << rhsExpr << "), "
+                << rhsWidth << ", "
+                << resultWidth << ")";
+            return out.str();
         }
 
         std::size_t estimateChangedValueEffectLines(const ActivityScheduleValueFanout &valueFanout,
@@ -5213,25 +5147,13 @@ namespace wolvrix::lib::emit
                                    const std::string &startExpr,
                                    int32_t resultWidth)
         {
-            const std::size_t srcWords = logicWordCount(srcWidth);
             const std::size_t destWords = logicWordCount(resultWidth);
-            std::ostringstream body;
-            body << "const auto &_src = (" << srcExpr << "); "
-                 << "const std::size_t _start = static_cast<std::size_t>(" << startExpr << "); ";
-            if (destWords != 0)
-            {
-                body << "const std::size_t _srcWord = _start / 64u; "
-                     << "const std::size_t _bitShift = _start & 63u; "
-                     << "for (std::size_t _i = 0; _i < " << destWords << "; ++_i) { "
-                     << "const std::uint64_t _low = (_srcWord + _i < " << srcWords
-                     << ") ? _src[_srcWord + _i] : UINT64_C(0); "
-                     << "if (_bitShift == 0) { _out[_i] = _low; } else { "
-                     << "const std::uint64_t _high = (_srcWord + _i + 1u < " << srcWords
-                     << ") ? _src[_srcWord + _i + 1u] : UINT64_C(0); "
-                     << "_out[_i] = (_low >> _bitShift) | (_high << (64u - _bitShift)); } } ";
-            }
-            appendWordsTailTruncation(body, "_out", resultWidth);
-            return inlineWordsLambdaExpr(resultWidth, body.str());
+            (void)srcWidth;
+            std::ostringstream out;
+            out << "grhsim_slice_words<" << destWords << ">((" << srcExpr << "), "
+                << "static_cast<std::size_t>(" << startExpr << "), "
+                << resultWidth << ")";
+            return out.str();
         }
 
         std::string unaryWordsBufferOpExpr(const std::string &valueExpr,
@@ -5627,49 +5549,22 @@ namespace wolvrix::lib::emit
                 op.results().empty() ? 0 : graph.valueWidth(op.results().front());
             if (wideResult)
             {
-                std::ostringstream body;
-                body << "const auto &_values = (" << valuesExpr << "); ";
                 if (uniformWidth)
                 {
-                    body << "std::size_t _cursor = " << resultWidth << "; "
-                         << "for (std::size_t _i = 0; _i < " << operandCount << "; ++_i) { ";
-                    if (*uniformWidth > 0)
-                    {
-                        body << "if (" << *uniformWidth << " > _cursor) { _cursor = 0; continue; } "
-                             << "_cursor -= " << *uniformWidth << "; "
-                             << "const std::size_t _destWord = _cursor / 64u; "
-                             << "if (_destWord >= " << logicWordCount(resultWidth) << ") continue; "
-                             << "const std::size_t _bitShift = _cursor & 63u; "
-                             << "const std::uint64_t _bits = " << scalarTruncExpr("_values[_i]", *uniformWidth) << "; "
-                             << "_out[_destWord] |= (_bitShift == 0 ? _bits : (_bits << _bitShift)); "
-                             << "if (_bitShift != 0 && _destWord + 1u < " << logicWordCount(resultWidth)
-                             << " && " << *uniformWidth << " + _bitShift > 64u) "
-                             << "_out[_destWord + 1u] |= (_bits >> (64u - _bitShift)); ";
-                    }
-                    body << "} ";
-                    appendWordsTailTruncation(body, "_out", resultWidth);
-                    return inlineWordsLambdaExpr(resultWidth, body.str());
+                    std::ostringstream out;
+                    out << "grhsim_concat_uniform_scalars_words<" << logicWordCount(resultWidth) << ">("
+                        << valuesExpr << ", "
+                        << *uniformWidth << ", "
+                        << resultWidth << ")";
+                    return out.str();
                 }
                 const std::string widthsExpr = scalarConcatWidthArrayExpr(graph, op);
-                body << "const auto &_widths = (" << widthsExpr << "); "
-                     << "std::size_t _cursor = " << resultWidth << "; "
-                     << "for (std::size_t _i = 0; _i < " << operandCount << "; ++_i) { "
-                     << "const std::size_t _width = _widths[_i]; "
-                     << "if (_width == 0) continue; "
-                     << "if (_width > _cursor) { _cursor = 0; continue; } "
-                     << "_cursor -= _width; "
-                     << "const std::size_t _destWord = _cursor / 64u; "
-                     << "if (_destWord >= " << logicWordCount(resultWidth) << ") continue; "
-                     << "const std::size_t _bitShift = _cursor & 63u; "
-                     << "const std::uint64_t _bits = (_width >= 64u) ? static_cast<std::uint64_t>(_values[_i]) : "
-                        "(_width == 0 ? UINT64_C(0) : (static_cast<std::uint64_t>(_values[_i]) & "
-                        "((UINT64_C(1) << _width) - UINT64_C(1)))); "
-                     << "_out[_destWord] |= (_bitShift == 0 ? _bits : (_bits << _bitShift)); "
-                     << "if (_bitShift != 0 && _destWord + 1u < " << logicWordCount(resultWidth)
-                     << " && _width + _bitShift > 64u) _out[_destWord + 1u] |= (_bits >> (64u - _bitShift)); "
-                     << "} ";
-                appendWordsTailTruncation(body, "_out", resultWidth);
-                return inlineWordsLambdaExpr(resultWidth, body.str());
+                std::ostringstream out;
+                out << "grhsim_concat_scalars_words<" << logicWordCount(resultWidth) << ">("
+                    << valuesExpr << ", "
+                    << widthsExpr << ", "
+                    << resultWidth << ")";
+                return out.str();
             }
             if (uniformWidth)
             {
@@ -6643,15 +6538,24 @@ namespace wolvrix::lib::emit
                 }
                 const MemoryRowAccessExpr rowAccess =
                     memoryRowAccessExpr(graph, operands[0], operandExprs[0], stateIt->second.rowCount);
-                std::ostringstream out;
-                out << "([&]() -> " << cppTypeForValue(graph, value) << " { ";
-                if (!rowAccess.alwaysInRange)
+                const std::string rowExpr = stateRef(stateIt->second) + "[" + rowAccess.rowExpr + "]";
+                if (isWideLogicValue(graph, value))
                 {
-                    out << "if (!" << rowAccess.inRangeExpr << ") return "
-                        << defaultInitExprForLogicWidth(graph.valueWidth(value)) << "; ";
+                    if (rowAccess.alwaysInRange)
+                    {
+                        return rowExpr;
+                    }
+                    return "((" + rowAccess.inRangeExpr + ") ? " + rowExpr + " : " +
+                           wordsArrayTypeForWidth(graph.valueWidth(value)) + "{})";
                 }
-                out << "return " << stateRef(stateIt->second) << "[" << rowAccess.rowExpr << "]; }())";
-                return out.str();
+                const std::string castRowExpr =
+                    "static_cast<" + cppTypeForValue(graph, value) + ">(" + rowExpr + ")";
+                if (rowAccess.alwaysInRange)
+                {
+                    return castRowExpr;
+                }
+                return "((" + rowAccess.inRangeExpr + ") ? " + castRowExpr + " : " +
+                       defaultInitExprForLogicWidth(graph.valueWidth(value)) + ")";
             }
 
             if (graph.valueType(value) != ValueType::Logic)
@@ -6751,15 +6655,23 @@ namespace wolvrix::lib::emit
                         cost += operandCost + 1;
                         const MemoryRowAccessExpr rowAccess =
                             memoryRowAccessExpr(graph, operands[0], *addrExpr, stateIt->second.rowCount);
-                        std::ostringstream out;
-                        out << "([&]() -> " << cppTypeForValue(graph, value) << " { ";
-                        if (!rowAccess.alwaysInRange)
+                        const std::string rowExpr = stateRef(stateIt->second) + "[" + rowAccess.rowExpr + "]";
+                        if (isWideLogicValue(graph, value))
                         {
-                            out << "if (!" << rowAccess.inRangeExpr << ") return "
-                                << defaultInitExprForLogicWidth(graph.valueWidth(value)) << "; ";
+                            expr = rowAccess.alwaysInRange
+                                       ? rowExpr
+                                       : "((" + rowAccess.inRangeExpr + ") ? " + rowExpr + " : " +
+                                             wordsArrayTypeForWidth(graph.valueWidth(value)) + "{})";
                         }
-                        out << "return " << stateRef(stateIt->second) << "[" << rowAccess.rowExpr << "]; }())";
-                        expr = out.str();
+                        else
+                        {
+                            const std::string castRowExpr =
+                                "static_cast<" + cppTypeForValue(graph, value) + ">(" + rowExpr + ")";
+                            expr = rowAccess.alwaysInRange
+                                       ? castRowExpr
+                                       : "((" + rowAccess.inRangeExpr + ") ? " + castRowExpr + " : " +
+                                             defaultInitExprForLogicWidth(graph.valueWidth(value)) + ")";
+                        }
                         break;
                     }
                     case OperationKind::kAssign:
@@ -7948,12 +7860,8 @@ namespace wolvrix::lib::emit
             {
                 stream << '\n';
             }
-            stream << className << "::BatchEvalStats " << className << "::eval_batch_" << batch.index << "()\n{\n";
-            stream << "        BatchEvalStats stats{};\n";
-            stream << "        stats.checkedFlagWords = " << batch.words.size() << "u;\n";
-            stream << "        // Batch " << batch.index
-                   << ": evaluate active supernodes selected from a group of activity-flag words.\n";
-            for (const auto &word : batch.words)
+
+            const auto emitWordBody = [&](const ScheduleBatch::Word &word) -> std::optional<std::string>
             {
                 std::uint8_t dispatchMask = UINT8_C(0);
                 std::uint8_t clearMask = UINT8_C(0);
@@ -8919,6 +8827,21 @@ namespace wolvrix::lib::emit
                        << word.activeFlagWordIndex << "u] | activeWordFlags);\n";
                 stream << "            }\n";
                 stream << "        }\n";
+                return std::nullopt;
+            };
+
+            stream << className << "::BatchEvalStats " << className << "::eval_batch_" << batch.index << "()\n{\n";
+            stream << "        BatchEvalStats stats{};\n";
+            stream << "        stats.checkedFlagWords = " << batch.words.size() << "u;\n";
+            stream << "        // Batch " << batch.index
+                   << ": evaluate active supernodes selected from a group of activity-flag words.\n";
+            for (std::size_t wordChunkIndex = 0; wordChunkIndex < batch.words.size(); ++wordChunkIndex)
+            {
+                const auto &word = batch.words[wordChunkIndex];
+                if (auto error = emitWordBody(word))
+                {
+                    return error;
+                }
             }
             stream << "        return stats;\n";
             stream << "}\n";
@@ -9099,7 +9022,6 @@ namespace wolvrix::lib::emit
         }
         const std::filesystem::path headerPath = outDir / (prefix + ".hpp");
         const std::filesystem::path runtimePath = outDir / (prefix + "_runtime.hpp");
-        const std::filesystem::path declaredValueIndexPath = outDir / (prefix + "_declared_value_index.txt");
         const std::filesystem::path statePath = outDir / (prefix + "_state.cpp");
         const std::filesystem::path evalPath = outDir / (prefix + "_eval.cpp");
         std::vector<std::filesystem::path> schedPaths;
@@ -9353,6 +9275,10 @@ namespace wolvrix::lib::emit
             }
             const OperationId defOpId = graph.valueDef(valueId);
             if (!defOpId.valid() || graph.getOperation(defOpId).kind() != OperationKind::kConstant)
+            {
+                continue;
+            }
+            if (!model.valueFieldByValue.contains(valueId))
             {
                 continue;
             }
@@ -12451,6 +12377,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << '\n';
             }
+            for (const auto &decl : model.staticConstStringDecls)
+            {
+                *stream << decl << '\n';
+            }
+            if (!model.staticConstStringDecls.empty())
+            {
+                *stream << '\n';
+            }
             for (const auto &decl : model.valueFieldDecls)
             {
                 *stream << decl << '\n';
@@ -15098,21 +15032,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
         }
 
-        {
-            std::string indexError;
-            if (!emitDeclaredValueIndexFile(
-                    graph, model, schedule, scheduleBatches, schedPaths, declaredValueIndexPath, indexError))
-            {
-                reportError(indexError, declaredValueIndexPath.string());
-                result.success = false;
-                return result;
-            }
-        }
-
         result.artifacts = {
             headerPath.string(),
             runtimePath.string(),
-            declaredValueIndexPath.string(),
             statePath.string(),
             evalPath.string(),
         };

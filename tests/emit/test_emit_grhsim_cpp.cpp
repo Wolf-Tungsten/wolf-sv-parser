@@ -1721,6 +1721,10 @@ int main()
     {
         return fail("Missing split batch declarations");
     }
+    if (header.find("wordchunk_") != std::string::npos)
+    {
+        return fail("Word helpers should be inlined into eval_batch declarations");
+    }
     if (header.find("bool clk = false;") == std::string::npos)
     {
         return fail("Missing public input field declaration");
@@ -1736,6 +1740,11 @@ int main()
     if (header.find("void set_random_seed(std::uint64_t seed);") == std::string::npos)
     {
         return fail("Missing random seed setter declaration");
+    }
+    if (header.find("inline static constexpr const char *value_") == std::string::npos ||
+        header.find("= \"q=%0d\";") == std::string::npos)
+    {
+        return fail("String constants should emit as static constexpr char pointers");
     }
     if (runtime.find("inline std::uint64_t grhsim_mask") == std::string::npos)
     {
@@ -1783,17 +1792,26 @@ int main()
     {
         return fail("Missing looped scalar concat helper usage");
     }
-    const bool hasWideSliceInlineCoverage =
+    const bool hasWideSliceHelperCoverage =
         sched.find("wide_slice_static_op") != std::string::npos &&
         sched.find("wide_slice_dyn_op") != std::string::npos &&
-        sched.find("const std::size_t _srcWord = _start / 64u;") != std::string::npos &&
+        sched.find("grhsim_slice_words<2>(") != std::string::npos &&
         sched.find("grhsim_index_words(wide_addr, 130)") != std::string::npos;
+    const bool hasWideHelperCoverage =
+        sched.find("grhsim_cast_words<") != std::string::npos &&
+        sched.find("grhsim_add_words(") != std::string::npos &&
+        sched.find("grhsim_concat_words<") != std::string::npos;
     if (sched.find("grhsim_udiv_words") == std::string::npos ||
         sched.find("grhsim_shl_words") == std::string::npos ||
         sched.find("grhsim_replicate_words") == std::string::npos ||
-        !hasWideSliceInlineCoverage)
+        !hasWideSliceHelperCoverage ||
+        !hasWideHelperCoverage)
     {
         return fail("Missing emitted pure words wide combinational coverage");
+    }
+    if (sched.find("([&]()") != std::string::npos)
+    {
+        return fail("schedule emit should not contain inline lambda word helpers");
     }
     if (sched.find("grhsim_clog2_u64") == std::string::npos ||
         sched.find("slice_array_op") == std::string::npos ||
@@ -1901,6 +1919,10 @@ int main()
         sched.find("supernode_active_curr_[") == std::string::npos)
     {
         return fail("Missing multi-batch eval dispatch");
+    }
+    if (sched.find("wordchunk_") != std::string::npos)
+    {
+        return fail("Schedule batches should inline word bodies into eval_batch");
     }
     if (sched.find("activeWordFlags") == std::string::npos || sched.find("supernode_") == std::string::npos)
     {
@@ -3283,6 +3305,7 @@ int main()
         }
         const std::filesystem::path dpiStatePath = dpiDir / "grhsim_top_state.cpp";
         const std::filesystem::path dpiEvalPath = dpiDir / "grhsim_top_eval.cpp";
+        const std::filesystem::path dpiHeaderPath = dpiDir / "grhsim_top.hpp";
         const std::vector<std::filesystem::path> dpiStateFiles = collectSchedFiles(dpiDir, "grhsim_top_state");
         const std::vector<std::filesystem::path> dpiSchedFiles =
             collectSchedFiles(dpiDir, "grhsim_top_sched_");
@@ -3290,13 +3313,23 @@ int main()
         {
             return fail("dpi state/schedule files missing");
         }
+        const std::string dpiHeaderText = readFile(dpiHeaderPath);
         const std::string dpiSchedText = readFiles(dpiSchedFiles);
+        if (dpiHeaderText.find("inline static constexpr const char *value_") == std::string::npos ||
+            dpiHeaderText.find("= \"tag\";") == std::string::npos)
+        {
+            return fail("dpi constant strings should emit as static constexpr char pointers");
+        }
         if (dpiSchedText.find("extern \"C\" std::int32_t dpi_mix") == std::string::npos ||
             dpiSchedText.find("const char * label") == std::string::npos ||
             dpiSchedText.find("std::int16_t * sum") == std::string::npos ||
             dpiSchedText.find("std::string * text") == std::string::npos)
         {
             return fail("dpi schedule declaration mismatch");
+        }
+        if (dpiSchedText.find(".c_str()") != std::string::npos)
+        {
+            return fail("dpi string constants should not route through std::string::c_str()");
         }
         if (dpiSchedText.find("(a) != 0") == std::string::npos)
         {
