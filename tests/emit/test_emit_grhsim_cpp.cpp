@@ -1876,18 +1876,19 @@ int main()
     {
         return fail("Direct-commit emit should not keep shadow/write scratch storage");
     }
-    if (header.find("value_logic_storage_") != std::string::npos ||
+    if (header.find("value_logic_storage_") == std::string::npos ||
+        header.find("static constexpr std::size_t kValueLogicStorageBytes = ") == std::string::npos ||
         header.find("state_logic_storage_") != std::string::npos)
     {
-        return fail("Persistent value/state storage should be emitted as direct members");
+        return fail("Shared packed logic storage layout is missing");
     }
     if (header.find("value_bool_slot_ptrs_") != std::string::npos ||
         header.find("state_logic_u8_slot_ptrs_") != std::string::npos ||
-        header.find("state_reg_reg_q_") == std::string::npos ||
-        header.find("value_35_0_sum_") == std::string::npos ||
-        header.find("value_107_0_wide_slice_static_y_") == std::string::npos)
+        header.find("state_reg_reg_q_") != std::string::npos ||
+        header.find("value_35_0_sum_") != std::string::npos ||
+        header.find("value_107_0_wide_slice_static_y_") != std::string::npos)
     {
-        return fail("Missing direct persistent member fields or found stale scalar slot pointer tables");
+        return fail("Unexpected direct logic members or stale scalar slot pointer tables remain");
     }
     if (header.find("commit_state_updates(") != std::string::npos ||
         state.find("commit_state_updates(") != std::string::npos)
@@ -2686,9 +2687,11 @@ int main()
         }
         const std::string wideConcatFastSched = readFiles(wideConcatFastSchedFiles);
         if (wideConcatFastSched.find("wide_concat_fast_mid") == std::string::npos ||
-            wideConcatFastSched.find("value_5_0_wide_concat_fast_mid_ = std::array<std::uint64_t, 2>{};") ==
+            wideConcatFastSched.find("grhsim_value_storage_ref<std::array<std::uint64_t, 2>>(value_logic_storage_, ") ==
                 std::string::npos ||
-            wideConcatFastSched.find("value_5_0_wide_concat_fast_mid_[") == std::string::npos)
+            wideConcatFastSched.find("= std::array<std::uint64_t, 2>{};") == std::string::npos ||
+            wideConcatFastSched.find("grhsim_value_storage_ref<std::array<std::uint64_t, 2>>(value_logic_storage_, ") == std::string::npos ||
+            wideConcatFastSched.find(")[") == std::string::npos)
         {
             return fail("wide-concat-fast should emit direct concat buffer statements");
         }

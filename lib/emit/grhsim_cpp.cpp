@@ -350,9 +350,25 @@ namespace wolvrix::lib::emit
         }
 
         struct EmitModel;
-        enum class SupernodeLocalExprKind;
-        struct SupernodeLocalExpr;
-        struct SupernodeLocalExprContext;
+        enum class SupernodeLocalExprKind
+        {
+            kScalarInline,
+            kWideWords,
+        };
+        struct SupernodeLocalExpr
+        {
+            std::string expr;
+            SupernodeLocalExprKind kind = SupernodeLocalExprKind::kScalarInline;
+            int32_t width = 0;
+        };
+        struct SupernodeLocalExprContext
+        {
+            std::unordered_map<ValueId, SupernodeLocalExpr, ValueIdHash> byValue;
+            std::unordered_map<ValueId, std::string, ValueIdHash> storedValueRefByValue;
+            std::unordered_map<std::string, std::string> stateRefBySymbol;
+        };
+        bool isWritePortKind(OperationKind kind) noexcept;
+        bool valueNeedsTrackedChange(const EmitModel &model, ValueId resultValue);
         std::string resolvedScheduleValueExpr(const EmitModel &model,
                                               ValueId value,
                                               const SupernodeLocalExprContext *context);
@@ -1428,13 +1444,35 @@ namespace wolvrix::lib::emit
             std::size_t opCount = 0;
             struct Word
             {
+                struct HelperChunk
+                {
+                    std::size_t beginSupernodeIndex = 0;
+                    std::size_t endSupernodeIndex = 0;
+                };
+
                 std::size_t activeFlagWordIndex = 0;
+                std::size_t estimatedLines = 0;
+                std::size_t opCount = 0;
+                bool emitAsHelper = false;
                 std::vector<uint32_t> supernodeIds;
+                std::vector<HelperChunk> helperChunks;
             };
 
             std::vector<Word> words;
             std::vector<uint32_t> supernodeIds;
         };
+
+        std::string scheduleBatchWordHelperName(std::size_t batchIndex, std::size_t wordIndex)
+        {
+            return "eval_batch_" + std::to_string(batchIndex) + "_word_" + std::to_string(wordIndex);
+        }
+
+        std::string scheduleBatchWordChunkHelperName(std::size_t batchIndex,
+                                                     std::size_t wordIndex,
+                                                     std::size_t chunkIndex)
+        {
+            return scheduleBatchWordHelperName(batchIndex, wordIndex) + "_chunk_" + std::to_string(chunkIndex);
+        }
 
         enum class ValueSlotScalarKind
         {
@@ -1554,14 +1592,12 @@ namespace wolvrix::lib::emit
         {
             ValueSlotScalarKind kind = ValueSlotScalarKind::kBool;
             std::size_t slotIndex = 0;
-            std::string fieldName;
         };
 
         struct ValueWideSlotRef
         {
             std::size_t wordCount = 0;
             std::size_t slotIndex = 0;
-            std::string fieldName;
         };
 
         struct WaveformSignalDecl
@@ -1695,7 +1731,375 @@ namespace wolvrix::lib::emit
         ValueSlotScalarKind valueScalarSlotKindForWidth(int32_t width);
         std::string scalarLogicSlotCppType(ValueSlotScalarKind kind);
         std::size_t valueScalarSlotByteSize(ValueSlotScalarKind kind);
+        std::size_t valuePackedScalarSlotByteSize(ValueSlotScalarKind kind);
+        std::size_t valuePackedScalarSlotAlignment(ValueSlotScalarKind kind);
         std::size_t alignTo(std::size_t offset, std::size_t alignment);
+        std::string packedScalarStorageRefExpr(std::string_view storageExpr,
+                                               ValueSlotScalarKind kind,
+                                               std::string_view offsetExpr);
+        std::string packedWideStorageRefExpr(std::string_view storageExpr,
+                                             std::size_t wordCount,
+                                             std::string_view offsetExpr);
+        std::string packedScalarStorageDirectRefExpr(std::string_view storageExpr,
+                                                     ValueSlotScalarKind kind,
+                                                     std::string_view offsetExpr);
+        std::string packedWideStorageDirectRefExpr(std::string_view storageExpr,
+                                                   std::size_t wordCount,
+                                                   std::string_view offsetExpr);
+        std::string valueScalarStorageRefExpr(ValueSlotScalarKind kind, std::string_view offsetExpr);
+        std::string valueWideStorageRefExpr(std::size_t wordCount, std::string_view offsetExpr);
+        std::string stateScalarStorageRefExpr(ValueSlotScalarKind kind, std::string_view offsetExpr);
+        std::string stateWideStorageRefExpr(std::size_t wordCount, std::string_view offsetExpr);
+
+        struct LogicStorageReadOrder
+        {
+            std::size_t firstBatch = kInvalidIndex;
+            std::size_t firstReadSequence = kInvalidIndex;
+            std::size_t totalReads = 0;
+            std::size_t graphOrder = kInvalidIndex;
+        };
+
+        struct OrderedLogicStorageEntry
+        {
+            enum class Kind
+            {
+                kState,
+                kValue,
+            };
+
+            Kind kind = Kind::kState;
+            std::string stateSymbol;
+            ValueId valueId{};
+            LogicStorageReadOrder order;
+        };
+
+        std::vector<OrderedLogicStorageEntry> buildGraphOrderLogicStorageOrder(const Graph &graph,
+                                                                               const EmitModel &model,
+                                                                               std::span<const ValueId> orderedValues)
+        {
+            std::vector<OrderedLogicStorageEntry> orderedEntries;
+            orderedEntries.reserve(model.stateOrder.size() + orderedValues.size());
+
+            std::size_t graphOrder = 0;
+            for (const std::string &stateSymbol : model.stateOrder)
+            {
+                const auto stateIt = model.stateBySymbol.find(stateSymbol);
+                if (stateIt == model.stateBySymbol.end() || stateIt->second.kind == StateDecl::Kind::Memory)
+                {
+                    continue;
+                }
+                orderedEntries.push_back(OrderedLogicStorageEntry{
+                    .kind = OrderedLogicStorageEntry::Kind::kState,
+                    .stateSymbol = stateSymbol,
+                    .valueId = {},
+                    .order =
+                        LogicStorageReadOrder{
+                            .firstBatch = kInvalidIndex,
+                            .firstReadSequence = kInvalidIndex,
+                            .totalReads = 0,
+                            .graphOrder = graphOrder++,
+                        },
+                });
+            }
+            for (ValueId valueId : orderedValues)
+            {
+                if (!model.materializedValues.contains(valueId) || graph.valueType(valueId) != ValueType::Logic)
+                {
+                    continue;
+                }
+                orderedEntries.push_back(OrderedLogicStorageEntry{
+                    .kind = OrderedLogicStorageEntry::Kind::kValue,
+                    .stateSymbol = {},
+                    .valueId = valueId,
+                    .order =
+                        LogicStorageReadOrder{
+                            .firstBatch = kInvalidIndex,
+                            .firstReadSequence = kInvalidIndex,
+                            .totalReads = 0,
+                            .graphOrder = graphOrder++,
+                        },
+                });
+            }
+            return orderedEntries;
+        }
+
+        std::vector<OrderedLogicStorageEntry> buildBatchReadLocalityLogicStorageOrder(
+            const Graph &graph,
+            const EmitModel &model,
+            std::span<const ScheduleBatch> scheduleBatches,
+            const ActivityScheduleSupernodeToOps &supernodeToOps)
+        {
+            std::unordered_map<std::string, LogicStorageReadOrder> orderByState;
+            std::unordered_map<ValueId, LogicStorageReadOrder, ValueIdHash> orderByValue;
+            orderByState.reserve(model.stateOrder.size());
+            orderByValue.reserve(model.materializedValues.size());
+
+            std::size_t graphOrder = 0;
+            for (const std::string &stateSymbol : model.stateOrder)
+            {
+                const auto stateIt = model.stateBySymbol.find(stateSymbol);
+                if (stateIt == model.stateBySymbol.end() || stateIt->second.kind == StateDecl::Kind::Memory)
+                {
+                    continue;
+                }
+                orderByState.emplace(stateSymbol,
+                                     LogicStorageReadOrder{
+                                         .firstBatch = kInvalidIndex,
+                                         .firstReadSequence = kInvalidIndex,
+                                         .totalReads = 0,
+                                         .graphOrder = graphOrder++,
+                                     });
+            }
+            for (ValueId valueId : graph.values())
+            {
+                if (!model.materializedValues.contains(valueId) || graph.valueType(valueId) != ValueType::Logic)
+                {
+                    continue;
+                }
+                orderByValue.emplace(valueId,
+                                     LogicStorageReadOrder{
+                                         .firstBatch = kInvalidIndex,
+                                         .firstReadSequence = kInvalidIndex,
+                                         .totalReads = 0,
+                                         .graphOrder = graphOrder++,
+                                     });
+            }
+
+            std::size_t readSequence = 0;
+            const auto noteRead = [&](LogicStorageReadOrder &order, std::size_t batchIndex) {
+                if (order.firstReadSequence == kInvalidIndex)
+                {
+                    order.firstBatch = batchIndex;
+                    order.firstReadSequence = readSequence++;
+                }
+                ++order.totalReads;
+            };
+
+            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            {
+                const ScheduleBatch &batch = scheduleBatches[batchIndex];
+                for (uint32_t supernodeId : batch.supernodeIds)
+                {
+                    if (supernodeId >= supernodeToOps.size())
+                    {
+                        continue;
+                    }
+                    for (const OperationId opId : supernodeToOps[supernodeId])
+                    {
+                        const Operation op = graph.getOperation(opId);
+                        if (op.kind() == OperationKind::kRegisterReadPort || op.kind() == OperationKind::kLatchReadPort)
+                        {
+                            const std::string attrName =
+                                op.kind() == OperationKind::kRegisterReadPort ? "regSymbol" : "latchSymbol";
+                            if (const auto symbol = getAttribute<std::string>(op, attrName))
+                            {
+                                if (auto stateIt = orderByState.find(*symbol); stateIt != orderByState.end())
+                                {
+                                    noteRead(stateIt->second, batchIndex);
+                                }
+                            }
+                        }
+                        else if (isWritePortKind(op.kind()))
+                        {
+                            if (const auto writeIt = model.writeByOp.find(opId); writeIt != model.writeByOp.end())
+                            {
+                                if (auto stateIt = orderByState.find(writeIt->second.symbol);
+                                    stateIt != orderByState.end())
+                                {
+                                    noteRead(stateIt->second, batchIndex);
+                                }
+                            }
+                        }
+                        for (ValueId operand : op.operands())
+                        {
+                            if (auto valueIt = orderByValue.find(operand); valueIt != orderByValue.end())
+                            {
+                                noteRead(valueIt->second, batchIndex);
+                            }
+                        }
+                    }
+                }
+            }
+
+            std::vector<OrderedLogicStorageEntry> orderedEntries;
+            orderedEntries.reserve(orderByState.size() + orderByValue.size());
+            for (const auto &[stateSymbol, order] : orderByState)
+            {
+                orderedEntries.push_back(OrderedLogicStorageEntry{
+                    .kind = OrderedLogicStorageEntry::Kind::kState,
+                    .stateSymbol = stateSymbol,
+                    .valueId = {},
+                    .order = order,
+                });
+            }
+            for (const auto &[valueId, order] : orderByValue)
+            {
+                orderedEntries.push_back(OrderedLogicStorageEntry{
+                    .kind = OrderedLogicStorageEntry::Kind::kValue,
+                    .stateSymbol = {},
+                    .valueId = valueId,
+                    .order = order,
+                });
+            }
+
+            std::sort(orderedEntries.begin(),
+                      orderedEntries.end(),
+                      [](const OrderedLogicStorageEntry &lhs, const OrderedLogicStorageEntry &rhs)
+                      {
+                          if (lhs.order.firstBatch != rhs.order.firstBatch)
+                          {
+                              return lhs.order.firstBatch < rhs.order.firstBatch;
+                          }
+                          if (lhs.order.firstReadSequence != rhs.order.firstReadSequence)
+                          {
+                              return lhs.order.firstReadSequence < rhs.order.firstReadSequence;
+                          }
+                          if (lhs.order.totalReads != rhs.order.totalReads)
+                          {
+                              return lhs.order.totalReads > rhs.order.totalReads;
+                          }
+                          return lhs.order.graphOrder < rhs.order.graphOrder;
+                      });
+            return orderedEntries;
+        }
+
+        void rebuildMixedLogicStorage(const Graph &graph,
+                                      std::span<const OrderedLogicStorageEntry> orderedEntries,
+                                      EmitModel &model)
+        {
+            model.valueFieldByValue.clear();
+            model.staticConstStringFieldByValue.clear();
+            model.staticConstStringDecls.clear();
+            model.valueFieldDecls.clear();
+            model.valueScalarSlotByValue.clear();
+            model.valueWideSlotByValue.clear();
+            model.valueRealSlotByValue.clear();
+            model.valueStringSlotByValue.clear();
+            model.valueScalarSlotCounts = {};
+            model.valueWideSlotCountsByWords.clear();
+            model.valueRealSlotCount = 0;
+            model.valueStringSlotCount = 0;
+            model.stateLogicScalarSlotCounts = {};
+            model.stateLogicWideSlotCountsByWords.clear();
+
+            std::size_t logicStorageOffset = 0;
+            for (const OrderedLogicStorageEntry &entry : orderedEntries)
+            {
+                if (entry.kind == OrderedLogicStorageEntry::Kind::kState)
+                {
+                    StateDecl &state = model.stateBySymbol.at(entry.stateSymbol);
+                    if (state.kind == StateDecl::Kind::Memory)
+                    {
+                        continue;
+                    }
+                    if (isWideLogicWidth(state.width))
+                    {
+                        logicStorageOffset = alignTo(logicStorageOffset, alignof(std::uint64_t));
+                        state.slotIndex = logicStorageOffset;
+                        model.stateLogicWideSlotCountsByWords[state.wordCount]++;
+                        logicStorageOffset += state.wordCount * sizeof(std::uint64_t);
+                    }
+                    else
+                    {
+                        logicStorageOffset =
+                            alignTo(logicStorageOffset, valuePackedScalarSlotAlignment(state.scalarKind));
+                        state.slotIndex = logicStorageOffset;
+                        model.stateLogicScalarSlotCounts[static_cast<std::size_t>(state.scalarKind)]++;
+                        logicStorageOffset += valuePackedScalarSlotByteSize(state.scalarKind);
+                    }
+                    continue;
+                }
+
+                const ValueId valueId = entry.valueId;
+                if (!model.materializedValues.contains(valueId) || graph.valueType(valueId) != ValueType::Logic)
+                {
+                    continue;
+                }
+                if (isWideLogicValue(graph, valueId))
+                {
+                    const std::size_t wordCount = logicWordCount(graph.valueWidth(valueId));
+                    logicStorageOffset = alignTo(logicStorageOffset, alignof(std::uint64_t));
+                    const std::size_t slotIndex = logicStorageOffset;
+                    model.valueWideSlotByValue.emplace(valueId,
+                                                       ValueWideSlotRef{.wordCount = wordCount, .slotIndex = slotIndex});
+                    model.valueWideSlotCountsByWords[wordCount]++;
+                    model.valueFieldByValue.emplace(valueId,
+                                                    valueWideStorageRefExpr(wordCount, std::to_string(slotIndex)));
+                    logicStorageOffset += wordCount * sizeof(std::uint64_t);
+                }
+                else
+                {
+                    const ValueSlotScalarKind slotKind = valueScalarSlotKindForWidth(graph.valueWidth(valueId));
+                    logicStorageOffset = alignTo(logicStorageOffset, valuePackedScalarSlotAlignment(slotKind));
+                    const std::size_t slotIndex = logicStorageOffset;
+                    model.valueScalarSlotByValue.emplace(valueId,
+                                                         ValueScalarSlotRef{.kind = slotKind, .slotIndex = slotIndex});
+                    model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
+                    model.valueFieldByValue.emplace(valueId,
+                                                    valueScalarStorageRefExpr(slotKind, std::to_string(slotIndex)));
+                    logicStorageOffset += valuePackedScalarSlotByteSize(slotKind);
+                }
+            }
+
+            for (ValueId valueId : graph.values())
+            {
+                if (!model.materializedValues.contains(valueId) || graph.valueType(valueId) == ValueType::Logic)
+                {
+                    continue;
+                }
+                if (const auto staticExpr = staticConstStringExpr(graph, valueId))
+                {
+                    const std::string fieldName = materializedValueFieldName(graph, valueId);
+                    model.staticConstStringFieldByValue.emplace(valueId, fieldName);
+                    model.staticConstStringDecls.push_back("    inline static constexpr const char *" + fieldName +
+                                                           " = " + *staticExpr + ";");
+                    continue;
+                }
+                switch (graph.valueType(valueId))
+                {
+                case ValueType::Real:
+                {
+                    const std::size_t slotIndex = model.valueRealSlotCount++;
+                    model.valueRealSlotByValue.emplace(valueId, slotIndex);
+                    model.valueFieldByValue.emplace(valueId,
+                                                    "value_real_slots_[" + std::to_string(slotIndex) + "]");
+                    break;
+                }
+                case ValueType::String:
+                {
+                    const std::size_t slotIndex = model.valueStringSlotCount++;
+                    model.valueStringSlotByValue.emplace(valueId, slotIndex);
+                    model.valueFieldByValue.emplace(valueId,
+                                                    "value_string_slots_[" + std::to_string(slotIndex) + "]");
+                    break;
+                }
+                case ValueType::Logic:
+                default:
+                    break;
+                }
+            }
+
+            model.stateLogicStorageBytes = logicStorageOffset;
+            model.valueLogicStorageBytes = logicStorageOffset;
+            if (model.valueLogicStorageBytes != 0)
+            {
+                model.valueFieldDecls.push_back("    static constexpr std::size_t kValueLogicStorageBytes = " +
+                                                std::to_string(model.valueLogicStorageBytes) + ";");
+                model.valueFieldDecls.push_back(
+                    "    alignas(std::uint64_t) std::array<std::byte, kValueLogicStorageBytes> value_logic_storage_{};");
+            }
+            if (model.valueRealSlotCount != 0)
+            {
+                model.valueFieldDecls.push_back("    std::array<double, " + std::to_string(model.valueRealSlotCount) +
+                                                "> value_real_slots_{};");
+            }
+            if (model.valueStringSlotCount != 0)
+            {
+                model.valueFieldDecls.push_back("    std::array<std::string, " +
+                                                std::to_string(model.valueStringSlotCount) +
+                                                "> value_string_slots_{};");
+            }
+        }
 
         void rebuildMaterializedValueStorage(const Graph &graph,
                                              std::span<const ValueId> orderedValues,
@@ -1713,41 +2117,38 @@ namespace wolvrix::lib::emit
             model.valueWideSlotCountsByWords.clear();
             model.valueRealSlotCount = 0;
             model.valueStringSlotCount = 0;
+
+            std::size_t logicStorageOffset = model.stateLogicStorageBytes;
             for (ValueId valueId : orderedValues)
             {
                 if (!model.materializedValues.contains(valueId))
                 {
                     continue;
                 }
-                const std::string fieldName = materializedValueFieldName(graph, valueId);
                 if (const auto staticExpr = staticConstStringExpr(graph, valueId))
                 {
+                    const std::string fieldName = materializedValueFieldName(graph, valueId);
                     model.staticConstStringFieldByValue.emplace(valueId, fieldName);
                     model.staticConstStringDecls.push_back("    inline static constexpr const char *" + fieldName +
                                                            " = " + *staticExpr + ";");
                     continue;
                 }
-                std::string fieldType = cppTypeForValue(graph, valueId);
-                if (graph.valueType(valueId) == ValueType::Logic && !isWideLogicValue(graph, valueId))
-                {
-                    fieldType = scalarLogicSlotCppType(valueScalarSlotKindForWidth(graph.valueWidth(valueId)));
-                }
-                model.valueFieldDecls.push_back("    " + fieldType + " " + fieldName + " = " +
-                                                defaultInitExpr(graph, valueId) + ";");
                 switch (graph.valueType(valueId))
                 {
                 case ValueType::Real:
                 {
                     const std::size_t slotIndex = model.valueRealSlotCount++;
                     model.valueRealSlotByValue.emplace(valueId, slotIndex);
-                    model.valueFieldByValue.emplace(valueId, fieldName);
+                    model.valueFieldByValue.emplace(valueId,
+                                                    "value_real_slots_[" + std::to_string(slotIndex) + "]");
                     break;
                 }
                 case ValueType::String:
                 {
                     const std::size_t slotIndex = model.valueStringSlotCount++;
                     model.valueStringSlotByValue.emplace(valueId, slotIndex);
-                    model.valueFieldByValue.emplace(valueId, fieldName);
+                    model.valueFieldByValue.emplace(valueId,
+                                                    "value_string_slots_[" + std::to_string(slotIndex) + "]");
                     break;
                 }
                 case ValueType::Logic:
@@ -1756,43 +2157,73 @@ namespace wolvrix::lib::emit
                     if (isWideLogicValue(graph, valueId))
                     {
                         const std::size_t wordCount = logicWordCount(graph.valueWidth(valueId));
-                        const std::size_t slotIndex = model.valueWideSlotCountsByWords[wordCount]++;
+                        logicStorageOffset = alignTo(logicStorageOffset, alignof(std::uint64_t));
+                        const std::size_t slotIndex = logicStorageOffset;
                         model.valueWideSlotByValue.emplace(
                             valueId,
-                            ValueWideSlotRef{.wordCount = wordCount, .slotIndex = slotIndex, .fieldName = fieldName});
-                        model.valueFieldByValue.emplace(valueId, fieldName);
+                            ValueWideSlotRef{.wordCount = wordCount, .slotIndex = slotIndex});
+                        model.valueWideSlotCountsByWords[wordCount]++;
+                        model.valueFieldByValue.emplace(valueId,
+                                                        valueWideStorageRefExpr(wordCount, std::to_string(slotIndex)));
+                        logicStorageOffset += wordCount * sizeof(std::uint64_t);
                     }
                     else
                     {
                         const ValueSlotScalarKind slotKind = valueScalarSlotKindForWidth(graph.valueWidth(valueId));
-                        const std::size_t slotIndex =
-                            model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
+                        logicStorageOffset =
+                            alignTo(logicStorageOffset, valuePackedScalarSlotAlignment(slotKind));
+                        const std::size_t slotIndex = logicStorageOffset;
                         model.valueScalarSlotByValue.emplace(
                             valueId,
-                            ValueScalarSlotRef{.kind = slotKind, .slotIndex = slotIndex, .fieldName = fieldName});
-                        model.valueFieldByValue.emplace(valueId, fieldName);
+                            ValueScalarSlotRef{.kind = slotKind, .slotIndex = slotIndex});
+                        model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
+                        model.valueFieldByValue.emplace(valueId,
+                                                        valueScalarStorageRefExpr(slotKind,
+                                                                                  std::to_string(slotIndex)));
+                        logicStorageOffset += valuePackedScalarSlotByteSize(slotKind);
                     }
                     break;
                 }
                 }
             }
-            model.valueLogicStorageBytes = 0;
+            model.valueLogicStorageBytes = logicStorageOffset;
+
+            if (model.valueLogicStorageBytes != 0)
+            {
+                model.valueFieldDecls.push_back("    static constexpr std::size_t kValueLogicStorageBytes = " +
+                                                std::to_string(model.valueLogicStorageBytes) + ";");
+                model.valueFieldDecls.push_back(
+                    "    alignas(std::uint64_t) std::array<std::byte, kValueLogicStorageBytes> value_logic_storage_{};");
+            }
+            if (model.valueRealSlotCount != 0)
+            {
+                model.valueFieldDecls.push_back("    std::array<double, " + std::to_string(model.valueRealSlotCount) +
+                                                "> value_real_slots_{};");
+            }
+            if (model.valueStringSlotCount != 0)
+            {
+                model.valueFieldDecls.push_back("    std::array<std::string, " +
+                                                std::to_string(model.valueStringSlotCount) +
+                                                "> value_string_slots_{};");
+            }
         }
 
-        std::vector<ValueId> buildBatchHotValueOrder(const Graph &graph,
-                                                     const EmitModel &model,
-                                                     std::span<const ScheduleBatch> scheduleBatches,
-                                                     const ActivityScheduleSupernodeToOps &supernodeToOps)
+        std::vector<ValueId> buildStateAnchoredValueOrder(const Graph &graph,
+                                                          const EmitModel &model,
+                                                          std::span<const ScheduleBatch> scheduleBatches,
+                                                          const ActivityScheduleSupernodeToOps &supernodeToOps)
         {
-            struct ValueHotness
+            struct ValueReadOrder
             {
-                std::size_t firstBatch = kInvalidIndex;
-                std::size_t totalTouches = 0;
+                std::size_t stateAnchor = kInvalidIndex;
+                std::size_t firstReadSequence = kInvalidIndex;
+                std::size_t totalReads = 0;
                 std::size_t graphOrder = kInvalidIndex;
             };
 
-            std::unordered_map<ValueId, ValueHotness, ValueIdHash> hotnessByValue;
-            hotnessByValue.reserve(model.materializedValues.size());
+            std::unordered_map<ValueId, ValueReadOrder, ValueIdHash> orderByValue;
+            orderByValue.reserve(model.materializedValues.size());
+            std::vector<std::size_t> stateAnchorBySupernode(supernodeToOps.size(), kInvalidIndex);
 
             std::size_t graphOrder = 0;
             for (ValueId valueId : graph.values())
@@ -1802,15 +2233,60 @@ namespace wolvrix::lib::emit
                     ++graphOrder;
                     continue;
                 }
-                hotnessByValue.emplace(valueId,
-                                       ValueHotness{
-                                           .firstBatch = kInvalidIndex,
-                                           .totalTouches = 0,
-                                           .graphOrder = graphOrder,
-                                       });
+                orderByValue.emplace(valueId,
+                                     ValueReadOrder{
+                                         .stateAnchor = kInvalidIndex,
+                                         .firstReadSequence = kInvalidIndex,
+                                         .totalReads = 0,
+                                         .graphOrder = graphOrder,
+                                     });
                 ++graphOrder;
             }
 
+            const auto noteStateAnchor = [&](std::size_t &anchor, const StateDecl &state) {
+                if (state.kind == StateDecl::Kind::Memory)
+                {
+                    return;
+                }
+                anchor = anchor == kInvalidIndex ? state.slotIndex : std::max(anchor, state.slotIndex);
+            };
+            for (std::size_t supernodeId = 0; supernodeId < supernodeToOps.size(); ++supernodeId)
+            {
+                std::size_t stateAnchor = kInvalidIndex;
+                for (const OperationId opId : supernodeToOps[supernodeId])
+                {
+                    const Operation op = graph.getOperation(opId);
+                    if (op.kind() == OperationKind::kRegisterReadPort || op.kind() == OperationKind::kLatchReadPort)
+                    {
+                        const std::string attrName =
+                            op.kind() == OperationKind::kRegisterReadPort ? "regSymbol" : "latchSymbol";
+                        if (const auto symbol = getAttribute<std::string>(op, attrName))
+                        {
+                            if (const auto stateIt = model.stateBySymbol.find(*symbol);
+                                stateIt != model.stateBySymbol.end())
+                            {
+                                noteStateAnchor(stateAnchor, stateIt->second);
+                            }
+                        }
+                        continue;
+                    }
+                    if (!isWritePortKind(op.kind()))
+                    {
+                        continue;
+                    }
+                    if (const auto writeIt = model.writeByOp.find(opId); writeIt != model.writeByOp.end())
+                    {
+                        if (const auto stateIt = model.stateBySymbol.find(writeIt->second.symbol);
+                            stateIt != model.stateBySymbol.end())
+                        {
+                            noteStateAnchor(stateAnchor, stateIt->second);
+                        }
+                    }
+                }
+                stateAnchorBySupernode[supernodeId] = stateAnchor;
+            }
+
+            std::size_t readSequence = 0;
             for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
             {
                 const ScheduleBatch &batch = scheduleBatches[batchIndex];
@@ -1820,28 +2296,31 @@ namespace wolvrix::lib::emit
                     {
                         continue;
                     }
+                    const std::size_t stateAnchor = stateAnchorBySupernode[supernodeId];
                     for (const OperationId opId : supernodeToOps[supernodeId])
                     {
                         const Operation op = graph.getOperation(opId);
-                        auto touchValue = [&](ValueId valueId) {
-                            auto it = hotnessByValue.find(valueId);
-                            if (it == hotnessByValue.end())
+                        auto noteRead = [&](ValueId valueId) {
+                            auto it = orderByValue.find(valueId);
+                            if (it == orderByValue.end())
                             {
                                 return;
                             }
-                            if (it->second.firstBatch == kInvalidIndex)
+                            if (it->second.firstReadSequence == kInvalidIndex)
                             {
-                                it->second.firstBatch = batchIndex;
+                                it->second.firstReadSequence = readSequence++;
                             }
-                            ++it->second.totalTouches;
+                            if (stateAnchor != kInvalidIndex)
+                            {
+                                it->second.stateAnchor = it->second.stateAnchor == kInvalidIndex
+                                                            ? stateAnchor
+                                                            : std::max(it->second.stateAnchor, stateAnchor);
+                            }
+                            ++it->second.totalReads;
                         };
                         for (ValueId operand : op.operands())
                         {
-                            touchValue(operand);
-                        }
-                        for (ValueId result : op.results())
-                        {
-                            touchValue(result);
+                            noteRead(operand);
                         }
                     }
                 }
@@ -1849,7 +2328,7 @@ namespace wolvrix::lib::emit
 
             std::vector<ValueId> orderedValues;
             orderedValues.reserve(model.materializedValues.size());
-            for (const auto &[valueId, _] : hotnessByValue)
+            for (const auto &[valueId, _] : orderByValue)
             {
                 (void)_;
                 orderedValues.push_back(valueId);
@@ -1859,15 +2338,27 @@ namespace wolvrix::lib::emit
                       orderedValues.end(),
                       [&](ValueId lhs, ValueId rhs)
                       {
-                          const ValueHotness &lhsInfo = hotnessByValue.at(lhs);
-                          const ValueHotness &rhsInfo = hotnessByValue.at(rhs);
-                          if (lhsInfo.firstBatch != rhsInfo.firstBatch)
+                          const ValueReadOrder &lhsInfo = orderByValue.at(lhs);
+                          const ValueReadOrder &rhsInfo = orderByValue.at(rhs);
+                          if (lhsInfo.stateAnchor != rhsInfo.stateAnchor)
                           {
-                              return lhsInfo.firstBatch < rhsInfo.firstBatch;
+                              if (lhsInfo.stateAnchor == kInvalidIndex)
+                              {
+                                  return false;
+                              }
+                              if (rhsInfo.stateAnchor == kInvalidIndex)
+                              {
+                                  return true;
+                              }
+                              return lhsInfo.stateAnchor > rhsInfo.stateAnchor;
                           }
-                          if (lhsInfo.totalTouches != rhsInfo.totalTouches)
+                          if (lhsInfo.firstReadSequence != rhsInfo.firstReadSequence)
                           {
-                              return lhsInfo.totalTouches > rhsInfo.totalTouches;
+                              return lhsInfo.firstReadSequence < rhsInfo.firstReadSequence;
+                          }
+                          if (lhsInfo.totalReads != rhsInfo.totalReads)
+                          {
+                              return lhsInfo.totalReads > rhsInfo.totalReads;
                           }
                           return lhsInfo.graphOrder < rhsInfo.graphOrder;
                       });
@@ -1972,6 +2463,40 @@ namespace wolvrix::lib::emit
             return sizeof(std::uint64_t);
         }
 
+        std::size_t valuePackedScalarSlotByteSize(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+            case ValueSlotScalarKind::kU8:
+            case ValueSlotScalarKind::kU16:
+            case ValueSlotScalarKind::kU32:
+                return sizeof(std::uint32_t);
+            case ValueSlotScalarKind::kU64:
+                return sizeof(std::uint64_t);
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return sizeof(std::uint64_t);
+        }
+
+        std::size_t valuePackedScalarSlotAlignment(ValueSlotScalarKind kind)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+            case ValueSlotScalarKind::kU8:
+            case ValueSlotScalarKind::kU16:
+            case ValueSlotScalarKind::kU32:
+                return alignof(std::uint32_t);
+            case ValueSlotScalarKind::kU64:
+                return alignof(std::uint64_t);
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return alignof(std::uint64_t);
+        }
+
         std::size_t alignTo(std::size_t offset, std::size_t alignment)
         {
             if (alignment <= 1)
@@ -2054,12 +2579,80 @@ namespace wolvrix::lib::emit
 
         std::string valueScalarIndexedRefExpr(ValueSlotScalarKind kind, std::string_view slotIndexExpr)
         {
-            return "(*" + valueScalarSlotPtrFieldName(kind) + "[" + std::string(slotIndexExpr) + "])";
+            return valueScalarStorageRefExpr(kind, slotIndexExpr);
         }
 
         std::string valueScalarRefExpr(ValueSlotScalarKind kind, std::string_view slotIndexExpr)
         {
             return valueScalarIndexedRefExpr(kind, slotIndexExpr);
+        }
+
+        std::string packedScalarStorageRefExpr(std::string_view storageExpr,
+                                               ValueSlotScalarKind kind,
+                                               std::string_view offsetExpr)
+        {
+            return packedScalarStorageDirectRefExpr(storageExpr, kind, offsetExpr);
+        }
+
+        std::string packedScalarStorageDirectRefExpr(std::string_view storageExpr,
+                                                     ValueSlotScalarKind kind,
+                                                     std::string_view offsetExpr)
+        {
+            switch (kind)
+            {
+            case ValueSlotScalarKind::kBool:
+            case ValueSlotScalarKind::kU8:
+                return "grhsim_value_storage_ref<std::uint8_t>(" + std::string(storageExpr) + ", " +
+                       std::string(offsetExpr) + ")";
+            case ValueSlotScalarKind::kU16:
+                return "grhsim_value_storage_ref<std::uint16_t>(" + std::string(storageExpr) + ", " +
+                       std::string(offsetExpr) + ")";
+            case ValueSlotScalarKind::kU32:
+                return "grhsim_value_storage_ref<std::uint32_t>(" + std::string(storageExpr) + ", " +
+                       std::string(offsetExpr) + ")";
+            case ValueSlotScalarKind::kU64:
+                return "grhsim_value_storage_ref<std::uint64_t>(" + std::string(storageExpr) + ", " +
+                       std::string(offsetExpr) + ")";
+            case ValueSlotScalarKind::kCount:
+                break;
+            }
+            return "grhsim_value_storage_ref<std::uint64_t>(" + std::string(storageExpr) + ", " +
+                   std::string(offsetExpr) + ")";
+        }
+
+        std::string packedWideStorageRefExpr(std::string_view storageExpr,
+                                             std::size_t wordCount,
+                                             std::string_view offsetExpr)
+        {
+            return packedWideStorageDirectRefExpr(storageExpr, wordCount, offsetExpr);
+        }
+
+        std::string packedWideStorageDirectRefExpr(std::string_view storageExpr,
+                                                   std::size_t wordCount,
+                                                   std::string_view offsetExpr)
+        {
+            return "grhsim_value_storage_ref<" + fixedArrayType("std::uint64_t", wordCount) + ">(" +
+                   std::string(storageExpr) + ", " + std::string(offsetExpr) + ")";
+        }
+
+        std::string valueScalarStorageRefExpr(ValueSlotScalarKind kind, std::string_view offsetExpr)
+        {
+            return packedScalarStorageRefExpr("value_logic_storage_", kind, offsetExpr);
+        }
+
+        std::string valueWideStorageRefExpr(std::size_t wordCount, std::string_view offsetExpr)
+        {
+            return packedWideStorageRefExpr("value_logic_storage_", wordCount, offsetExpr);
+        }
+
+        std::string stateScalarStorageRefExpr(ValueSlotScalarKind kind, std::string_view offsetExpr)
+        {
+            return packedScalarStorageRefExpr("value_logic_storage_", kind, offsetExpr);
+        }
+
+        std::string stateWideStorageRefExpr(std::size_t wordCount, std::string_view offsetExpr)
+        {
+            return packedWideStorageRefExpr("value_logic_storage_", wordCount, offsetExpr);
         }
 
         std::string logicSlotRefExpr(std::string_view scalarPrefix,
@@ -2230,34 +2823,223 @@ namespace wolvrix::lib::emit
             return "state_" + sanitizeIdentifier(symbol) + "_" + std::to_string(uniqueIndex) + "_";
         }
 
-        std::string stateLogicScalarSlotPtrFieldName(ValueSlotScalarKind kind)
-        {
-            switch (kind)
-            {
-            case ValueSlotScalarKind::kBool:
-                return "state_logic_bool_slot_ptrs_";
-            case ValueSlotScalarKind::kU8:
-                return "state_logic_u8_slot_ptrs_";
-            case ValueSlotScalarKind::kU16:
-                return "state_logic_u16_slot_ptrs_";
-            case ValueSlotScalarKind::kU32:
-                return "state_logic_u32_slot_ptrs_";
-            case ValueSlotScalarKind::kU64:
-                return "state_logic_u64_slot_ptrs_";
-            case ValueSlotScalarKind::kCount:
-                break;
-            }
-            return "state_logic_unknown_slot_ptrs_";
-        }
-
         std::string stateLogicScalarIndexedRefExpr(ValueSlotScalarKind kind, std::string_view slotIndexExpr)
         {
-            return "(*" + stateLogicScalarSlotPtrFieldName(kind) + "[" + std::string(slotIndexExpr) + "])";
+            return stateScalarStorageRefExpr(kind, slotIndexExpr);
         }
 
         std::string stateRef(const StateDecl &state)
         {
-            return state.fieldName;
+            if (state.kind == StateDecl::Kind::Memory)
+            {
+                return state.fieldName;
+            }
+            if (isWideLogicWidth(state.width))
+            {
+                return stateWideStorageRefExpr(state.wordCount, std::to_string(state.slotIndex));
+            }
+            return stateScalarStorageRefExpr(state.scalarKind, std::to_string(state.slotIndex));
+        }
+
+        std::string resolvedStateRefExpr(const StateDecl &state,
+                                         const SupernodeLocalExprContext *context = nullptr)
+        {
+            if (context != nullptr)
+            {
+                const auto it = context->stateRefBySymbol.find(state.symbol);
+                if (it != context->stateRefBySymbol.end())
+                {
+                    return it->second;
+                }
+            }
+            return stateRef(state);
+        }
+
+        struct SupernodeStorageRefAliasDecl
+        {
+            std::string aliasName;
+            std::string initExpr;
+            std::optional<ValueId> value;
+            std::string stateSymbol;
+            std::size_t firstTouchOrder = kInvalidIndex;
+        };
+
+        std::vector<SupernodeStorageRefAliasDecl>
+        collectSupernodeStorageRefAliases(const Graph &graph,
+                                          const EmitModel &model,
+                                          std::span<const OperationId> supernodeOps,
+                                          ScheduleBatch::Phase phase)
+        {
+            struct TouchInfo
+            {
+                std::size_t count = 0;
+                std::size_t firstTouchOrder = kInvalidIndex;
+            };
+
+            std::unordered_map<ValueId, TouchInfo, ValueIdHash> valueTouches;
+            std::unordered_map<std::string, TouchInfo> stateTouches;
+            std::size_t nextTouchOrder = 0;
+
+            const auto noteValue = [&](ValueId value, std::size_t weight = 1) {
+                if (!model.valueScalarSlotByValue.contains(value) && !model.valueWideSlotByValue.contains(value))
+                {
+                    return;
+                }
+                TouchInfo &touch = valueTouches[value];
+                if (touch.firstTouchOrder == kInvalidIndex)
+                {
+                    touch.firstTouchOrder = nextTouchOrder++;
+                }
+                touch.count += weight;
+            };
+            const auto noteState = [&](const StateDecl &state, std::size_t weight = 1) {
+                if (state.kind == StateDecl::Kind::Memory)
+                {
+                    return;
+                }
+                TouchInfo &touch = stateTouches[state.symbol];
+                if (touch.firstTouchOrder == kInvalidIndex)
+                {
+                    touch.firstTouchOrder = nextTouchOrder++;
+                }
+                touch.count += weight;
+            };
+
+            for (const OperationId opId : supernodeOps)
+            {
+                const Operation op = graph.getOperation(opId);
+                const bool commitPhaseOp = isCommitPhaseOp(op);
+                if ((phase == ScheduleBatch::Phase::kCompute && commitPhaseOp) ||
+                    (phase == ScheduleBatch::Phase::kCommit && !commitPhaseOp))
+                {
+                    continue;
+                }
+
+                for (ValueId operand : op.operands())
+                {
+                    noteValue(operand);
+                }
+                for (ValueId result : op.results())
+                {
+                    noteValue(result, valueNeedsTrackedChange(model, result) ? 3u : 1u);
+                }
+
+                if (op.kind() == OperationKind::kRegisterReadPort || op.kind() == OperationKind::kLatchReadPort)
+                {
+                    const std::string attrName =
+                        op.kind() == OperationKind::kRegisterReadPort ? "regSymbol" : "latchSymbol";
+                    if (const auto symbol = getAttribute<std::string>(op, attrName))
+                    {
+                        const auto stateIt = model.stateBySymbol.find(*symbol);
+                        if (stateIt != model.stateBySymbol.end())
+                        {
+                            noteState(stateIt->second, 2u);
+                        }
+                    }
+                    continue;
+                }
+
+                if (!isWritePortKind(op.kind()))
+                {
+                    continue;
+                }
+                const auto writeIt = model.writeByOp.find(opId);
+                if (writeIt == model.writeByOp.end())
+                {
+                    continue;
+                }
+                const auto stateIt = model.stateBySymbol.find(writeIt->second.symbol);
+                if (stateIt != model.stateBySymbol.end())
+                {
+                    noteState(stateIt->second, 3u);
+                }
+            }
+
+            std::vector<SupernodeStorageRefAliasDecl> aliases;
+            aliases.reserve(valueTouches.size() + stateTouches.size());
+            for (const auto &[value, touch] : valueTouches)
+            {
+                if (touch.count < 2)
+                {
+                    continue;
+                }
+                if (const auto scalarIt = model.valueScalarSlotByValue.find(value);
+                    scalarIt != model.valueScalarSlotByValue.end())
+                {
+                    aliases.push_back(SupernodeStorageRefAliasDecl{
+                        .aliasName = "grhsim_value_slot_" + std::to_string(scalarIt->second.slotIndex),
+                        .initExpr = packedScalarStorageDirectRefExpr("value_logic_storage_",
+                                                                     scalarIt->second.kind,
+                                                                     std::to_string(scalarIt->second.slotIndex)),
+                        .value = value,
+                        .stateSymbol = {},
+                        .firstTouchOrder = touch.firstTouchOrder,
+                    });
+                    continue;
+                }
+                if (const auto wideIt = model.valueWideSlotByValue.find(value);
+                    wideIt != model.valueWideSlotByValue.end())
+                {
+                    aliases.push_back(SupernodeStorageRefAliasDecl{
+                        .aliasName = "grhsim_value_slot_" + std::to_string(wideIt->second.slotIndex),
+                        .initExpr = packedWideStorageDirectRefExpr("value_logic_storage_",
+                                                                   wideIt->second.wordCount,
+                                                                   std::to_string(wideIt->second.slotIndex)),
+                        .value = value,
+                        .stateSymbol = {},
+                        .firstTouchOrder = touch.firstTouchOrder,
+                    });
+                }
+            }
+            for (const auto &[symbol, touch] : stateTouches)
+            {
+                if (touch.count < 2)
+                {
+                    continue;
+                }
+                const auto stateIt = model.stateBySymbol.find(symbol);
+                if (stateIt == model.stateBySymbol.end() || stateIt->second.kind == StateDecl::Kind::Memory)
+                {
+                    continue;
+                }
+                aliases.push_back(SupernodeStorageRefAliasDecl{
+                    .aliasName = "grhsim_state_slot_" + std::to_string(stateIt->second.slotIndex),
+                    .initExpr = stateRef(stateIt->second),
+                    .value = std::nullopt,
+                    .stateSymbol = symbol,
+                    .firstTouchOrder = touch.firstTouchOrder,
+                });
+            }
+
+            std::sort(aliases.begin(),
+                      aliases.end(),
+                      [](const SupernodeStorageRefAliasDecl &lhs, const SupernodeStorageRefAliasDecl &rhs) {
+                          if (lhs.firstTouchOrder != rhs.firstTouchOrder)
+                          {
+                              return lhs.firstTouchOrder < rhs.firstTouchOrder;
+                          }
+                          return lhs.aliasName < rhs.aliasName;
+                      });
+            return aliases;
+        }
+
+        void emitSupernodeStorageRefAliases(std::ostream &stream,
+                                            const std::vector<SupernodeStorageRefAliasDecl> &aliases,
+                                            std::string_view indent,
+                                            SupernodeLocalExprContext &context)
+        {
+            for (const auto &alias : aliases)
+            {
+                stream << indent << "auto &" << alias.aliasName << " = " << alias.initExpr << ";\n";
+                if (alias.value.has_value())
+                {
+                    context.storedValueRefByValue.emplace(*alias.value, alias.aliasName);
+                }
+                if (!alias.stateSymbol.empty())
+                {
+                    context.stateRefBySymbol.emplace(alias.stateSymbol, alias.aliasName);
+                }
+            }
         }
 
         void emitChangedValuePropagation(std::ostream &stream,
@@ -3077,6 +3859,12 @@ namespace wolvrix::lib::emit
                         std::string &error)
         {
             (void)scheduleBatches;
+            model.stateBySymbol.clear();
+            model.stateOrder.clear();
+            model.stateFieldDecls.clear();
+            model.stateLogicScalarSlotCounts = {};
+            model.stateLogicWideSlotCountsByWords.clear();
+            std::size_t stateLogicStorageOffset = 0;
             auto registerInputEndpoint = [&](ValueId valueId, const std::string &fieldStem, const std::string &apiStem) {
                 if (model.inputFieldByValue.find(valueId) != model.inputFieldByValue.end())
                 {
@@ -3146,11 +3934,11 @@ namespace wolvrix::lib::emit
                                      ? StateDecl::Kind::Register
                                      : (op.kind() == OperationKind::kLatch ? StateDecl::Kind::Latch : StateDecl::Kind::Memory);
                     state.symbol = std::string(op.symbolText());
-                    state.fieldName = stateStorageFieldName(state.kind, state.symbol, opId.index);
                     state.width = static_cast<int32_t>(*width);
                     state.isSigned = *isSigned;
                     if (state.kind == StateDecl::Kind::Memory)
                     {
+                        state.fieldName = stateStorageFieldName(state.kind, state.symbol, opId.index);
                         auto row = getAttribute<int64_t>(op, "row");
                         if (!row || *row <= 0)
                         {
@@ -3188,13 +3976,19 @@ namespace wolvrix::lib::emit
                         if (isWideLogicWidth(state.width))
                         {
                             state.wordCount = logicWordCount(state.width);
-                            state.slotIndex = model.stateLogicWideSlotCountsByWords[state.wordCount]++;
+                            model.stateLogicWideSlotCountsByWords[state.wordCount]++;
+                            stateLogicStorageOffset = alignTo(stateLogicStorageOffset, alignof(std::uint64_t));
+                            state.slotIndex = stateLogicStorageOffset;
+                            stateLogicStorageOffset += state.wordCount * sizeof(std::uint64_t);
                         }
                         else
                         {
                             state.scalarKind = valueScalarSlotKindForWidth(state.width);
-                            state.slotIndex =
-                                model.stateLogicScalarSlotCounts[static_cast<std::size_t>(state.scalarKind)]++;
+                            model.stateLogicScalarSlotCounts[static_cast<std::size_t>(state.scalarKind)]++;
+                            stateLogicStorageOffset =
+                                alignTo(stateLogicStorageOffset, valuePackedScalarSlotAlignment(state.scalarKind));
+                            state.slotIndex = stateLogicStorageOffset;
+                            stateLogicStorageOffset += valuePackedScalarSlotByteSize(state.scalarKind);
                         }
                         if (auto initValue = getAttribute<std::string>(op, "initValue"))
                         {
@@ -3213,11 +4007,11 @@ namespace wolvrix::lib::emit
                             }
                         }
                     }
-                    const std::string stateInitExpr = state.kind == StateDecl::Kind::Memory
-                                                          ? (state.cppType + "{}")
-                                                          : defaultInitExprForLogicWidth(state.width);
-                    model.stateFieldDecls.push_back("    " + state.cppType + " " + state.fieldName + " = " +
-                                                    stateInitExpr + ";");
+                    if (state.kind == StateDecl::Kind::Memory)
+                    {
+                        model.stateFieldDecls.push_back("    " + state.cppType + " " + state.fieldName + " = " +
+                                                        state.cppType + "{};");
+                    }
                     model.stateOrder.push_back(state.symbol);
                     model.stateBySymbol.insert_or_assign(state.symbol, state);
                     break;
@@ -3257,7 +4051,7 @@ namespace wolvrix::lib::emit
                 }
             }
 
-            model.stateLogicStorageBytes = 0;
+            model.stateLogicStorageBytes = stateLogicStorageOffset;
             model.stateLogicScalarBaseOffsets = {};
             model.stateLogicWideBaseOffsetsByWords.clear();
 
@@ -3866,24 +4660,6 @@ namespace wolvrix::lib::emit
             return "/*missing_value_ref*/";
         }
 
-        enum class SupernodeLocalExprKind
-        {
-            kScalarInline,
-            kWideWords,
-        };
-
-        struct SupernodeLocalExpr
-        {
-            std::string expr;
-            SupernodeLocalExprKind kind = SupernodeLocalExprKind::kScalarInline;
-            int32_t width = 0;
-        };
-
-        struct SupernodeLocalExprContext
-        {
-            std::unordered_map<ValueId, SupernodeLocalExpr, ValueIdHash> byValue;
-        };
-
         const SupernodeLocalExpr *findSupernodeLocalExpr(const SupernodeLocalExprContext *context,
                                                          ValueId value) noexcept
         {
@@ -3903,9 +4679,32 @@ namespace wolvrix::lib::emit
                                               ValueId value,
                                               const SupernodeLocalExprContext *context = nullptr)
         {
+            if (context != nullptr)
+            {
+                const auto storedIt = context->storedValueRefByValue.find(value);
+                if (storedIt != context->storedValueRefByValue.end())
+                {
+                    return storedIt->second;
+                }
+            }
             if (const auto *expr = findSupernodeLocalExpr(context, value); expr != nullptr)
             {
                 return "(" + expr->expr + ")";
+            }
+            return valueRef(model, value);
+        }
+
+        std::string resolvedStoredValueRefExpr(const EmitModel &model,
+                                               ValueId value,
+                                               const SupernodeLocalExprContext *context = nullptr)
+        {
+            if (context != nullptr)
+            {
+                const auto it = context->storedValueRefByValue.find(value);
+                if (it != context->storedValueRefByValue.end())
+                {
+                    return it->second;
+                }
             }
             return valueRef(model, value);
         }
@@ -5073,7 +5872,10 @@ namespace wolvrix::lib::emit
                     flushCurrent();
                 }
                 current.words.push_back(
-                    ScheduleBatch::Word{.activeFlagWordIndex = word.activeFlagWordIndex, .supernodeIds = word.supernodeIds});
+                    ScheduleBatch::Word{.activeFlagWordIndex = word.activeFlagWordIndex,
+                                        .estimatedLines = word.estimatedLines,
+                                        .opCount = word.opCount,
+                                        .supernodeIds = word.supernodeIds});
                 current.supernodeIds.insert(
                     current.supernodeIds.end(), word.supernodeIds.begin(), word.supernodeIds.end());
                 current.opCount += word.opCount;
@@ -5081,6 +5883,125 @@ namespace wolvrix::lib::emit
             }
             flushCurrent();
             return batches;
+        }
+
+        void appendSupernodePatternValueSignature(
+            std::ostringstream &out,
+            const Graph &graph,
+            ValueId value,
+            const std::unordered_map<ValueId, std::size_t, ValueIdHash> &localValueOrdinal)
+        {
+            const auto appendValueShape = [&]()
+            {
+                switch (graph.valueType(value))
+                {
+                case ValueType::Logic:
+                    out << "logic:" << graph.valueWidth(value) << ':' << (graph.valueSigned(value) ? 's' : 'u');
+                    break;
+                case ValueType::Real:
+                    out << "real";
+                    break;
+                case ValueType::String:
+                    out << "string";
+                    break;
+                }
+            };
+
+            appendValueShape();
+            if (const auto it = localValueOrdinal.find(value); it != localValueOrdinal.end())
+            {
+                out << "@local:" << it->second;
+                return;
+            }
+
+            const OperationId defOpId = graph.valueDef(value);
+            if (!defOpId.valid())
+            {
+                out << "@input";
+                return;
+            }
+
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() == OperationKind::kConstant)
+            {
+                out << "@const";
+                if (const auto literal = getAttribute<std::string>(defOp, "constValue"))
+                {
+                    out << ':' << *literal;
+                }
+                return;
+            }
+            if (isReadRootOpKind(defOp.kind()))
+            {
+                out << "@root:" << readRootText(graph, defOp);
+                return;
+            }
+            out << "@ext:" << toString(defOp.kind());
+        }
+
+        std::string buildSupernodePatternSignature(const Graph &graph,
+                                                   const ActivityScheduleValueFanout &valueFanout,
+                                                   const ActivityScheduleSupernodeToOps &supernodeToOps,
+                                                   uint32_t supernodeId)
+        {
+            if (supernodeId >= supernodeToOps.size())
+            {
+                return "invalid-supernode";
+            }
+
+            std::ostringstream out;
+            out << "ops=" << supernodeToOps[supernodeId].size();
+            std::unordered_map<ValueId, std::size_t, ValueIdHash> localValueOrdinal;
+            std::size_t nextLocalValueOrdinal = 0;
+            for (OperationId opId : supernodeToOps[supernodeId])
+            {
+                const Operation op = graph.getOperation(opId);
+                out << "|op:" << toString(op.kind());
+                out << ":in=" << op.operands().size();
+                for (ValueId operand : op.operands())
+                {
+                    out << '[';
+                    appendSupernodePatternValueSignature(out, graph, operand, localValueOrdinal);
+                    out << ']';
+                }
+                out << ":out=" << op.results().size();
+                for (ValueId result : op.results())
+                {
+                    const std::size_t fanout =
+                        result.valid() && result.index > 0u && (result.index - 1u) < valueFanout.size()
+                            ? valueFanout[result.index - 1u].size()
+                            : 0u;
+                    out << '[';
+                    switch (graph.valueType(result))
+                    {
+                    case ValueType::Logic:
+                        out << "logic:" << graph.valueWidth(result) << ':'
+                            << (graph.valueSigned(result) ? 's' : 'u');
+                        break;
+                    case ValueType::Real:
+                        out << "real";
+                        break;
+                    case ValueType::String:
+                        out << "string";
+                        break;
+                    }
+                    out << ":fanout=" << fanout;
+                    out << ']';
+                    localValueOrdinal.emplace(result, nextLocalValueOrdinal++);
+                }
+            }
+            return out.str();
+        }
+
+        void markRepeatedPatternScheduleBatches(const Graph &graph,
+                                                const EmitModel &model,
+                                                const ScheduleRefs &schedule,
+                                                std::vector<ScheduleBatch> &scheduleBatches)
+        {
+            (void)model;
+            (void)graph;
+            (void)schedule;
+            (void)scheduleBatches;
         }
 
         bool opNeedsWordLogicEmit(const Graph &graph, const Operation &op) noexcept
@@ -5280,9 +6201,10 @@ namespace wolvrix::lib::emit
                                           const Graph &graph,
                                           const EmitModel &model,
                                           ValueId resultValue,
-                                          const std::string &wordsExpr)
+                                          const std::string &wordsExpr,
+                                          const SupernodeLocalExprContext *context = nullptr)
         {
-            const std::string lhs = valueRef(model, resultValue);
+            const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             const int32_t resultWidth = graph.valueWidth(resultValue);
             const bool materialized = isMaterializedValue(model, resultValue);
             const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
@@ -5357,7 +6279,7 @@ namespace wolvrix::lib::emit
                 recordSupernodeLocalExprRef(graph, resultValue, lhs, SupernodeLocalExprKind::kWideWords, context);
                 return;
             }
-            emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, wordsExpr);
+            emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, wordsExpr, context);
         }
 
         void emitLogicAssignFromBoolExpr(std::ostream &stream,
@@ -5367,7 +6289,7 @@ namespace wolvrix::lib::emit
                                          const std::string &boolExpr,
                                          SupernodeLocalExprContext *context = nullptr)
         {
-            const std::string lhs = valueRef(model, resultValue);
+            const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             if (!isMaterializedValue(model, resultValue))
             {
                 if (tryRecordSupernodeInlineExpr(graph,
@@ -5411,7 +6333,7 @@ namespace wolvrix::lib::emit
                                            bool alreadyBoundedToResultWidth,
                                            SupernodeLocalExprContext *context = nullptr)
         {
-            const std::string lhs = valueRef(model, resultValue);
+            const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             const std::string cppType = cppTypeForValue(graph, resultValue);
             const std::string assignedExpr =
                 alreadyBoundedToResultWidth
@@ -5699,7 +6621,7 @@ namespace wolvrix::lib::emit
 
             const int32_t resultWidth = graph.valueWidth(resultValue);
             const std::size_t tempScopeId = resultValue.index;
-            const std::string lhs = valueRef(model, resultValue);
+            const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             const bool materialized = isMaterializedValue(model, resultValue);
             const bool needsActivation = valueNeedsChangeDetect(model, resultValue);
             const auto operands = op.operands();
@@ -7650,7 +8572,7 @@ namespace wolvrix::lib::emit
                    << truthyLogicValueExpr(graph, model, operands[0], context) << ", "
                    << stateShadowTouchedRef(shadow) << ", "
                    << stateShadowDataRef(shadow, state) << ", "
-                   << stateRef(state) << ", "
+                   << resolvedStateRefExpr(state, context) << ", "
                    << resolvedScheduleValueExpr(model, operands[1], context) << ", "
                    << resolvedScheduleValueExpr(model, operands[2], context) << ", "
                    << write.shadowIndex << "u);\n";
@@ -7703,7 +8625,7 @@ namespace wolvrix::lib::emit
             {
                 const std::string addrExpr = resolvedScheduleValueExpr(model, operands[1], context);
                 const MemoryRowAccessExpr rowAccess = memoryRowAccessExpr(graph, operands[1], addrExpr, state.rowCount);
-                const std::string rowRef = stateRef(state) + "[" + rowAccess.rowExpr + "]";
+                const std::string rowRef = resolvedStateRefExpr(state, context) + "[" + rowAccess.rowExpr + "]";
                 if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
                 {
                     stream << innerIndent << "// constant zero mask: no memory update\n";
@@ -7784,11 +8706,11 @@ namespace wolvrix::lib::emit
                 if (isWideLogicWidth(state.width))
                 {
                     stream << innerIndent << "const auto next_value = grhsim_merge_words_masked("
-                           << stateRef(state) << ", "
+                           << resolvedStateRefExpr(state, context) << ", "
                            << wordsExprForValue(graph, model, operands[1], state.width, context) << ", "
                            << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
                            << state.width << ");\n";
-                    stream << innerIndent << "if (grhsim_assign_words(" << stateRef(state)
+                    stream << innerIndent << "if (grhsim_assign_words(" << resolvedStateRefExpr(state, context)
                            << ", next_value, " << state.width << ")) {\n";
                     emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
@@ -7796,12 +8718,13 @@ namespace wolvrix::lib::emit
                 else
                 {
                     stream << innerIndent << "const auto next_value = static_cast<" << state.cppType
-                           << ">((" << stateRef(state) << " & ~" << resolvedScheduleValueExpr(model, operands[2], context)
+                           << ">((" << resolvedStateRefExpr(state, context) << " & ~"
+                           << resolvedScheduleValueExpr(model, operands[2], context)
                            << ") | (" << resolvedScheduleValueExpr(model, operands[1], context) << " & "
                            << resolvedScheduleValueExpr(model, operands[2], context)
                            << "));\n";
-                    stream << innerIndent << "if (" << stateRef(state) << " != next_value) {\n";
-                    stream << innerIndent << "    " << stateRef(state) << " = next_value;\n";
+                    stream << innerIndent << "if (" << resolvedStateRefExpr(state, context) << " != next_value) {\n";
+                    stream << innerIndent << "    " << resolvedStateRefExpr(state, context) << " = next_value;\n";
                     emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
                 }
@@ -7923,6 +8846,13 @@ namespace wolvrix::lib::emit
                 std::unordered_map<ScalarConcatPrefixCacheKey, std::string, ScalarConcatPrefixCacheKeyHash>
                     concatPrefixTemps;
                 SupernodeLocalExprContext localExprContext;
+                emitSupernodeStorageRefAliases(stream,
+                                               collectSupernodeStorageRefAliases(graph,
+                                                                                 model,
+                                                                                 schedule.supernodeToOps[supernodeId],
+                                                                                 batch.phase),
+                                               "            ",
+                                               localExprContext);
                 for (const auto &decl : concatPrefixCacheDecls)
                 {
                     concatPrefixTemps.emplace(decl.key, decl.tempName);
@@ -7953,7 +8883,8 @@ namespace wolvrix::lib::emit
                     {
                         const auto &decl = concatPrefixCacheDecls[nextConcatPrefixDecl];
                         stream << "            const auto " << decl.tempName << " = grhsim_cat_prefix("
-                               << valueRef(model, decl.key.lhs) << ", " << decl.key.lhsWidth << ", "
+                               << resolvedStoredValueRefExpr(model, decl.key.lhs, &localExprContext) << ", "
+                               << decl.key.lhsWidth << ", "
                                << decl.key.rhsWidth << ");\n";
                         ++nextConcatPrefixDecl;
                     }
@@ -8184,7 +9115,7 @@ namespace wolvrix::lib::emit
                         {
                             return emitError("unsupported constant emit", std::string(op.symbolText()));
                         }
-                        const std::string lhs = valueRef(model, resultValue);
+                        const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, &localExprContext);
                         const bool materialized = isMaterializedValue(model, resultValue);
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
                         if (!materialized)
@@ -8242,8 +9173,9 @@ namespace wolvrix::lib::emit
                         {
                             return emitError("storage read target missing", *targetSymbol);
                         }
-                        const std::string stateExpr = stateRef(stateIt->second);
-                        const std::string lhs = valueRef(model, op.results().front());
+                        const std::string stateExpr = resolvedStateRefExpr(stateIt->second, &localExprContext);
+                        const std::string lhs =
+                            resolvedStoredValueRefExpr(model, op.results().front(), &localExprContext);
                         const ValueId resultValue = op.results().front();
                         const bool materialized = isMaterializedValue(model, resultValue);
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
@@ -8269,7 +9201,8 @@ namespace wolvrix::lib::emit
                         emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                         if (isWideLogicValue(graph, op.results().front()))
                         {
-                            emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, stateExpr);
+                            emitLogicAssignFromWordsExpr(
+                                stream, graph, model, resultValue, stateExpr, &localExprContext);
                         }
                         else
                         {
@@ -8305,7 +9238,8 @@ namespace wolvrix::lib::emit
                         }
                         const StateDecl &state = stateIt->second;
                         const std::string stateExpr = stateRef(state);
-                        const std::string lhs = valueRef(model, op.results().front());
+                        const std::string lhs =
+                            resolvedStoredValueRefExpr(model, op.results().front(), &localExprContext);
                         const ValueId resultValue = op.results().front();
                         const bool materialized = isMaterializedValue(model, resultValue);
                         const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
@@ -8517,7 +9451,8 @@ namespace wolvrix::lib::emit
                                     return emitError("unsupported kSystemFunction fopen arity in grhsim-cpp emit",
                                                      std::string(op.symbolText()));
                                 }
-                                const std::string lhs = valueRef(model, resultValue);
+                                const std::string lhs =
+                                    resolvedStoredValueRefExpr(model, resultValue, &localExprContext);
                                 const std::string pathExpr =
                                     "grhsim_task_default_arg_text(" +
                                     systemTaskArgExpr(graph, model, operands[0], &localExprContext) + ")";
@@ -8556,7 +9491,8 @@ namespace wolvrix::lib::emit
                                     return emitError("unsupported kSystemFunction ferror arity in grhsim-cpp emit",
                                                      std::string(op.symbolText()));
                                 }
-                                const std::string lhs = valueRef(model, resultValue);
+                                const std::string lhs =
+                                    resolvedStoredValueRefExpr(model, resultValue, &localExprContext);
                                 emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
                                 stream << "            {\n";
                                 stream << "                const auto next_value = static_cast<"
@@ -8743,17 +9679,19 @@ namespace wolvrix::lib::emit
                         if (hasReturn)
                         {
                             const ValueId returnValue = op.results()[0];
+                            const std::string returnRef =
+                                resolvedStoredValueRefExpr(model, returnValue, &localExprContext);
                             stream << "                auto dpi_ret = " << sanitizeIdentifier(decl.symbol)
                                    << "(" << joinStrings(deferredArgs, ", ") << ");\n";
-                            stream << "                if (" << valueRef(model, returnValue) << " != dpi_ret) {\n";
+                            stream << "                if (" << returnRef << " != dpi_ret) {\n";
                             emitChangedValueEffects(stream,
                                                     model,
                                                     returnValue,
-                                                    valueRef(model, returnValue),
+                                                    returnRef,
                                                     "dpi_ret",
                                                     "                ",
                                                     &activationContext);
-                            stream << "                    " << valueRef(model, returnValue) << " = dpi_ret;\n";
+                            stream << "                    " << returnRef << " = dpi_ret;\n";
                             stream << "                }\n";
                             for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
                             {
@@ -8769,7 +9707,7 @@ namespace wolvrix::lib::emit
                                     const ValueId resultValue =
                                         op.results()[resultBase + static_cast<std::size_t>(outputIndex)];
                                     const std::string lhs =
-                                        valueRef(model, resultValue);
+                                        resolvedStoredValueRefExpr(model, resultValue, &localExprContext);
                                     stream << "                if (" << lhs << " != " << tempName << ") {\n";
                                     emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ", &activationContext);
                                     stream << "                    " << lhs << " = " << tempName << ";\n";
@@ -8794,7 +9732,7 @@ namespace wolvrix::lib::emit
                                     const ValueId resultValue =
                                         op.results()[resultBase + static_cast<std::size_t>(outputIndex)];
                                     const std::string lhs =
-                                        valueRef(model, resultValue);
+                                        resolvedStoredValueRefExpr(model, resultValue, &localExprContext);
                                     stream << "                if (" << lhs << " != " << tempName << ") {\n";
                                     emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ", &activationContext);
                                     stream << "                    " << lhs << " = " << tempName << ";\n";
@@ -8830,6 +9768,129 @@ namespace wolvrix::lib::emit
                 return std::nullopt;
             };
 
+            const auto emitSplitWordBody = [&](const ScheduleBatch::Word &word,
+                                               std::size_t wordChunkIndex) -> std::optional<std::string>
+            {
+                std::uint8_t dispatchMask = UINT8_C(0);
+                std::uint8_t clearMask = UINT8_C(0);
+                for (uint32_t supernodeId : word.supernodeIds)
+                {
+                    const std::size_t activeId =
+                        supernodeId < model.activeIdBySupernode.size() ? model.activeIdBySupernode[supernodeId]
+                                                                       : kInvalidIndex;
+                    if (activeId == kInvalidIndex)
+                    {
+                        continue;
+                    }
+                    const std::uint8_t bit = static_cast<std::uint8_t>(
+                        (UINT8_C(1) << (activeId % kActiveFlagBitsPerWord)));
+                    dispatchMask = static_cast<std::uint8_t>(dispatchMask | bit);
+                    if (batch.phase == ScheduleBatch::Phase::kCommit ||
+                        supernodeId >= model.supernodeHasCommitPart.size() ||
+                        model.supernodeHasCommitPart[supernodeId] == 0U)
+                    {
+                        clearMask = static_cast<std::uint8_t>(clearMask | bit);
+                    }
+                }
+                stream << "    \n";
+                stream << "        {\n";
+                stream << "            constexpr std::uint8_t dispatchMask = UINT8_C("
+                       << static_cast<unsigned>(dispatchMask) << ");\n";
+                stream << "            constexpr std::uint8_t clearMask = UINT8_C("
+                       << static_cast<unsigned>(clearMask) << ");\n";
+                stream << "            const std::uint8_t activeWordFlags = static_cast<std::uint8_t>(supernode_active_curr_["
+                       << word.activeFlagWordIndex << "u] & dispatchMask);\n";
+                stream << "            if (unlikely(activeWordFlags != UINT8_C(0))) {\n";
+                stream << "                supernode_active_curr_[" << word.activeFlagWordIndex
+                       << "u] = static_cast<std::uint8_t>(supernode_active_curr_["
+                       << word.activeFlagWordIndex << "u] & static_cast<std::uint8_t>(~clearMask));\n";
+                stream << "                ++stats.nonzeroActiveWords;\n";
+                stream << "                const std::size_t nonzeroActiveWordsBeforeSplit = stats.nonzeroActiveWords;\n";
+                stream << "                const std::uint8_t baseWordFlags = supernode_active_curr_["
+                       << word.activeFlagWordIndex << "u];\n";
+                stream << "                std::uint8_t deferredActiveWordFlags = UINT8_C(0);\n";
+                for (std::size_t chunkIndex = 0; chunkIndex < word.helperChunks.size(); ++chunkIndex)
+                {
+                    std::uint8_t chunkMask = UINT8_C(0);
+                    const auto &chunk = word.helperChunks[chunkIndex];
+                    for (std::size_t supernodeIndex = chunk.beginSupernodeIndex;
+                         supernodeIndex < chunk.endSupernodeIndex;
+                         ++supernodeIndex)
+                    {
+                        const uint32_t supernodeId = word.supernodeIds[supernodeIndex];
+                        const std::size_t activeId =
+                            supernodeId < model.activeIdBySupernode.size() ? model.activeIdBySupernode[supernodeId]
+                                                                           : kInvalidIndex;
+                        if (activeId == kInvalidIndex)
+                        {
+                            continue;
+                        }
+                        chunkMask = static_cast<std::uint8_t>(
+                            chunkMask | static_cast<std::uint8_t>(UINT8_C(1) << (activeId % kActiveFlagBitsPerWord)));
+                    }
+                    if (chunkMask == UINT8_C(0))
+                    {
+                        continue;
+                    }
+                    stream << "                if ((activeWordFlags & UINT8_C(" << static_cast<unsigned>(chunkMask)
+                           << ")) != UINT8_C(0)) {\n";
+                    stream << "                    supernode_active_curr_[" << word.activeFlagWordIndex
+                           << "u] = static_cast<std::uint8_t>(baseWordFlags | "
+                              "(deferredActiveWordFlags & static_cast<std::uint8_t>(~UINT8_C("
+                           << static_cast<unsigned>(chunkMask) << "))) | "
+                              "(activeWordFlags & UINT8_C("
+                           << static_cast<unsigned>(chunkMask) << ")));\n";
+                    stream << "                "
+                           << scheduleBatchWordChunkHelperName(batch.index, wordChunkIndex, chunkIndex)
+                           << "(stats);\n";
+                    stream << "                    deferredActiveWordFlags = static_cast<std::uint8_t>(supernode_active_curr_["
+                           << word.activeFlagWordIndex << "u] & dispatchMask);\n";
+                    stream << "                }\n";
+                }
+                stream << "                stats.nonzeroActiveWords = nonzeroActiveWordsBeforeSplit;\n";
+                stream << "                supernode_active_curr_[" << word.activeFlagWordIndex
+                       << "u] = static_cast<std::uint8_t>(baseWordFlags | deferredActiveWordFlags);\n";
+                stream << "            }\n";
+                stream << "        }\n";
+                return std::nullopt;
+            };
+
+            for (std::size_t wordChunkIndex = 0; wordChunkIndex < batch.words.size(); ++wordChunkIndex)
+            {
+                const auto &word = batch.words[wordChunkIndex];
+                if (!word.emitAsHelper)
+                {
+                    continue;
+                }
+                for (std::size_t chunkIndex = 0; chunkIndex < word.helperChunks.size(); ++chunkIndex)
+                {
+                    const auto &chunk = word.helperChunks[chunkIndex];
+                    ScheduleBatch::Word chunkWord = word;
+                    chunkWord.emitAsHelper = false;
+                    chunkWord.helperChunks.clear();
+                    chunkWord.supernodeIds.assign(
+                        word.supernodeIds.begin() + static_cast<std::ptrdiff_t>(chunk.beginSupernodeIndex),
+                        word.supernodeIds.begin() + static_cast<std::ptrdiff_t>(chunk.endSupernodeIndex));
+                    stream << "void " << className << "::"
+                           << scheduleBatchWordChunkHelperName(batch.index, wordChunkIndex, chunkIndex)
+                           << "(BatchEvalStats &stats)\n{\n";
+                    if (auto error = emitWordBody(chunkWord))
+                    {
+                        return error;
+                    }
+                    stream << "}\n\n";
+                }
+                stream << "void " << className << "::"
+                       << scheduleBatchWordHelperName(batch.index, wordChunkIndex)
+                       << "(BatchEvalStats &stats)\n{\n";
+                if (auto error = word.helperChunks.empty() ? emitWordBody(word)
+                                                           : emitSplitWordBody(word, wordChunkIndex))
+                {
+                    return error;
+                }
+                stream << "}\n\n";
+            }
+
             stream << className << "::BatchEvalStats " << className << "::eval_batch_" << batch.index << "()\n{\n";
             stream << "        BatchEvalStats stats{};\n";
             stream << "        stats.checkedFlagWords = " << batch.words.size() << "u;\n";
@@ -8838,6 +9899,11 @@ namespace wolvrix::lib::emit
             for (std::size_t wordChunkIndex = 0; wordChunkIndex < batch.words.size(); ++wordChunkIndex)
             {
                 const auto &word = batch.words[wordChunkIndex];
+                if (word.emitAsHelper)
+                {
+                    stream << "        " << scheduleBatchWordHelperName(batch.index, wordChunkIndex) << "(stats);\n";
+                    continue;
+                }
                 if (auto error = emitWordBody(word))
                 {
                     return error;
@@ -8985,12 +10051,10 @@ namespace wolvrix::lib::emit
         {
             scheduleBatches.push_back(ScheduleBatch{.index = 0});
         }
-        if (!model.materializedValues.empty())
-        {
-            std::vector<ValueId> batchHotValueOrder =
-                buildBatchHotValueOrder(graph, model, scheduleBatches, schedule.supernodeToOps);
-            rebuildMaterializedValueStorage(graph, batchHotValueOrder, model);
-        }
+        markRepeatedPatternScheduleBatches(graph, model, schedule, scheduleBatches);
+        std::vector<ValueId> batchReadLocalityValueOrder =
+            buildStateAnchoredValueOrder(graph, model, scheduleBatches, schedule.supernodeToOps);
+        rebuildMaterializedValueStorage(graph, batchReadLocalityValueOrder, model);
         if (waveformMode == WaveformMode::kDeclaredSymbols)
         {
             collectDeclaredSymbolWaveformSignals(graph, model, model.waveformSignals);
@@ -9040,6 +10104,7 @@ namespace wolvrix::lib::emit
             {
                 kPublicInputs,
                 kPublicOutputs,
+                kValueLogicStorage,
                 kValues,
                 kConstantValues,
                 kRandomSeed,
@@ -9254,6 +10319,10 @@ namespace wolvrix::lib::emit
         {
             if (model.valueFieldByValue.contains(valueId))
             {
+                if (graph.valueType(valueId) == ValueType::Logic)
+                {
+                    continue;
+                }
                 valueInitValues.push_back(valueId);
             }
         }
@@ -9292,6 +10361,10 @@ namespace wolvrix::lib::emit
         if (!graph.outputPorts().empty())
         {
             addFixedInitChunk(InitChunkSpec::Kind::kPublicOutputs);
+        }
+        if (model.valueLogicStorageBytes != 0)
+        {
+            addFixedInitChunk(InitChunkSpec::Kind::kValueLogicStorage);
         }
         if (!valueInitValues.empty())
         {
@@ -9831,6 +10904,31 @@ namespace wolvrix::lib::emit
             *stream << "    }\n";
             *stream << "    dst = src;\n";
             *stream << "    return true;\n";
+            *stream << "}\n\n";
+            *stream << "template <typename T, std::size_t N>\n";
+            *stream << "inline T &grhsim_value_storage_ref(std::array<std::byte, N> &storage, std::size_t offset)\n{\n";
+            *stream << "    return *reinterpret_cast<T *>(storage.data() + offset);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline std::uint8_t &grhsim_value_u8_ref(std::array<std::byte, N> &storage, std::size_t offset)\n{\n";
+            *stream << "    return grhsim_value_storage_ref<std::uint8_t>(storage, offset);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline std::uint16_t &grhsim_value_u16_ref(std::array<std::byte, N> &storage, std::size_t offset)\n{\n";
+            *stream << "    return grhsim_value_storage_ref<std::uint16_t>(storage, offset);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline std::uint32_t &grhsim_value_u32_ref(std::array<std::byte, N> &storage, std::size_t offset)\n{\n";
+            *stream << "    return grhsim_value_storage_ref<std::uint32_t>(storage, offset);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t N>\n";
+            *stream << "inline std::uint64_t &grhsim_value_u64_ref(std::array<std::byte, N> &storage, std::size_t offset)\n{\n";
+            *stream << "    return grhsim_value_storage_ref<std::uint64_t>(storage, offset);\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t Words, std::size_t N>\n";
+            *stream << "inline std::array<std::uint64_t, Words> &grhsim_value_words_ref(std::array<std::byte, N> &storage,\n";
+            *stream << "                                                                   std::size_t offset)\n{\n";
+            *stream << "    return grhsim_value_storage_ref<std::array<std::uint64_t, Words>>(storage, offset);\n";
             *stream << "}\n\n";
             *stream << "template <std::size_t N>\n";
             *stream << "inline std::array<std::uint64_t, N> grhsim_merge_words_masked(const std::array<std::uint64_t, N> &base,\n";
@@ -12073,6 +13171,24 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    BatchEvalStats eval_batch_" << batchIndex << "();\n";
             }
+            for (const auto &batch : scheduleBatches)
+            {
+                for (std::size_t wordIndex = 0; wordIndex < batch.words.size(); ++wordIndex)
+                {
+                    if (!batch.words[wordIndex].emitAsHelper)
+                    {
+                        continue;
+                    }
+                    *stream << "    void " << scheduleBatchWordHelperName(batch.index, wordIndex)
+                            << "(BatchEvalStats &stats);\n";
+                    for (std::size_t chunkIndex = 0; chunkIndex < batch.words[wordIndex].helperChunks.size(); ++chunkIndex)
+                    {
+                        *stream << "    void "
+                                << scheduleBatchWordChunkHelperName(batch.index, wordIndex, chunkIndex)
+                                << "(BatchEvalStats &stats);\n";
+                    }
+                }
+            }
             if (model.emitWaveform)
             {
                 for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
@@ -14159,8 +15275,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                             << ";\n";
                 }
                 break;
+            case InitChunkSpec::Kind::kValueLogicStorage:
+                *stream << "    // Reset packed combinational logic value storage.\n";
+                *stream << "    std::fill(value_logic_storage_.begin(), value_logic_storage_.end(), std::byte{});\n";
+                break;
             case InitChunkSpec::Kind::kValues:
-                *stream << "    // Initialize combinational value storage.\n";
+                *stream << "    // Initialize non-logic combinational value storage.\n";
                 for (ValueId valueId : chunk.values)
                 {
                     *stream << "    " << model.valueFieldByValue.at(valueId) << " = " << defaultInitExpr(graph, valueId)
