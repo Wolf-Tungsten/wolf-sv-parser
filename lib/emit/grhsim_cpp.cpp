@@ -1405,15 +1405,6 @@ namespace wolvrix::lib::emit
             const ActivityScheduleStateReadSupernodes &stateReadSupernodes;
         };
 
-        bool opHasReturnedEffectValue(const Operation &op)
-        {
-            if (!getAttribute<bool>(op, "hasReturn").value_or(false))
-            {
-                return false;
-            }
-            return op.kind() == OperationKind::kDpicCall || op.kind() == OperationKind::kSystemTask;
-        }
-
         bool isCommitPhaseOp(const Operation &op)
         {
             switch (op.kind())
@@ -1422,9 +1413,6 @@ namespace wolvrix::lib::emit
             case OperationKind::kLatchWritePort:
             case OperationKind::kMemoryWritePort:
                 return true;
-            case OperationKind::kSystemTask:
-            case OperationKind::kDpicCall:
-                return op.results().empty() && !opHasReturnedEffectValue(op);
             default:
                 return false;
             }

@@ -69,9 +69,6 @@ namespace
         case OperationKind::kLatchWritePort:
         case OperationKind::kMemoryWritePort:
             return true;
-        case OperationKind::kSystemTask:
-        case OperationKind::kDpicCall:
-            return op.results().empty();
         default:
             return false;
         }
@@ -266,7 +263,7 @@ int main()
         PassManager manager;
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(
-            ActivityScheduleOptions{.path = "top2", .supernodeMaxSize = 2, .enableReplication = false}));
+            ActivityScheduleOptions{.path = "top2", .supernodeMaxSize = 4, .enableReplication = false}));
 
         PassDiagnostics diags;
         const PassManagerResult runResult = manager.run(design, diags);
@@ -286,23 +283,23 @@ int main()
         }
         if (supernodeToOps->size() != 1)
         {
-            return fail("Expected output tail chain to become one tail supernode");
+            return fail("Expected pure output chain to become one coarsened compute supernode");
         }
         if (supernodeToOps->front().size() != 4)
         {
-            return fail("Expected tail supernode to absorb the full four-op output chain");
+            return fail("Expected coarsen to absorb the full four-op output chain");
         }
         if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1])
         {
-            return fail("Expected leading output-tail ops to share one supernode");
+            return fail("Expected leading output-chain ops to share one supernode");
         }
         if ((*opToSupernode)[op2.index - 1] != (*opToSupernode)[op3.index - 1])
         {
-            return fail("Expected trailing output-tail ops to share one supernode");
+            return fail("Expected trailing output-chain ops to share one supernode");
         }
         if ((*opToSupernode)[op1.index - 1] != (*opToSupernode)[op2.index - 1])
         {
-            return fail("Expected output-tail middle ops to remain in the same tail supernode");
+            return fail("Expected output-chain middle ops to remain in the same compute supernode");
         }
     }
 
@@ -490,9 +487,7 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "top4",
-            .supernodeMaxSize = 3,
-            .enableCoarsen = false,
-            .enableRefine = false,
+            .supernodeMaxSize = 4,
             .enableReplication = false,
         }));
 
@@ -514,16 +509,145 @@ int main()
         }
         if (supernodeToOps->size() != 1)
         {
-            return fail("Expected pure output tail chain to collapse into one tail supernode");
+            return fail("Expected pure output chain to collapse into one coarsened compute supernode");
         }
         if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1])
         {
-            return fail("Expected output-tail head ops to share the same tail supernode");
+            return fail("Expected output-chain head ops to share the same compute supernode");
         }
         if ((*opToSupernode)[op1.index - 1] != (*opToSupernode)[op2.index - 1] ||
             (*opToSupernode)[op2.index - 1] != (*opToSupernode)[op3.index - 1])
         {
-            return fail("Expected output-tail trailing ops to stay in the same tail supernode");
+            return fail("Expected output-chain trailing ops to stay in the same compute supernode");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top4b");
+        design.markAsTop("top4b");
+
+        const auto a = makeValue(graph, "a_top4b", 8, false);
+        graph.bindInputPort("a", a);
+
+        const auto v0 = makeValue(graph, "v0_top4b", 8, false);
+        const auto op0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kNot,
+                                               graph.internSymbol("top4b_op0"));
+        graph.addOperand(op0, a);
+        graph.addResult(op0, v0);
+
+        const auto y = makeValue(graph, "y_top4b", 8, false);
+        const auto op1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kNot,
+                                               graph.internSymbol("top4b_op1"));
+        graph.addOperand(op1, v0);
+        graph.addResult(op1, y);
+        graph.bindOutputPort("y", y);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top4b",
+            .supernodeMaxSize = 2,
+            .enableChainMerge = false,
+            .enableSiblingMerge = false,
+            .enableForwardMerge = true,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected guaranteed-change singleton merge to coarsen a kNot chain");
+        }
+
+        const std::string keyPrefix = "top4b.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected kNot-chain session outputs");
+        }
+        if (supernodeToOps->size() != 1 || supernodeToOps->front().size() != 2)
+        {
+            return fail("Expected guaranteed-change merge to collapse the two-op kNot chain");
+        }
+        if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1])
+        {
+            return fail("Expected both kNot ops to land in the same supernode");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top4c");
+        design.markAsTop("top4c");
+
+        const auto a = makeValue(graph, "a_top4c", 8, false);
+        graph.bindInputPort("a", a);
+
+        const auto v0 = makeValue(graph, "v0_top4c", 8, false);
+        const auto op0 = graph.createOperation(wolvrix::lib::grh::OperationKind::kNot,
+                                               graph.internSymbol("top4c_op0"));
+        graph.addOperand(op0, a);
+        graph.addResult(op0, v0);
+
+        const auto c1 = makeValue(graph, "c1_top4c", 8, false);
+        const auto c1Op = graph.createOperation(wolvrix::lib::grh::OperationKind::kConstant,
+                                                graph.internSymbol("top4c_const"));
+        graph.addResult(c1Op, c1);
+        graph.setAttr(c1Op, "constValue", std::string("8'h01"));
+
+        const auto y = makeValue(graph, "y_top4c", 8, false);
+        const auto op1 = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                               graph.internSymbol("top4c_op1"));
+        graph.addOperand(op1, v0);
+        graph.addOperand(op1, c1);
+        graph.addResult(op1, y);
+        graph.bindOutputPort("y", y);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top4c",
+            .supernodeMaxSize = 2,
+            .enableChainMerge = false,
+            .enableSiblingMerge = false,
+            .enableForwardMerge = true,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected guaranteed-change singleton merge to coarsen an add-const chain");
+        }
+
+        const std::string keyPrefix = "top4c.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected add-const-chain session outputs");
+        }
+        if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, op1) != 2)
+        {
+            return fail("Expected guaranteed-change merge to absorb add-const into its predecessor");
+        }
+        if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1])
+        {
+            return fail("Expected add-const chain to share one compute supernode");
+        }
+        if ((*opToSupernode)[c1Op.index - 1] == (*opToSupernode)[op1.index - 1])
+        {
+            return fail("Expected constant seed to remain outside the merged add-const compute supernode");
         }
     }
 
@@ -691,10 +815,8 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "top6",
-            .supernodeMaxSize = 1,
+            .supernodeMaxSize = 3,
             .maxSinkSupernodeOp = 1,
-            .enableCoarsen = false,
-            .enableRefine = false,
             .enableReplication = false,
         }));
 
@@ -702,7 +824,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected tail absorb activity-schedule pass to succeed");
+            return fail("Expected sink-fed compute chain activity-schedule pass to succeed");
         }
 
         const std::string keyPrefix = "top6.activity_schedule.";
@@ -712,20 +834,20 @@ int main()
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
         if (supernodeToOps == nullptr || opToSupernode == nullptr)
         {
-            return fail("Expected tail-partition session outputs");
+            return fail("Expected sink-fed chain session outputs");
         }
         if ((*opToSupernode)[op0.index - 1] != (*opToSupernode)[op1.index - 1] ||
             (*opToSupernode)[op1.index - 1] != (*opToSupernode)[op2.index - 1])
         {
-            return fail("Expected sink-fed tail chain to be absorbed into one tail supernode");
+            return fail("Expected sink-fed compute chain to coarsen into one supernode");
         }
         if ((*opToSupernode)[op2.index - 1] == (*opToSupernode)[write.index - 1])
         {
-            return fail("Expected sink op to remain separate from tail supernode");
+            return fail("Expected sink op to remain separate from the compute chain supernode");
         }
         if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, op2) != 3)
         {
-            return fail("Expected tail supernode to ignore normal size limits and keep the full chain");
+            return fail("Expected coarsen to keep the full three-op compute chain under the size limit");
         }
     }
 
@@ -920,7 +1042,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected shared-predecessor tail activity-schedule pass to succeed");
+            return fail("Expected shared-predecessor compute-chain activity-schedule pass to succeed");
         }
 
         const std::string keyPrefix = "top7.activity_schedule.";
@@ -930,15 +1052,15 @@ int main()
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
         if (supernodeToOps == nullptr || opToSupernode == nullptr)
         {
-            return fail("Expected shared-predecessor tail session outputs");
+            return fail("Expected shared-predecessor session outputs");
         }
         if ((*opToSupernode)[sharedOp.index - 1] == (*opToSupernode)[domOp.index - 1])
         {
-            return fail("Expected shared predecessor to stay outside the sink-fed tail supernode");
+            return fail("Expected shared predecessor to stay outside the sink-fed compute chain supernode");
         }
         if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, domOp) != 1)
         {
-            return fail("Expected sink-fed tail supernode to keep only the seed when predecessor is shared");
+            return fail("Expected shared predecessor fanout to prevent premature coarsen growth");
         }
     }
 
@@ -1005,8 +1127,6 @@ int main()
             .path = "top8",
             .supernodeMaxSize = 2,
             .maxSinkSupernodeOp = 1,
-            .enableCoarsen = false,
-            .enableRefine = false,
             .enableReplication = false,
         }));
 
@@ -1014,7 +1134,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected tail residual-successor pattern to avoid quotient cycles");
+            return fail("Expected mixed sink/output users to avoid quotient cycles under coarsen");
         }
 
         const std::string keyPrefix = "top8.activity_schedule.";
@@ -1111,10 +1231,8 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "top9",
-            .supernodeMaxSize = 1,
+            .supernodeMaxSize = 2,
             .maxSinkSupernodeOp = 1,
-            .enableCoarsen = false,
-            .enableRefine = false,
             .enableReplication = false,
         }));
 
@@ -1122,7 +1240,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected mixed-user tail seed pattern to create a new shared seed");
+            return fail("Expected mixed sink/output users to preserve a coarsenable shared seed");
         }
 
         const std::string keyPrefix = "top9.activity_schedule.";
@@ -1132,11 +1250,11 @@ int main()
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
         if (supernodeToOps == nullptr || opToSupernode == nullptr)
         {
-            return fail("Expected mixed-user tail session outputs");
+            return fail("Expected mixed-user coarsen session outputs");
         }
         if ((*opToSupernode)[preOp.index - 1] != (*opToSupernode)[seedOp.index - 1])
         {
-            return fail("Expected shared sink/output seed to absorb its exclusive predecessor");
+            return fail("Expected shared sink/output seed to absorb its exclusive predecessor during coarsen");
         }
         if ((*opToSupernode)[seedOp.index - 1] == (*opToSupernode)[residualOp.index - 1])
         {
@@ -1238,6 +1356,108 @@ int main()
 
     {
         wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top10b");
+        design.markAsTop("top10b");
+
+        const auto clk = makeValue(graph, "clk_top10b", 1, false);
+        const auto en = makeValue(graph, "en_top10b", 1, false);
+        const auto mask = makeValue(graph, "mask_top10b", 8, false);
+        const auto a = makeValue(graph, "a_top10b", 8, false);
+        const auto b = makeValue(graph, "b_top10b", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("mask", mask);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        const auto regDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegister,
+                                                   graph.internSymbol("q_top10b"));
+        graph.setAttr(regDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(regDecl, "isSigned", false);
+
+        const auto sumValue = makeValue(graph, "sum_top10b", 8, false);
+        const auto addOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                 graph.internSymbol("sum_top10b_op"));
+        graph.addOperand(addOp, a);
+        graph.addOperand(addOp, b);
+        graph.addResult(addOp, sumValue);
+        graph.bindOutputPort("y", sumValue);
+
+        const auto sysTask = graph.createOperation(wolvrix::lib::grh::OperationKind::kSystemTask,
+                                                   graph.internSymbol("display_top10b"));
+        graph.addOperand(sysTask, en);
+        graph.addOperand(sysTask, sumValue);
+        graph.setAttr(sysTask, "hasReturn", false);
+
+        const auto dpiCall = graph.createOperation(wolvrix::lib::grh::OperationKind::kDpicCall,
+                                                   graph.internSymbol("dpi_void_top10b"));
+        graph.addOperand(dpiCall, en);
+        graph.addOperand(dpiCall, sumValue);
+        graph.setAttr(dpiCall, "hasReturn", false);
+
+        const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kRegisterWritePort,
+                                                   graph.internSymbol("q_write_top10b"));
+        graph.addOperand(writeOp, en);
+        graph.addOperand(writeOp, sumValue);
+        graph.addOperand(writeOp, mask);
+        graph.addOperand(writeOp, clk);
+        graph.setAttr(writeOp, "regSymbol", std::string("q_top10b"));
+        graph.setAttr(writeOp, "eventEdge", std::vector<std::string>{"posedge"});
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top10b",
+            .supernodeMaxSize = 1,
+            .maxSinkSupernodeOp = 8,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected SystemTask/DpiCall compute-phase classification to succeed");
+        }
+
+        const std::string keyPrefix = "top10b.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr)
+        {
+            return fail("Expected SystemTask/DpiCall session outputs");
+        }
+
+        const uint32_t sysTaskSupernode = (*opToSupernode)[sysTask.index - 1];
+        const uint32_t dpiCallSupernode = (*opToSupernode)[dpiCall.index - 1];
+        const uint32_t writeSupernode = (*opToSupernode)[writeOp.index - 1];
+        if (sysTaskSupernode == writeSupernode || dpiCallSupernode == writeSupernode)
+        {
+            return fail("Expected SystemTask/DpiCall to stay out of sink-supernode classification");
+        }
+        for (const auto opId : (*supernodeToOps)[sysTaskSupernode])
+        {
+            if (isCommitPhaseOp(graph.getOperation(opId)))
+            {
+                return fail("Expected SystemTask supernode to stay in compute phase");
+            }
+        }
+        for (const auto opId : (*supernodeToOps)[dpiCallSupernode])
+        {
+            if (isCommitPhaseOp(graph.getOperation(opId)))
+            {
+                return fail("Expected DpiCall supernode to stay in compute phase");
+            }
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
         auto &graph = design.createGraph("top11");
         design.markAsTop("top11");
 
@@ -1294,10 +1514,8 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "top11",
-            .supernodeMaxSize = 1,
+            .supernodeMaxSize = 3,
             .maxSinkSupernodeOp = 1,
-            .enableCoarsen = false,
-            .enableRefine = false,
             .enableReplication = false,
         }));
 
@@ -1305,7 +1523,7 @@ int main()
         const PassManagerResult runResult = manager.run(design, diags);
         if (!runResult.success || diags.hasError())
         {
-            return fail("Expected shared predecessor to merge once all users collapse into one tail cluster");
+            return fail("Expected shared predecessor to merge once coarsen collapses the downstream chain");
         }
 
         const std::string keyPrefix = "top11.activity_schedule.";
@@ -1313,15 +1531,15 @@ int main()
             getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
         if (opToSupernode == nullptr)
         {
-            return fail("Expected shared-predecessor tail session outputs");
+            return fail("Expected shared-predecessor coarsen session outputs");
         }
         if ((*opToSupernode)[midOp.index - 1] != (*opToSupernode)[seedOp.index - 1])
         {
-            return fail("Expected single-user predecessor to join sink-fed tail cluster");
+            return fail("Expected single-user predecessor to join the coarsened downstream cluster");
         }
         if ((*opToSupernode)[sharedOp.index - 1] != (*opToSupernode)[seedOp.index - 1])
         {
-            return fail("Expected predecessor shared only inside one tail supernode to be absorbed");
+            return fail("Expected predecessor shared only inside one coarsened cluster to be absorbed");
         }
     }
 

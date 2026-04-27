@@ -9,8 +9,7 @@
 - 为缺失 symbol 的可分区 op 补内部 symbol
 - 冻结 graph
 - 先构造 `sink-supernode`
-- 再做一轮从 residual 尾部反向传播的 `tail-supernode` 激进合并
-- 构建 seed partition
+- 构建 `sink + residual singleton` seed partition
 - 做 coarsen
 - 做基于 `supernode-max-size` 的 DP 分段和可选 refine
 - 做 replication
@@ -40,7 +39,7 @@
 | `-enable-coarsen` | `true` | 是否执行 coarsen |
 | `-enable-chain-merge` | `true` | 是否启用 out1 / in1 chain merge |
 | `-enable-sibling-merge` | `true` | 是否启用 sibling merge |
-| `-enable-forward-merge` | `true` | 是否启用 forwarder merge |
+| `-enable-forward-merge` | `true` | 是否启用 change-coupled singleton merge，并保留 legacy alias/forwarder merge fallback |
 | `-enable-refine` | `true` | 是否在 DP 分段后做边界微调 |
 | `-refine-max-iter` | `4` | refine 迭代上限 |
 | `-enable-replication` | `true` | 是否执行 replication |
@@ -62,19 +61,50 @@
 
 ## 当前 special partition 语义
 
-截至 `2026-04-19`，`activity-schedule` 的 special partition 分两步：
+截至 `2026-04-27`，`activity-schedule` 的 special partition / seed 构造分两步：
 
 1. 先把 `sink op` 按 topo 顺序切成 `sink-supernode`
-2. 再把不在 `sink-supernode` 中的 residual op 按 reverse topo 扫描，构造 `tail-supernode`
+2. 再把不在 `sink-supernode` 中的 residual op 直接保留为 singleton seed，交给后续 `coarsen`
 
-这里的 `tail-supernode` 语义是：
+当前 `sink-supernode` 的语义是：
 
-- 如果某个 residual op 只服务一个已存在的 `tail-supernode`，则并入该 `tail-supernode`
-- 如果某个 residual op 没有 residual supernode 后继，或者同时服务多个 supernode，则它自己成为新的 seed
-- 这里的“多个 supernode”既包括多个 `tail-supernode`，也包括 `tail-supernode + sink-supernode`，或者多个 `sink-supernode`
-- graph output / 观察端口等非 op consumer 不计入 supernode consumer 集合
+- 只包含本地 state write：
+  - `kRegisterWritePort`
+  - `kLatchWritePort`
+  - `kMemoryWritePort`
+- `kSystemTask` / `kDpicCall` 不再进入 `sink-supernode`
 
-这一步不再使用 `sink-dom` 概念，也不再按“只服务某一个 op”做局部吸收；判定粒度已经提升为“只服务某一个 supernode”。
+也就是说，`activity-schedule` 当前不再构造 `tail-supernode`；residual 图的主聚合全部交给 `coarsen`。
+
+## 当前 `coarsen` 的 change-coupled 规则
+
+截至 `2026-04-27`，`enable-forward-merge` 已不再只表示“forwarder merge”。
+
+当前它会优先尝试把 singleton cluster 合并到某个前驱 cluster，但前提是：这个 op 的输出对该前驱输入是“输入一变，输出一定变”的关系。
+
+目前已经显式纳入的规则是：
+
+- `kNot`
+- `kAssign`，但只在结果位宽不小于输入位宽时成立，也就是不能靠截断吞掉输入变化
+- `kConcat`
+- `kReplicate` 的 data operand
+- `kAdd` / `kSub` / `kXor` / `kXnor`，但只在“唯一动态前驱 + 其余 operand 都是常量”的情况下成立
+
+当前明确不纳入这类 guaranteed-change merge 的 op 包括：
+
+- `kSliceStatic` / `kSliceDynamic`：输入变化可能落在未被观察的 slice 之外
+- `kMux`：变化可能发生在未选中的数据支路
+- `kEq` / `kNe` / 比较类 / reduction 类：多个不同输入可能映射到同一个输出
+- `kAnd` / `kOr` / `kMul` / shift 类：输入变化可能被 mask、折叠或截断掉
+
+如果 guaranteed-change 规则不命中，当前实现仍会保留一层 legacy alias/forwarder fallback，主要覆盖：
+
+- `kAssign`
+- `kConcat`
+- `kSliceStatic`
+- `kSliceDynamic`
+
+这意味着当前版本已经开始把 `coarsen` 往“同步变动驱动”的方向收敛，但还没有完全删掉旧的 forwarder 兼容路径。
 
 ## `supernode-max-size` 的真实含义
 
@@ -96,7 +126,6 @@
 补充说明：
 
 - 它不限制 `sink-supernode`
-- 它也不限制 `tail-supernode`
 - 因此最终 `supernode_to_ops[i].size()` 可能明显大于 `supernode-max-size`
 - 这仍然不等价于 emit 后文件大小上限；如果某些 op 自身的 C++ 展开非常大，仍可能生成很大的 `sched_*.cpp`
 
