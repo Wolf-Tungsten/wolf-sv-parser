@@ -8630,6 +8630,7 @@ namespace wolvrix::lib::emit
                         stream << "grhsim_assign_words(" << rowRef << ", "
                                << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
                                << state.width << ")) {\n";
+                        stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
                         emitReaderActivations(innerIndent + "    ");
                         stream << innerIndent << "}\n";
                     }
@@ -8646,6 +8647,7 @@ namespace wolvrix::lib::emit
                         }
                         stream << rowRef << " != next_value) {\n";
                         stream << innerIndent << "    " << rowRef << " = next_value;\n";
+                        stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
                         emitReaderActivations(innerIndent + "    ");
                         stream << innerIndent << "}\n";
                     }
@@ -8663,6 +8665,7 @@ namespace wolvrix::lib::emit
                                << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
                                << wordsExprForValue(graph, model, operands[3], state.width, context) << ", "
                                << state.width << ")) {\n";
+                        stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
                         emitReaderActivations(innerIndent + "    ");
                         stream << innerIndent << "}\n";
                     }
@@ -8684,6 +8687,7 @@ namespace wolvrix::lib::emit
                         }
                         stream << rowRef << " != merged) {\n";
                         stream << innerIndent << "    " << rowRef << " = merged;\n";
+                        stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
                         emitReaderActivations(innerIndent + "    ");
                         stream << innerIndent << "}\n";
                     }
@@ -8700,6 +8704,7 @@ namespace wolvrix::lib::emit
                            << state.width << ");\n";
                     stream << innerIndent << "if (grhsim_assign_words(" << resolvedStateRefExpr(state, context)
                            << ", next_value, " << state.width << ")) {\n";
+                    stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
                     emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
                 }
@@ -8713,6 +8718,7 @@ namespace wolvrix::lib::emit
                            << "));\n";
                     stream << innerIndent << "if (" << resolvedStateRefExpr(state, context) << " != next_value) {\n";
                     stream << innerIndent << "    " << resolvedStateRefExpr(state, context) << " = next_value;\n";
+                    stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
                     emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
                 }
@@ -9981,6 +9987,7 @@ namespace wolvrix::lib::emit
         const std::size_t schedBatchMaxEstimatedLines = parseScheduleBatchMaxEstimatedLines(options);
         const std::size_t schedBatchTargetCount = parseScheduleBatchTargetCount(options);
         const WaveformMode waveformMode = parseWaveformMode(options);
+        const PerfMode perfMode = parsePerfMode(options);
         const std::unordered_set<ValueId, ValueIdHash> waveformValueIds =
             waveformMode == WaveformMode::kDeclaredSymbols ? collectDeclaredSymbolWaveformValueIds(graph)
                                                            : std::unordered_set<ValueId, ValueIdHash>{};
@@ -10003,7 +10010,7 @@ namespace wolvrix::lib::emit
             return result;
         }
         model.emitWaveform = waveformMode != WaveformMode::kOff;
-        model.emitPerf = false;
+        model.emitPerf = perfMode != PerfMode::kOff;
         std::vector<ScheduleBatch> computeScheduleBatches =
             buildScheduleBatches(graph,
                                  model,
@@ -13124,6 +13131,18 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    void init();\n";
             *stream << "    void set_random_seed(std::uint64_t seed);\n";
             *stream << "    [[nodiscard]] bool had_register_write_conflict() const;\n";
+            *stream << "    struct PerfCounters {\n";
+            *stream << "        std::uint64_t evalCount = UINT64_C(0);\n";
+            *stream << "        std::uint64_t round1Count = UINT64_C(0);\n";
+            *stream << "        std::uint64_t round2Count = UINT64_C(0);\n";
+            *stream << "        std::uint64_t totalRoundCount = UINT64_C(0);\n";
+            *stream << "        std::uint64_t computeBatchExecCount = UINT64_C(0);\n";
+            *stream << "        std::uint64_t commitBatchExecCount = UINT64_C(0);\n";
+            *stream << "        std::uint64_t touchedStateShadowCount = UINT64_C(0);\n";
+            *stream << "        std::uint64_t touchedWriteCount = UINT64_C(0);\n";
+            *stream << "    };\n";
+            *stream << "    [[nodiscard]] PerfCounters perf_counters() const;\n";
+            *stream << "    void reset_perf_counters();\n";
             if (model.emitWaveform)
             {
                 *stream << "    void configure_waveform(bool enabled, std::string path = {});\n";
@@ -13434,6 +13453,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    std::uint64_t eval_invocation_count_ = UINT64_C(0);\n";
             }
+            *stream << "    PerfCounters perf_counters_{};\n";
             *stream << "    bool register_write_conflict_ = false;\n";
             *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
             *stream << "    std::uint64_t random_state_ = UINT64_C(0);\n";
@@ -13836,9 +13856,26 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 return result;
             }
             *stream << "#include \"" << headerPath.filename().string() << "\"\n";
+            *stream << "#include <cstdlib>\n";
             *stream << "#include <cstdio>\n\n";
             *stream << className << "::" << className << "()\n";
             *stream << "{\n";
+            if (model.emitPerf)
+            {
+                *stream << "    if (const char *traceEvalEvery = std::getenv(\"GRHSIM_TRACE_EVAL_EVERY\");\n";
+                *stream << "        traceEvalEvery != nullptr && traceEvalEvery[0] != '\\0') {\n";
+                *stream << "        char *end = nullptr;\n";
+                *stream << "        const unsigned long long parsed = std::strtoull(traceEvalEvery, &end, 10);\n";
+                *stream << "        if (end != traceEvalEvery && parsed != 0) {\n";
+                *stream << "            trace_eval_enabled_ = true;\n";
+                *stream << "            trace_eval_interval_ = static_cast<std::uint64_t>(parsed);\n";
+                *stream << "        }\n";
+                *stream << "    }\n";
+                *stream << "    if (const char *traceEval = std::getenv(\"GRHSIM_TRACE_EVAL\");\n";
+                *stream << "        traceEval != nullptr && traceEval[0] != '\\0' && traceEval[0] != '0') {\n";
+                *stream << "        trace_eval_enabled_ = true;\n";
+                *stream << "    }\n";
+            }
             if (model.eventEdgeSlotCount != 0)
             {
                 *stream << "    event_edge_slots_ = reinterpret_cast<grhsim_event_edge_kind *>(event_edge_storage_.data());\n";
@@ -13957,6 +13994,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "}\n\n";
             *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
             *stream << "    return register_write_conflict_;\n";
+            *stream << "}\n\n";
+            *stream << className << "::PerfCounters " << className << "::perf_counters() const\n{\n";
+            *stream << "    return perf_counters_;\n";
+            *stream << "}\n\n";
+            *stream << "void " << className << "::reset_perf_counters()\n{\n";
+            *stream << "    perf_counters_ = PerfCounters{};\n";
             *stream << "}\n\n";
             const bool useCommitBoolRange = modelUsesCommitScalarStateWriteKind(model, ValueSlotScalarKind::kBool);
             const bool useCommitU8Range = modelUsesCommitScalarStateWriteKind(model, ValueSlotScalarKind::kU8);
@@ -14336,7 +14379,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                             << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kBool, "entry.stateDataIndex")
                             << ";\n";
                     *stream << "                if (stateData != nextValue) {\n";
-                    *stream << "                    stateData = nextValue;\n";
+                *stream << "                    stateData = nextValue;\n";
+                    *stream << "                    ++perf_counters_.touchedStateShadowCount;\n";
                     *stream << "                    anyStateChanged = true;\n";
                     *stream << "                }\n";
                     *stream << "            }\n";
@@ -14358,6 +14402,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                        : static_cast<std::uint8_t>((stateData & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
                     *stream << "                        stateData = merged;\n";
+                    *stream << "                        ++perf_counters_.touchedStateShadowCount;\n";
                     *stream << "                        anyStateChanged = true;\n";
                     *stream << "                    }\n";
                     *stream << "                }\n";
@@ -14380,6 +14425,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                        : static_cast<std::uint16_t>((stateData & static_cast<std::uint16_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
                     *stream << "                        stateData = merged;\n";
+                    *stream << "                        ++perf_counters_.touchedStateShadowCount;\n";
                     *stream << "                        anyStateChanged = true;\n";
                     *stream << "                    }\n";
                     *stream << "                }\n";
@@ -14402,6 +14448,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                        : static_cast<std::uint32_t>((stateData & static_cast<std::uint32_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
                     *stream << "                        stateData = merged;\n";
+                    *stream << "                        ++perf_counters_.touchedStateShadowCount;\n";
                     *stream << "                        anyStateChanged = true;\n";
                     *stream << "                    }\n";
                     *stream << "                }\n";
@@ -14424,6 +14471,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                        : static_cast<std::uint64_t>((stateData & static_cast<std::uint64_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
                     *stream << "                        stateData = merged;\n";
+                    *stream << "                        ++perf_counters_.touchedStateShadowCount;\n";
                     *stream << "                        anyStateChanged = true;\n";
                     *stream << "                    }\n";
                     *stream << "                }\n";
@@ -14479,6 +14527,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        "
                         << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kBool, "stateDataIndex")
                         << " = nextValue;\n";
+                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -14525,6 +14574,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        stateData = merged;\n";
+                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -14571,6 +14621,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        stateData = merged;\n";
+                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -14617,6 +14668,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        stateData = merged;\n";
+                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -14663,6 +14715,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        stateData = merged;\n";
+                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -15416,6 +15469,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "    touched_state_shadow_flags_.fill(0);\n";
                     *stream << "    touched_state_shadow_count_ = 0;\n";
                 }
+                *stream << "    perf_counters_ = PerfCounters{};\n";
                 *stream << "    first_eval_ = true;\n";
                 *stream << "    register_write_conflict_ = false;\n";
                 break;
@@ -15466,6 +15520,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 const auto &shadow = model.stateShadows[shadowIndex];
                 *stream << "    case " << shadow.emitIndex << "u:\n";
                 *stream << "        if (" << stateShadowTouchedRef(shadow) << ") {\n";
+                *stream << "            ++perf_counters_.touchedStateShadowCount;\n";
                 emitCommitStateShadowBody(*stream, shadow, "            ");
                 *stream << "        }\n";
                 *stream << "        break;\n";
@@ -15505,6 +15560,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 const auto &write = model.writes[writeIndex];
                 *stream << "    case " << write.shadowIndex << "u:\n";
                 *stream << "        if (" << memoryWriteTouchedRef(write) << ") {\n";
+                *stream << "            ++perf_counters_.touchedWriteCount;\n";
                 emitCommitWriteBody(*stream, write, "            ");
                 *stream << "        }\n";
                 *stream << "        break;\n";
@@ -15631,14 +15687,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    };\n";
             *stream << "    // Seed this eval from first-eval full activation and changed external inputs.\n";
             *stream << "    const bool initial_eval = first_eval_;\n";
+            *stream << "    ++perf_counters_.evalCount;\n";
             if (model.emitPerf || model.emitWaveform)
             {
                 *stream << "    const std::uint64_t eval_id = ++eval_invocation_count_;\n";
             }
-            if (model.emitPerf)
-            {
-                *stream << "    std::uint64_t fixed_point_round_count = UINT64_C(0);\n";
-            }
+            *stream << "    std::uint64_t fixed_point_round_count = UINT64_C(0);\n";
             *stream << "    bool pending_eval_round = initial_eval;\n";
             *stream << "    register_write_conflict_ = false;\n";
             *stream << "    if (initial_eval) {\n";
@@ -15726,6 +15780,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    }\n";
                 *stream << "    while (pending_eval_round) {\n";
                 *stream << "        ++fixed_point_round_count;\n";
+                *stream << "        ++perf_counters_.totalRoundCount;\n";
+                *stream << "        if (fixed_point_round_count == UINT64_C(1)) {\n";
+                *stream << "            ++perf_counters_.round1Count;\n";
+                *stream << "        } else if (fixed_point_round_count == UINT64_C(2)) {\n";
+                *stream << "            ++perf_counters_.round2Count;\n";
+                *stream << "        }\n";
                 *stream << "        pending_eval_round = false;\n";
                 *stream << "        const auto round_begin_time =\n";
                 *stream << "            trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
@@ -15752,6 +15812,8 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        }\n";
                 *stream << "        round_touched_state_shadows = 0;\n";
                 *stream << "        round_touched_writes = 0;\n";
+                *stream << "        const auto round_touched_state_shadow_base = perf_counters_.touchedStateShadowCount;\n";
+                *stream << "        const auto round_touched_write_base = perf_counters_.touchedWriteCount;\n";
                 *stream << "        // Run all compute-phase supernodes whose activity bits are set.\n";
                 *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
                 *stream << "            ++round_checked_batches;\n";
@@ -15770,10 +15832,23 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                    : std::chrono::steady_clock::time_point{};\n";
                 *stream << "                batchStats = (this->*kBatchEvalFns[batchIndex])();\n";
                 *stream << "                if (trace_this_eval) {\n";
-                *stream << "                    round_batch_us += static_cast<std::uint64_t>(\n";
+                *stream << "                    const auto batch_elapsed_us = static_cast<std::uint64_t>(\n";
                 *stream << "                        std::chrono::duration_cast<std::chrono::microseconds>(\n";
                 *stream << "                            std::chrono::steady_clock::now() - batch_begin_time)\n";
                 *stream << "                            .count());\n";
+                *stream << "                    round_batch_us += batch_elapsed_us;\n";
+                *stream << "                    if (batchStats.nonzeroActiveWords != 0u) {\n";
+                *stream << "                        std::fprintf(stderr,\n";
+                *stream << "                                     \"[grhsim] eval batch #%llu.%llu phase=compute active_word=%zu batch=%zu checked_flag_words=%zu nonzero_active_words=%zu executed_supernodes=%zu elapsed_us=%llu\\n\",\n";
+                *stream << "                                     static_cast<unsigned long long>(eval_id),\n";
+                *stream << "                                     static_cast<unsigned long long>(fixed_point_round_count),\n";
+                *stream << "                                     activeWordIndex,\n";
+                *stream << "                                     batchIndex,\n";
+                *stream << "                                     batchStats.checkedFlagWords,\n";
+                *stream << "                                     batchStats.nonzeroActiveWords,\n";
+                *stream << "                                     batchStats.executedSupernodes,\n";
+                *stream << "                                     static_cast<unsigned long long>(batch_elapsed_us));\n";
+                *stream << "                    }\n";
                 *stream << "                }\n";
                 *stream << "                round_checked_flag_words += batchStats.checkedFlagWords;\n";
                 *stream << "                round_nonzero_active_words += batchStats.nonzeroActiveWords;\n";
@@ -15782,6 +15857,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                    ++round_skipped_batches;\n";
                 *stream << "                } else {\n";
                 *stream << "                    ++round_executed_batches;\n";
+                *stream << "                    ++perf_counters_.computeBatchExecCount;\n";
                 *stream << "                }\n";
                 *stream << "            }\n";
                 *stream << "        }\n";
@@ -15799,7 +15875,26 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                 batchOffset < kCommitActiveWordBatchOffsets[activeWordIndex + 1];\n";
                 *stream << "                 ++batchOffset) {\n";
                 *stream << "                const std::size_t batchIndex = kCommitActiveWordBatchIndices[batchOffset];\n";
+                *stream << "                const auto batch_begin_time = trace_this_eval\n";
+                *stream << "                    ? std::chrono::steady_clock::now()\n";
+                *stream << "                    : std::chrono::steady_clock::time_point{};\n";
                 *stream << "                const BatchEvalStats batchStats = (this->*kBatchEvalFns[batchIndex])();\n";
+                *stream << "                if (trace_this_eval && batchStats.nonzeroActiveWords != 0u) {\n";
+                *stream << "                    const auto batch_elapsed_us = static_cast<std::uint64_t>(\n";
+                *stream << "                        std::chrono::duration_cast<std::chrono::microseconds>(\n";
+                *stream << "                            std::chrono::steady_clock::now() - batch_begin_time)\n";
+                *stream << "                            .count());\n";
+                *stream << "                    std::fprintf(stderr,\n";
+                *stream << "                                 \"[grhsim] eval batch #%llu.%llu phase=commit active_word=%zu batch=%zu checked_flag_words=%zu nonzero_active_words=%zu executed_supernodes=%zu elapsed_us=%llu\\n\",\n";
+                *stream << "                                 static_cast<unsigned long long>(eval_id),\n";
+                *stream << "                                 static_cast<unsigned long long>(fixed_point_round_count),\n";
+                *stream << "                                 activeWordIndex,\n";
+                *stream << "                                 batchIndex,\n";
+                *stream << "                                 batchStats.checkedFlagWords,\n";
+                *stream << "                                 batchStats.nonzeroActiveWords,\n";
+                *stream << "                                 batchStats.executedSupernodes,\n";
+                *stream << "                                 static_cast<unsigned long long>(batch_elapsed_us));\n";
+                *stream << "                }\n";
                 *stream << "                round_checked_flag_words += batchStats.checkedFlagWords;\n";
                 *stream << "                round_nonzero_active_words += batchStats.nonzeroActiveWords;\n";
                 *stream << "                round_executed_supernodes += batchStats.executedSupernodes;\n";
@@ -15807,6 +15902,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                    ++round_skipped_batches;\n";
                 *stream << "                } else {\n";
                 *stream << "                    ++round_executed_batches;\n";
+                *stream << "                    ++perf_counters_.commitBatchExecCount;\n";
                 *stream << "                }\n";
                 *stream << "            }\n";
                 *stream << "        }\n";
@@ -15830,6 +15926,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                    .count());\n";
                     *stream << "        }\n";
                 }
+                *stream << "        round_touched_state_shadows = static_cast<std::size_t>(\n";
+                *stream << "            perf_counters_.touchedStateShadowCount - round_touched_state_shadow_base);\n";
+                *stream << "        round_touched_writes = static_cast<std::size_t>(\n";
+                *stream << "            perf_counters_.touchedWriteCount - round_touched_write_base);\n";
                 *stream << "        if (trace_this_eval) {\n";
                 *stream << "            total_checked_batches += round_checked_batches;\n";
                 *stream << "            total_skipped_batches += round_skipped_batches;\n";
@@ -15911,6 +16011,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             else
             {
                 *stream << "    while (pending_eval_round) {\n";
+                *stream << "        ++fixed_point_round_count;\n";
+                *stream << "        ++perf_counters_.totalRoundCount;\n";
+                *stream << "        if (fixed_point_round_count == UINT64_C(1)) {\n";
+                *stream << "            ++perf_counters_.round1Count;\n";
+                *stream << "        } else if (fixed_point_round_count == UINT64_C(2)) {\n";
+                *stream << "            ++perf_counters_.round2Count;\n";
+                *stream << "        }\n";
                 *stream << "        pending_eval_round = false;\n";
                 *stream << "        // Run compute-phase supernodes first.\n";
                 *stream << "        for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex) {\n";
@@ -15921,7 +16028,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                 batchOffset < kComputeActiveWordBatchOffsets[activeWordIndex + 1];\n";
                 *stream << "                 ++batchOffset) {\n";
                 *stream << "                const std::size_t batchIndex = kComputeActiveWordBatchIndices[batchOffset];\n";
-                *stream << "                (void)(this->*kBatchEvalFns[batchIndex])();\n";
+                *stream << "                const BatchEvalStats batchStats = (this->*kBatchEvalFns[batchIndex])();\n";
+                *stream << "                if (batchStats.nonzeroActiveWords != 0u) {\n";
+                *stream << "                    ++perf_counters_.computeBatchExecCount;\n";
+                *stream << "                }\n";
                 *stream << "            }\n";
                 *stream << "        }\n";
                 *stream << "        // Then commit sink supernodes using the activity accumulated by compute.\n";
@@ -15933,7 +16043,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                 batchOffset < kCommitActiveWordBatchOffsets[activeWordIndex + 1];\n";
                 *stream << "                 ++batchOffset) {\n";
                 *stream << "                const std::size_t batchIndex = kCommitActiveWordBatchIndices[batchOffset];\n";
-                *stream << "                (void)(this->*kBatchEvalFns[batchIndex])();\n";
+                *stream << "                const BatchEvalStats batchStats = (this->*kBatchEvalFns[batchIndex])();\n";
+                *stream << "                if (batchStats.nonzeroActiveWords != 0u) {\n";
+                *stream << "                    ++perf_counters_.commitBatchExecCount;\n";
+                *stream << "                }\n";
                 *stream << "            }\n";
                 *stream << "        }\n";
                 *stream << "        pending_eval_round = (grhsim_count_active_supernodes(supernode_active_curr_) != 0u);\n";

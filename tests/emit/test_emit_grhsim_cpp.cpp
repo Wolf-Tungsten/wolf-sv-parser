@@ -1914,7 +1914,7 @@ int main()
         eval.find("kCommitActiveWordBatchOffsets") == std::string::npos ||
         eval.find("kCommitActiveWordBatchIndices") == std::string::npos ||
         eval.find("for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex)") == std::string::npos ||
-        eval.find("(void)(this->*kBatchEvalFns[batchIndex])();") == std::string::npos ||
+        eval.find("const BatchEvalStats batchStats = (this->*kBatchEvalFns[batchIndex])();") == std::string::npos ||
         sched.find("BatchEvalStats GrhSIM_top::eval_batch_0()") == std::string::npos ||
         sched.find("stats.checkedFlagWords") == std::string::npos ||
         sched.find("supernode_active_curr_[") == std::string::npos)
@@ -3527,12 +3527,18 @@ int main()
         const std::string perfHeader = readFile(perfDir / "grhsim_top.hpp");
         const std::string perfState = readFile(perfDir / "grhsim_top_state.cpp");
         const std::string perfEval = readFile(perfDir / "grhsim_top_eval.cpp");
-        if (perfHeader.find("trace_eval_enabled_") != std::string::npos ||
-            perfState.find("GRHSIM_TRACE_EVAL") != std::string::npos ||
-            perfEval.find("trace_this_eval") != std::string::npos ||
-            perfEval.find("#include <chrono>") != std::string::npos)
+        if (perfHeader.find("struct PerfCounters") == std::string::npos ||
+            perfHeader.find("PerfCounters perf_counters() const") == std::string::npos ||
+            perfHeader.find("void reset_perf_counters()") == std::string::npos ||
+            perfHeader.find("PerfCounters perf_counters_{};") == std::string::npos ||
+            perfHeader.find("trace_eval_enabled_") == std::string::npos ||
+            perfState.find("GRHSIM_TRACE_EVAL") == std::string::npos ||
+            perfEval.find("trace_this_eval") == std::string::npos ||
+            perfEval.find("++perf_counters_.computeBatchExecCount;") == std::string::npos ||
+            perfEval.find("++perf_counters_.commitBatchExecCount;") == std::string::npos ||
+            perfEval.find("#include <chrono>") == std::string::npos)
         {
-            return fail("perf-enabled emit should not reintroduce eval tracing");
+            return fail("perf-enabled emit should include perf counters and eval tracing");
         }
 
         return 0;
