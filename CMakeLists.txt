@@ -128,6 +128,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/multidriven_guard.cpp
     lib/transform/blackbox_guard.cpp
     lib/transform/comb_lane_pack.cpp
+    lib/transform/scalar_memory_pack.cpp
     lib/transform/comb_loop_elim.cpp
     lib/transform/hier_flatten.cpp
     lib/transform/instance_inline.cpp
@@ -135,7 +136,6 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/latch_transparent_read.cpp
     lib/transform/slice_index_const.cpp
     lib/transform/strip_debug.cpp
-    lib/transform/hrbcut.cpp
     lib/transform/repcut.cpp
 )
 
@@ -447,6 +447,22 @@ target_compile_definitions(emit-grhsim-cpp
 
 register_test_exe(emit-grhsim-cpp)
 
+add_executable(emit-grhsim-cpp-memory-fill
+    tests/emit/test_emit_grhsim_cpp_memory_fill.cpp
+)
+
+target_link_libraries(emit-grhsim-cpp-memory-fill
+    PRIVATE
+        wolvrix-lib
+)
+
+target_compile_definitions(emit-grhsim-cpp-memory-fill
+    PRIVATE
+        WOLF_SV_EMIT_ARTIFACT_DIR="${EMIT_ARTIFACT_DIR}"
+)
+
+register_test_exe(emit-grhsim-cpp-memory-fill)
+
 add_executable(emit-verilator-repcut-package
     tests/emit/test_emit_verilator_repcut_package.cpp
 )
@@ -474,6 +490,17 @@ target_link_libraries(transform-pass-manager
 )
 
 register_test_exe(transform-pass-manager)
+
+add_executable(transform-dead-code-elim
+    tests/transform/test_dead_code_elim_pass.cpp
+)
+
+target_link_libraries(transform-dead-code-elim
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-dead-code-elim)
 
 add_executable(transform-simplify
     tests/transform/test_simplify_pass.cpp
@@ -586,6 +613,18 @@ target_link_libraries(transform-memory-read-retime
 )
 
 register_test_exe(transform-memory-read-retime)
+
+# transform: scalar-memory-pack
+add_executable(transform-scalar-memory-pack
+    tests/transform/test_scalar_memory_pack.cpp
+)
+
+target_link_libraries(transform-scalar-memory-pack
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-scalar-memory-pack)
 
 # transform: strip-debug
 add_executable(transform-strip-debug

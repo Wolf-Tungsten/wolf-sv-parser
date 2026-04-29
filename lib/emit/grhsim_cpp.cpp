@@ -1378,6 +1378,9 @@ namespace wolvrix::lib::emit
             case OperationKind::kMemoryWritePort:
                 eventStart = 4;
                 break;
+            case OperationKind::kMemoryFillPort:
+                eventStart = 2;
+                break;
             case OperationKind::kSystemTask:
             case OperationKind::kDpicCall:
                 eventStart = operands.size() >= info.edges.size() ? operands.size() - info.edges.size() : operands.size();
@@ -1542,6 +1545,7 @@ namespace wolvrix::lib::emit
             MemoryMaskMode memoryMaskMode = MemoryMaskMode::kDynamic;
             MemoryAddrMode memoryAddrMode = MemoryAddrMode::kGeneric;
             std::size_t memoryRowMask = 0;
+            bool isMemoryFill = false;
         };
 
         struct StateShadowDecl
@@ -3315,6 +3319,57 @@ namespace wolvrix::lib::emit
             return true;
         }
 
+        bool validateMemoryFillPort(const Graph &graph,
+                                    const Operation &op,
+                                    const StateDecl &state,
+                                    std::string &error)
+        {
+            const auto operands = op.operands();
+            const std::string opName = std::string(op.symbolText());
+            if (!op.results().empty())
+            {
+                error = "kMemoryFillPort must not have results: " + opName;
+                return false;
+            }
+            if (operands.size() < 3)
+            {
+                error = "kMemoryFillPort missing operands: " + opName;
+                return false;
+            }
+            if (!isValidLogicConditionValue(graph, operands[0]))
+            {
+                error = "kMemoryFillPort updateCond must be logic: " + opName;
+                return false;
+            }
+            if (graph.valueType(operands[1]) != ValueType::Logic || graph.valueWidth(operands[1]) != state.width)
+            {
+                error = "kMemoryFillPort data width/type mismatch: " + opName;
+                return false;
+            }
+            auto eventEdges = getAttribute<std::vector<std::string>>(op, "eventEdge");
+            if (!eventEdges)
+            {
+                error = "kMemoryFillPort missing eventEdge: " + opName;
+                return false;
+            }
+            const std::size_t eventCount = operands.size() - 2;
+            if (eventEdges->size() != eventCount)
+            {
+                error = "kMemoryFillPort eventEdge size mismatch: " + opName;
+                return false;
+            }
+            for (std::size_t i = 0; i < eventCount; ++i)
+            {
+                const ValueId eventValue = operands[2 + i];
+                if (graph.valueType(eventValue) != ValueType::Logic || graph.valueWidth(eventValue) != 1)
+                {
+                    error = "kMemoryFillPort event operand must be 1-bit logic: " + opName;
+                    return false;
+                }
+            }
+            return true;
+        }
+
         bool validateSystemTask(const Graph &graph,
                                 const Operation &op,
                                 std::string &error)
@@ -4168,13 +4223,15 @@ namespace wolvrix::lib::emit
                 }
                 if (op.kind() == OperationKind::kRegisterWritePort ||
                     op.kind() == OperationKind::kLatchWritePort ||
-                    op.kind() == OperationKind::kMemoryWritePort)
+                    op.kind() == OperationKind::kMemoryWritePort ||
+                    op.kind() == OperationKind::kMemoryFillPort)
                 {
                     WriteDecl write;
                     write.opId = opId;
                     write.kind = op.kind() == OperationKind::kRegisterWritePort
                                      ? StateDecl::Kind::Register
                                      : (op.kind() == OperationKind::kLatchWritePort ? StateDecl::Kind::Latch : StateDecl::Kind::Memory);
+                    write.isMemoryFill = op.kind() == OperationKind::kMemoryFillPort;
                     const char *symbolAttr = write.kind == StateDecl::Kind::Memory ? "memSymbol"
                                                                                     : (write.kind == StateDecl::Kind::Register ? "regSymbol" : "latchSymbol");
                     auto targetSymbol = getAttribute<std::string>(op, symbolAttr);
@@ -4206,39 +4263,50 @@ namespace wolvrix::lib::emit
                     {
                         if (state.kind != StateDecl::Kind::Memory)
                         {
-                            error = "kMemoryWritePort target is not a memory: " + write.symbol;
+                            error = std::string(write.isMemoryFill ? "kMemoryFillPort" : "kMemoryWritePort") +
+                                    " target is not a memory: " + write.symbol;
                             return false;
                         }
-                        if (!validateMemoryWritePort(graph, op, state, error))
+                        if (write.isMemoryFill)
                         {
-                            return false;
-                        }
-                        const auto operands = op.operands();
-                        const ValueId addrValue = operands[1];
-                        const ValueId maskValue = operands[3];
-                        if (isConstLogicAllZero(graph, maskValue, state.width))
-                        {
-                            write.memoryMaskMode = WriteDecl::MemoryMaskMode::kConstZero;
-                        }
-                        else if (isConstLogicAllOnes(graph, maskValue, state.width))
-                        {
-                            write.memoryMaskMode = WriteDecl::MemoryMaskMode::kConstAllOnes;
-                        }
-                        if (state.rowCount > 0)
-                        {
-                            const std::uint64_t rowCount = static_cast<std::uint64_t>(state.rowCount);
-                            if (isPowerOfTwoU64(rowCount))
+                            if (!validateMemoryFillPort(graph, op, state, error))
                             {
-                                write.memoryAddrMode = WriteDecl::MemoryAddrMode::kPow2Wrap;
-                                write.memoryRowMask = static_cast<std::size_t>(rowCount - 1u);
+                                return false;
                             }
-                            else
+                        }
+                        else if (!validateMemoryWritePort(graph, op, state, error))
+                        {
+                            return false;
+                        }
+                        if (!write.isMemoryFill)
+                        {
+                            const auto operands = op.operands();
+                            const ValueId addrValue = operands[1];
+                            const ValueId maskValue = operands[3];
+                            if (isConstLogicAllZero(graph, maskValue, state.width))
                             {
-                                const int32_t addrWidth = graph.valueWidth(addrValue);
-                                if (addrWidth > 0 && addrWidth < 64 &&
-                                    (UINT64_C(1) << static_cast<std::size_t>(addrWidth)) <= rowCount)
+                                write.memoryMaskMode = WriteDecl::MemoryMaskMode::kConstZero;
+                            }
+                            else if (isConstLogicAllOnes(graph, maskValue, state.width))
+                            {
+                                write.memoryMaskMode = WriteDecl::MemoryMaskMode::kConstAllOnes;
+                            }
+                            if (state.rowCount > 0)
+                            {
+                                const std::uint64_t rowCount = static_cast<std::uint64_t>(state.rowCount);
+                                if (isPowerOfTwoU64(rowCount))
                                 {
-                                    write.memoryAddrMode = WriteDecl::MemoryAddrMode::kInRange;
+                                    write.memoryAddrMode = WriteDecl::MemoryAddrMode::kPow2Wrap;
+                                    write.memoryRowMask = static_cast<std::size_t>(rowCount - 1u);
+                                }
+                                else
+                                {
+                                    const int32_t addrWidth = graph.valueWidth(addrValue);
+                                    if (addrWidth > 0 && addrWidth < 64 &&
+                                        (UINT64_C(1) << static_cast<std::size_t>(addrWidth)) <= rowCount)
+                                    {
+                                        write.memoryAddrMode = WriteDecl::MemoryAddrMode::kInRange;
+                                    }
                                 }
                             }
                         }
@@ -4312,6 +4380,7 @@ namespace wolvrix::lib::emit
                 case OperationKind::kRegisterWritePort:
                 case OperationKind::kLatchWritePort:
                 case OperationKind::kMemoryWritePort:
+                case OperationKind::kMemoryFillPort:
                 case OperationKind::kSystemTask:
                 case OperationKind::kDpicCall:
                     registerEventSamples(opId, op);
@@ -5638,7 +5707,11 @@ namespace wolvrix::lib::emit
             if (write.kind == StateDecl::Kind::Memory)
             {
                 total += 3;
-                if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
+                if (write.isMemoryFill)
+                {
+                    total += isWideLogicWidth(state.width) ? 6 : 8;
+                }
+                else if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
                 {
                     total += 1;
                 }
@@ -8000,6 +8073,7 @@ namespace wolvrix::lib::emit
             case OperationKind::kRegisterWritePort:
             case OperationKind::kLatchWritePort:
             case OperationKind::kMemoryWritePort:
+            case OperationKind::kMemoryFillPort:
                 return true;
             default:
                 return false;
@@ -8611,85 +8685,117 @@ namespace wolvrix::lib::emit
             stream << indent << "{\n";
             if (write.kind == StateDecl::Kind::Memory)
             {
-                const std::string addrExpr = resolvedScheduleValueExpr(model, operands[1], context);
-                const MemoryRowAccessExpr rowAccess = memoryRowAccessExpr(graph, operands[1], addrExpr, state.rowCount);
-                const std::string rowRef = resolvedStateRefExpr(state, context) + "[" + rowAccess.rowExpr + "]";
-                if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
+                if (write.isMemoryFill)
                 {
-                    stream << innerIndent << "// constant zero mask: no memory update\n";
-                }
-                else if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
-                {
+                    const std::string stateRef = resolvedStateRefExpr(state, context);
+                    stream << innerIndent << "bool any_row_changed = false;\n";
+                    stream << innerIndent << "for (std::size_t fill_row = 0; fill_row < " << state.rowCount
+                           << "u; ++fill_row) {\n";
                     if (isWideLogicWidth(state.width))
                     {
-                        stream << innerIndent << "if (";
-                        if (!rowAccess.alwaysInRange)
-                        {
-                            stream << rowAccess.inRangeExpr << " && ";
-                        }
-                        stream << "grhsim_assign_words(" << rowRef << ", "
-                               << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
+                        stream << innerIndent << "    if (grhsim_assign_words(" << stateRef << "[fill_row], "
+                               << wordsExprForValue(graph, model, operands[1], state.width, context) << ", "
                                << state.width << ")) {\n";
-                        stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
-                        emitReaderActivations(innerIndent + "    ");
-                        stream << innerIndent << "}\n";
                     }
                     else
                     {
-                        stream << innerIndent << "const auto next_value = static_cast<" << logicCppType(state.width)
+                        stream << innerIndent << "    const auto fill_value = static_cast<" << logicCppType(state.width)
                                << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
-                               << resolvedScheduleValueExpr(model, operands[2], context) << "), "
+                               << resolvedScheduleValueExpr(model, operands[1], context) << "), "
                                << state.width << "));\n";
-                        stream << innerIndent << "if (";
-                        if (!rowAccess.alwaysInRange)
-                        {
-                            stream << rowAccess.inRangeExpr << " && ";
-                        }
-                        stream << rowRef << " != next_value) {\n";
-                        stream << innerIndent << "    " << rowRef << " = next_value;\n";
-                        stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
-                        emitReaderActivations(innerIndent + "    ");
-                        stream << innerIndent << "}\n";
+                        stream << innerIndent << "    if (" << stateRef << "[fill_row] != fill_value) {\n";
+                        stream << innerIndent << "        " << stateRef << "[fill_row] = fill_value;\n";
                     }
+                    stream << innerIndent << "        any_row_changed = true;\n";
+                    stream << innerIndent << "    }\n";
+                    stream << innerIndent << "}\n";
+                    stream << innerIndent << "if (any_row_changed) {\n";
+                    stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                    emitReaderActivations(innerIndent + "    ");
+                    stream << innerIndent << "}\n";
                 }
                 else
                 {
-                    if (isWideLogicWidth(state.width))
+                    const std::string addrExpr = resolvedScheduleValueExpr(model, operands[1], context);
+                    const MemoryRowAccessExpr rowAccess = memoryRowAccessExpr(graph, operands[1], addrExpr, state.rowCount);
+                    const std::string rowRef = resolvedStateRefExpr(state, context) + "[" + rowAccess.rowExpr + "]";
+                    if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstZero)
                     {
-                        stream << innerIndent << "if (";
-                        if (!rowAccess.alwaysInRange)
+                        stream << innerIndent << "// constant zero mask: no memory update\n";
+                    }
+                    else if (write.memoryMaskMode == WriteDecl::MemoryMaskMode::kConstAllOnes)
+                    {
+                        if (isWideLogicWidth(state.width))
                         {
-                            stream << rowAccess.inRangeExpr << " && ";
+                            stream << innerIndent << "if (";
+                            if (!rowAccess.alwaysInRange)
+                            {
+                                stream << rowAccess.inRangeExpr << " && ";
+                            }
+                            stream << "grhsim_assign_words(" << rowRef << ", "
+                                   << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
+                                   << state.width << ")) {\n";
+                            stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                            emitReaderActivations(innerIndent + "    ");
+                            stream << innerIndent << "}\n";
                         }
-                        stream << "grhsim_apply_masked_words_inplace(" << rowRef << ", "
-                               << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
-                               << wordsExprForValue(graph, model, operands[3], state.width, context) << ", "
-                               << state.width << ")) {\n";
-                        stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
-                        emitReaderActivations(innerIndent + "    ");
-                        stream << innerIndent << "}\n";
+                        else
+                        {
+                            stream << innerIndent << "const auto next_value = static_cast<" << logicCppType(state.width)
+                                   << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
+                                   << resolvedScheduleValueExpr(model, operands[2], context) << "), "
+                                   << state.width << "));\n";
+                            stream << innerIndent << "if (";
+                            if (!rowAccess.alwaysInRange)
+                            {
+                                stream << rowAccess.inRangeExpr << " && ";
+                            }
+                            stream << rowRef << " != next_value) {\n";
+                            stream << innerIndent << "    " << rowRef << " = next_value;\n";
+                            stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                            emitReaderActivations(innerIndent + "    ");
+                            stream << innerIndent << "}\n";
+                        }
                     }
                     else
                     {
-                        stream << innerIndent << "const auto mask = static_cast<" << logicCppType(state.width)
-                               << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
-                               << resolvedScheduleValueExpr(model, operands[3], context) << "), "
-                               << state.width << "));\n";
-                        stream << innerIndent << "const auto merged = static_cast<" << logicCppType(state.width)
-                               << ">((" << rowRef << " & ~mask) | (static_cast<"
-                               << logicCppType(state.width) << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
-                               << resolvedScheduleValueExpr(model, operands[2], context) << "), "
-                               << state.width << ")) & mask));\n";
-                        stream << innerIndent << "if (";
-                        if (!rowAccess.alwaysInRange)
+                        if (isWideLogicWidth(state.width))
                         {
-                            stream << rowAccess.inRangeExpr << " && ";
+                            stream << innerIndent << "if (";
+                            if (!rowAccess.alwaysInRange)
+                            {
+                                stream << rowAccess.inRangeExpr << " && ";
+                            }
+                            stream << "grhsim_apply_masked_words_inplace(" << rowRef << ", "
+                                   << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
+                                   << wordsExprForValue(graph, model, operands[3], state.width, context) << ", "
+                                   << state.width << ")) {\n";
+                            stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                            emitReaderActivations(innerIndent + "    ");
+                            stream << innerIndent << "}\n";
                         }
-                        stream << rowRef << " != merged) {\n";
-                        stream << innerIndent << "    " << rowRef << " = merged;\n";
-                        stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
-                        emitReaderActivations(innerIndent + "    ");
-                        stream << innerIndent << "}\n";
+                        else
+                        {
+                            stream << innerIndent << "const auto mask = static_cast<" << logicCppType(state.width)
+                                   << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
+                                   << resolvedScheduleValueExpr(model, operands[3], context) << "), "
+                                   << state.width << "));\n";
+                            stream << innerIndent << "const auto merged = static_cast<" << logicCppType(state.width)
+                                   << ">((" << rowRef << " & ~mask) | (static_cast<"
+                                   << logicCppType(state.width) << ">(grhsim_trunc_u64(static_cast<std::uint64_t>("
+                                   << resolvedScheduleValueExpr(model, operands[2], context) << "), "
+                                   << state.width << ")) & mask));\n";
+                            stream << innerIndent << "if (";
+                            if (!rowAccess.alwaysInRange)
+                            {
+                                stream << rowAccess.inRangeExpr << " && ";
+                            }
+                            stream << rowRef << " != merged) {\n";
+                            stream << innerIndent << "    " << rowRef << " = merged;\n";
+                            stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                            emitReaderActivations(innerIndent + "    ");
+                            stream << innerIndent << "}\n";
+                        }
                     }
                 }
             }

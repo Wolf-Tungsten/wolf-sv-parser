@@ -4,9 +4,9 @@
 #include "transform/blackbox_guard.hpp"
 #include "transform/comb_lane_pack.hpp"
 #include "transform/comb_loop_elim.hpp"
+#include "transform/dead_code_elim.hpp"
 #include "transform/demo_stats.hpp"
 #include "transform/hier_flatten.hpp"
-#include "transform/hrbcut.hpp"
 #include "transform/instance_inline.hpp"
 #include "transform/latch_transparent_read.hpp"
 #include "transform/mem_to_reg.hpp"
@@ -14,6 +14,7 @@
 #include "transform/memory_read_retime.hpp"
 #include "transform/multidriven_guard.hpp"
 #include "transform/repcut.hpp"
+#include "transform/scalar_memory_pack.hpp"
 #include "transform/simplify.hpp"
 #include "transform/slice_index_const.hpp"
 #include "transform/strip_debug.hpp"
@@ -411,6 +412,7 @@ namespace wolvrix::lib::transform
             "blackbox-guard",
             "comb-lane-pack",
             "comb-loop-elim",
+            "dead-code-elim",
             "activity-schedule",
             "latch-transparent-read",
             "memory-read-retime",
@@ -421,10 +423,10 @@ namespace wolvrix::lib::transform
             "xmr-resolve",
             "memory-init-check",
             "mem-to-reg",
+            "scalar-memory-pack",
             "simplify",
             "stats",
             "strip-debug",
-            "hrbcut",
             "repcut",
         };
     }
@@ -1309,6 +1311,63 @@ namespace wolvrix::lib::transform
             }
             return std::make_unique<SimplifyPass>(options);
         }
+        if (normalized == "dead-code-elim")
+        {
+            DeadCodeElimOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
+            {
+                const std::string_view arg = args[i];
+                if (arg == "-output-key")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-output-key expects a value";
+                        return nullptr;
+                    }
+                    options.outputKey = std::string(args[++i]);
+                }
+                else if (arg.starts_with("-output-key="))
+                {
+                    options.outputKey = std::string(arg.substr(std::string_view("-output-key=").size()));
+                }
+                else if (arg == "-sample-limit")
+                {
+                    if (i + 1 >= args.size())
+                    {
+                        error = "-sample-limit expects a value";
+                        return nullptr;
+                    }
+                    try
+                    {
+                        options.sampleLimit = static_cast<std::size_t>(std::stoull(std::string(args[++i])));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -sample-limit value";
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-sample-limit="))
+                {
+                    try
+                    {
+                        options.sampleLimit = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-sample-limit=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -sample-limit value";
+                        return nullptr;
+                    }
+                }
+                else
+                {
+                    error = "unknown dead-code-elim option";
+                    return nullptr;
+                }
+            }
+            return std::make_unique<DeadCodeElimPass>(options);
+        }
         if (normalized == "comb-loop-elim")
         {
             CombLoopElimOptions options;
@@ -1527,6 +1586,15 @@ namespace wolvrix::lib::transform
             }
             return std::make_unique<MemToRegPass>(options);
         }
+        if (normalized == "scalar-memory-pack")
+        {
+            if (!args.empty())
+            {
+                error = "scalar-memory-pack does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<ScalarMemoryPackPass>();
+        }
         if (normalized == "memory-read-retime")
         {
             if (!args.empty())
@@ -1601,183 +1669,8 @@ namespace wolvrix::lib::transform
         }
         if (normalized == "hrbcut")
         {
-            HrbcutOptions options;
-            for (std::size_t i = 0; i < args.size(); ++i)
-            {
-                const std::string_view arg = args[i];
-                auto parseStringArg = [&](std::string_view name, std::string &out) -> bool {
-                    if (i + 1 >= args.size())
-                    {
-                        error = std::string(name) + " expects a value";
-                        return false;
-                    }
-                    out = std::string(args[++i]);
-                    return true;
-                };
-                auto parseSizeArg = [&](std::string_view name, std::size_t &out) -> bool {
-                    if (i + 1 >= args.size())
-                    {
-                        error = std::string(name) + " expects a value";
-                        return false;
-                    }
-                    try
-                    {
-                        out = static_cast<std::size_t>(std::stoull(std::string(args[++i])));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = std::string("invalid ") + std::string(name) + " value";
-                        return false;
-                    }
-                    return true;
-                };
-                auto parseDoubleArg = [&](std::string_view name, double &out) -> bool {
-                    if (i + 1 >= args.size())
-                    {
-                        error = std::string(name) + " expects a value";
-                        return false;
-                    }
-                    try
-                    {
-                        out = std::stod(std::string(args[++i]));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = std::string("invalid ") + std::string(name) + " value";
-                        return false;
-                    }
-                    return true;
-                };
-
-                if (arg == "-target-graph")
-                {
-                    if (!parseStringArg("-target-graph", options.targetGraphSymbol))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-target-graph="))
-                {
-                    options.targetGraphSymbol = std::string(arg.substr(std::string_view("-target-graph=").size()));
-                }
-                else if (arg == "-graph")
-                {
-                    if (!parseStringArg("-graph", options.targetGraphSymbol))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-graph="))
-                {
-                    options.targetGraphSymbol = std::string(arg.substr(std::string_view("-graph=").size()));
-                }
-                else if (arg == "-partition-count")
-                {
-                    if (!parseSizeArg("-partition-count", options.partitionCount))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-partition-count="))
-                {
-                    try
-                    {
-                        options.partitionCount = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-partition-count=").size()))));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -partition-count value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-balance-threshold")
-                {
-                    if (!parseDoubleArg("-balance-threshold", options.balanceThreshold))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-balance-threshold="))
-                {
-                    try
-                    {
-                        options.balanceThreshold = std::stod(
-                            std::string(arg.substr(std::string_view("-balance-threshold=").size())));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -balance-threshold value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-target-candidate-count")
-                {
-                    if (!parseSizeArg("-target-candidate-count", options.targetCandidateCount))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-target-candidate-count="))
-                {
-                    try
-                    {
-                        options.targetCandidateCount = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-target-candidate-count=").size()))));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -target-candidate-count value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-max-trials")
-                {
-                    if (!parseSizeArg("-max-trials", options.maxTrials))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-max-trials="))
-                {
-                    try
-                    {
-                        options.maxTrials = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-max-trials=").size()))));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -max-trials value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-split-stop-threshold")
-                {
-                    if (!parseSizeArg("-split-stop-threshold", options.splitStopThreshold))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-split-stop-threshold="))
-                {
-                    try
-                    {
-                        options.splitStopThreshold = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-split-stop-threshold=").size()))));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -split-stop-threshold value";
-                        return nullptr;
-                    }
-                }
-                else
-                {
-                    error = "unknown hrbcut option";
-                    return nullptr;
-                }
-            }
-            return std::make_unique<HrbcutPass>(options);
+            error = "hrbcut pass has been removed";
+            return nullptr;
         }
         if (normalized == "repcut")
         {

@@ -68,6 +68,7 @@ namespace
         case OperationKind::kRegisterWritePort:
         case OperationKind::kLatchWritePort:
         case OperationKind::kMemoryWritePort:
+        case OperationKind::kMemoryFillPort:
             return true;
         default:
             return false;
@@ -752,6 +753,131 @@ int main()
         if (supernodeSizeForOp(*supernodeToOps, *opToSupernode, write0) <= 1)
         {
             return fail("Expected sink supernode to exceed normal supernode-max-size");
+        }
+    }
+
+    {
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("top5_fill");
+        design.markAsTop("top5_fill");
+
+        const auto clk = makeValue(graph, "clk_top5_fill", 1, false);
+        const auto en = makeValue(graph, "en_top5_fill", 1, false);
+        const auto fillEn = makeValue(graph, "fill_en_top5_fill", 1, false);
+        const auto addr = makeValue(graph, "addr_top5_fill", 2, false);
+        const auto data = makeValue(graph, "data_top5_fill", 8, false);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("en", en);
+        graph.bindInputPort("fill_en", fillEn);
+        graph.bindInputPort("addr", addr);
+        graph.bindInputPort("data", data);
+
+        const auto mask = makeValue(graph, "mask_top5_fill", 8, false);
+        const auto maskOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kConstant,
+                                                  graph.internSymbol("mask_const_top5_fill"));
+        graph.addResult(maskOp, mask);
+        graph.setAttr(maskOp, "constValue", std::string("8'hFF"));
+
+        const auto memDecl = graph.createOperation(wolvrix::lib::grh::OperationKind::kMemory,
+                                                   graph.internSymbol("mem_top5_fill"));
+        graph.setAttr(memDecl, "width", static_cast<int64_t>(8));
+        graph.setAttr(memDecl, "row", static_cast<int64_t>(4));
+        graph.setAttr(memDecl, "isSigned", false);
+
+        const auto readValue = makeValue(graph, "read_value_top5_fill", 8, false);
+        const auto readOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kMemoryReadPort,
+                                                  graph.internSymbol("mem_read_top5_fill"));
+        graph.setAttr(readOp, "memSymbol", std::string("mem_top5_fill"));
+        graph.addOperand(readOp, addr);
+        graph.addResult(readOp, readValue);
+        graph.bindOutputPort("out", readValue);
+
+        const auto writeOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kMemoryWritePort,
+                                                   graph.internSymbol("mem_write_top5_fill"));
+        graph.setAttr(writeOp, "memSymbol", std::string("mem_top5_fill"));
+        graph.setAttr(writeOp, "eventEdge", std::vector<std::string>{"posedge"});
+        graph.addOperand(writeOp, en);
+        graph.addOperand(writeOp, addr);
+        graph.addOperand(writeOp, data);
+        graph.addOperand(writeOp, mask);
+        graph.addOperand(writeOp, clk);
+
+        const auto fillOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kMemoryFillPort,
+                                                  graph.internSymbol("mem_fill_top5_fill"));
+        graph.setAttr(fillOp, "memSymbol", std::string("mem_top5_fill"));
+        graph.setAttr(fillOp, "eventEdge", std::vector<std::string>{"posedge"});
+        graph.addOperand(fillOp, fillEn);
+        graph.addOperand(fillOp, data);
+        graph.addOperand(fillOp, clk);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "top5_fill",
+            .supernodeMaxSize = 1,
+            .maxSinkSupernodeOp = 4,
+            .enableCoarsen = false,
+            .enableRefine = false,
+            .enableReplication = false,
+        }));
+
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected memory-fill sink-supernode activity-schedule pass to succeed");
+        }
+
+        const std::string keyPrefix = "top5_fill.activity_schedule.";
+        const auto *supernodeToOps =
+            getSessionValue<ActivityScheduleSupernodeToOps>(session, keyPrefix + "supernode_to_ops");
+        const auto *opToSupernode =
+            getSessionValue<ActivityScheduleOpToSupernode>(session, keyPrefix + "op_to_supernode");
+        const auto *dag =
+            getSessionValue<ActivityScheduleDag>(session, keyPrefix + "dag");
+        const auto *topoOrder =
+            getSessionValue<ActivityScheduleTopoOrder>(session, keyPrefix + "topo_order");
+        if (supernodeToOps == nullptr || opToSupernode == nullptr || dag == nullptr || topoOrder == nullptr)
+        {
+            return fail("Expected memory-fill sink-supernode session outputs");
+        }
+
+        const uint32_t writeSupernode = (*opToSupernode)[writeOp.index - 1];
+        const uint32_t fillSupernode = (*opToSupernode)[fillOp.index - 1];
+        const uint32_t readSupernode = (*opToSupernode)[readOp.index - 1];
+        if (writeSupernode == kInvalidActivitySupernodeId || fillSupernode == kInvalidActivitySupernodeId)
+        {
+            return fail("Expected memory write/fill to map to sink supernodes");
+        }
+        if (readSupernode == kInvalidActivitySupernodeId)
+        {
+            return fail("Expected memory read to map to a supernode");
+        }
+        if ((*dag)[fillSupernode].empty() == false)
+        {
+            return fail("Expected memory fill supernode to be a sink in the schedule DAG");
+        }
+        for (const auto opId : (*supernodeToOps)[fillSupernode])
+        {
+            if (!isCommitPhaseOp(graph.getOperation(opId)))
+            {
+                return fail("Expected memory fill supernode to contain only commit-phase sink ops");
+            }
+        }
+        auto topoPosOf = [&](uint32_t supernodeId) -> std::size_t {
+            for (std::size_t i = 0; i < topoOrder->size(); ++i)
+            {
+                if ((*topoOrder)[i] == supernodeId)
+                {
+                    return i;
+                }
+            }
+            return topoOrder->size();
+        };
+        if (topoPosOf(fillSupernode) <= topoPosOf(readSupernode))
+        {
+            return fail("Expected memory fill sink supernode to be scheduled after the memory read supernode");
         }
     }
 

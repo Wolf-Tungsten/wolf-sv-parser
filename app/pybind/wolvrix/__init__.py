@@ -210,6 +210,7 @@ class Session:
         design: str,
         args: list[str] | None = None,
         dryrun: bool = False,
+        keep_declared_symbols: bool = True,
         **named_args,
     ) -> list[dict]:
         self._ensure_open()
@@ -221,6 +222,7 @@ class Session:
             args=pass_args,
             dryrun=dryrun,
             log_level=self._log_level,
+            keep_declared_symbols=bool(keep_declared_symbols),
         )
         return self._complete_action(
             "run_pass",

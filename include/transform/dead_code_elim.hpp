@@ -6,12 +6,22 @@
 namespace wolvrix::lib::transform
 {
 
+    struct DeadCodeElimOptions
+    {
+        std::string outputKey;
+        std::size_t sampleLimit = 16;
+    };
+
     class DeadCodeElimPass : public Pass
     {
     public:
         DeadCodeElimPass();
+        explicit DeadCodeElimPass(DeadCodeElimOptions options);
 
         PassResult run() override;
+
+    private:
+        DeadCodeElimOptions options_;
     };
 
 } // namespace wolvrix::lib::transform

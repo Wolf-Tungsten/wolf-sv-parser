@@ -4898,6 +4898,108 @@ namespace wolvrix::lib::emit
                     addSequentialStmt(*seqKey, stmt.str(), opId);
                     break;
                 }
+                case wolvrix::lib::grh::OperationKind::kMemoryFillPort:
+                {
+                    if (operands.size() < 3)
+                    {
+                        reportError("kMemoryFillPort missing operands", opContext);
+                        break;
+                    }
+                    const wolvrix::lib::grh::ValueId updateCond = operands[0];
+                    const wolvrix::lib::grh::ValueId data = operands[1];
+                    if (!updateCond.valid() || !data.valid())
+                    {
+                        reportError("kMemoryFillPort missing operands", opContext);
+                        break;
+                    }
+                    if (graph->valueWidth(updateCond) != 1)
+                    {
+                        reportError("kMemoryFillPort updateCond must be 1 bit", opContext);
+                        break;
+                    }
+                    auto memSymbolAttr = resolveMemorySymbol(op);
+                    if (!memSymbolAttr)
+                    {
+                        reportError("kMemoryFillPort missing memSymbol", opContext);
+                        break;
+                    }
+                    auto seqKey = buildEventKey(op, 2);
+                    if (!seqKey)
+                    {
+                        break;
+                    }
+
+                    const std::string &memSymbol = *memSymbolAttr;
+                    const wolvrix::lib::grh::OperationId memOpId = graph->findOperation(memSymbol);
+                    int64_t memWidth = 1;
+                    int64_t rowCount = 0;
+                    if (memOpId.valid())
+                    {
+                        const wolvrix::lib::grh::Operation memOp = graph->getOperation(memOpId);
+                        memWidth = getAttribute<int64_t>(*graph, memOp, "width").value_or(1);
+                        rowCount = getAttribute<int64_t>(*graph, memOp, "row").value_or(0);
+                    }
+                    if (rowCount <= 0)
+                    {
+                        reportError("kMemoryFillPort target memory missing row attr", opContext);
+                        break;
+                    }
+
+                    std::string updateExpr;
+                    std::string dataExprFull;
+                    auto extendSeqOperand = [&](wolvrix::lib::grh::ValueId valueId, int64_t targetWidth) -> std::string
+                    {
+                        ExprTools seqExpr = baseExpr;
+                        seqExpr.valueExpr = valueExprSeq;
+                        return seqExpr.extendOperand(valueId, targetWidth);
+                    };
+                    if (dpiDrivenStateOps.find(opId) != dpiDrivenStateOps.end())
+                    {
+                        withDpiInlineSink(opId, [&]() {
+                            updateExpr = valueExprSeq(updateCond);
+                            dataExprFull = extendSeqOperand(data, memWidth);
+                        });
+                    }
+                    else
+                    {
+                        updateExpr = valueExprSeq(updateCond);
+                        dataExprFull = extendSeqOperand(data, memWidth);
+                    }
+                    if (auto inlineUpdate = inlineConstExprFor(updateCond))
+                    {
+                        updateExpr = *inlineUpdate;
+                    }
+                    if (dataExprFull.empty())
+                    {
+                        dataExprFull = extendSeqOperand(data, memWidth);
+                    }
+                    if (graph->valueWidth(data) > 0 && memWidth > 0 && graph->valueWidth(data) != memWidth)
+                    {
+                        reportWarning("kMemoryFillPort data width does not match memory width", opContext);
+                    }
+
+                    std::ostringstream stmt;
+                    if (!isConstOne(updateCond))
+                    {
+                        appendIndented(stmt, 2, "if (" + updateExpr + ") begin");
+                        appendIndented(stmt, 3, "integer __fill_i;");
+                        appendIndented(stmt, 3, "for (__fill_i = 0; __fill_i < " + std::to_string(rowCount) +
+                                                   "; __fill_i = __fill_i + 1) begin");
+                        appendIndented(stmt, 4, memSymbol + "[__fill_i] <= " + dataExprFull + ";");
+                        appendIndented(stmt, 3, "end");
+                        appendIndented(stmt, 2, "end");
+                    }
+                    else
+                    {
+                        appendIndented(stmt, 2, "integer __fill_i;");
+                        appendIndented(stmt, 2, "for (__fill_i = 0; __fill_i < " + std::to_string(rowCount) +
+                                                   "; __fill_i = __fill_i + 1) begin");
+                        appendIndented(stmt, 3, memSymbol + "[__fill_i] <= " + dataExprFull + ";");
+                        appendIndented(stmt, 2, "end");
+                    }
+                    addSequentialStmt(*seqKey, stmt.str(), opId);
+                    break;
+                }
                 case wolvrix::lib::grh::OperationKind::kInstance:
                 case wolvrix::lib::grh::OperationKind::kBlackbox:
                 {

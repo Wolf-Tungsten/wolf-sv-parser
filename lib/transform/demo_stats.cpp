@@ -97,6 +97,7 @@ namespace wolvrix::lib::transform
             case wolvrix::lib::grh::OperationKind::kMemory:
             case wolvrix::lib::grh::OperationKind::kMemoryReadPort:
             case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryFillPort:
             case wolvrix::lib::grh::OperationKind::kInstance:
             case wolvrix::lib::grh::OperationKind::kBlackbox:
             case wolvrix::lib::grh::OperationKind::kSystemFunction:
@@ -117,6 +118,7 @@ namespace wolvrix::lib::transform
             case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
             case wolvrix::lib::grh::OperationKind::kLatchWritePort:
             case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryFillPort:
                 return true;
             default:
                 return false;
@@ -382,11 +384,14 @@ namespace wolvrix::lib::transform
                     }
                     break;
                 case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+                case wolvrix::lib::grh::OperationKind::kMemoryFillPort:
                     {
                         const auto operands = graph->opOperands(opId);
-                        if (operands.size() >= 3)
+                        const std::size_t dataIndex =
+                            kind == wolvrix::lib::grh::OperationKind::kMemoryFillPort ? 1 : 2;
+                        if (operands.size() > dataIndex)
                         {
-                            const int32_t dataWidth = graph->valueWidth(operands[2]);
+                            const int32_t dataWidth = graph->valueWidth(operands[dataIndex]);
                             if (dataWidth > 0)
                             {
                                 memoryPortBitwidthTotal += static_cast<uint64_t>(dataWidth);

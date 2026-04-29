@@ -120,6 +120,8 @@ namespace wolvrix::lib::transform
                 return 1;
             case OperationKind::kMemoryWritePort:
                 return 2;
+            case OperationKind::kMemoryFillPort:
+                return 1;
             default:
                 return std::nullopt;
             }

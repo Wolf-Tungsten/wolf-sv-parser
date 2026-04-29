@@ -66,6 +66,7 @@ namespace wolvrix::lib::transform
             case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
             case wolvrix::lib::grh::OperationKind::kLatchWritePort:
             case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryFillPort:
                 return true;
             default:
                 return false;

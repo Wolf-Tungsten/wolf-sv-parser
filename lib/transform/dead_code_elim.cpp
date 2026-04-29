@@ -3,9 +3,15 @@
 #include "core/grh.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <deque>
+#include <map>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace wolvrix::lib::transform
@@ -13,69 +19,311 @@ namespace wolvrix::lib::transform
 
     namespace
     {
-        bool isSideEffectOp(wolvrix::lib::grh::OperationKind kind)
+        using wolvrix::lib::grh::Operation;
+        using wolvrix::lib::grh::OperationId;
+        using wolvrix::lib::grh::OperationIdHash;
+        using wolvrix::lib::grh::OperationKind;
+        using wolvrix::lib::grh::Value;
+        using wolvrix::lib::grh::ValueId;
+        using wolvrix::lib::grh::ValueIdHash;
+
+        struct StorageInfo
+        {
+            OperationId declOp = OperationId::invalid();
+            std::vector<OperationId> writePorts;
+            bool live = false;
+            bool declaredRoot = false;
+            uint32_t rootMask = 0;
+        };
+
+        enum RootMaskBit : uint32_t
+        {
+            kRootPort = 1u << 0,
+            kRootDeclaredValue = 1u << 1,
+            kRootDeclaredStorage = 1u << 2,
+            kRootInstance = 1u << 3,
+            kRootBlackbox = 1u << 4,
+            kRootSystemFunction = 1u << 5,
+            kRootSystemTask = 1u << 6,
+            kRootDpicImport = 1u << 7,
+            kRootDpicCall = 1u << 8,
+            kRootXmrWrite = 1u << 9,
+        };
+
+        struct RootMaskDesc
+        {
+            uint32_t bit = 0;
+            const char *name = "";
+        };
+
+        constexpr std::array<RootMaskDesc, 10> kRootMaskTable = {{{kRootPort, "port"},
+                                                                   {kRootDeclaredValue, "declared_value"},
+                                                                   {kRootDeclaredStorage, "declared_storage"},
+                                                                   {kRootInstance, "instance"},
+                                                                   {kRootBlackbox, "blackbox"},
+                                                                   {kRootSystemFunction, "system_function"},
+                                                                   {kRootSystemTask, "system_task"},
+                                                                   {kRootDpicImport, "dpic_import"},
+                                                                   {kRootDpicCall, "dpic_call"},
+                                                                   {kRootXmrWrite, "xmr_write"}}};
+
+        bool isObservableBoundaryOp(OperationKind kind)
         {
             switch (kind)
             {
-            case wolvrix::lib::grh::OperationKind::kMemory:
-            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
-            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
-            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
-            case wolvrix::lib::grh::OperationKind::kInstance:
-            case wolvrix::lib::grh::OperationKind::kBlackbox:
-            case wolvrix::lib::grh::OperationKind::kSystemFunction:
-            case wolvrix::lib::grh::OperationKind::kSystemTask:
-            case wolvrix::lib::grh::OperationKind::kDpicImport:
-            case wolvrix::lib::grh::OperationKind::kDpicCall:
+            case OperationKind::kInstance:
+            case OperationKind::kBlackbox:
+            case OperationKind::kSystemFunction:
+            case OperationKind::kSystemTask:
+            case OperationKind::kDpicImport:
+            case OperationKind::kDpicCall:
+            case OperationKind::kXMRWrite:
                 return true;
             default:
                 return false;
             }
         }
 
-        bool isPortValue(const wolvrix::lib::grh::Value &value)
+        uint32_t rootMaskForObservableBoundaryOp(OperationKind kind)
+        {
+            switch (kind)
+            {
+            case OperationKind::kInstance:
+                return kRootInstance;
+            case OperationKind::kBlackbox:
+                return kRootBlackbox;
+            case OperationKind::kSystemFunction:
+                return kRootSystemFunction;
+            case OperationKind::kSystemTask:
+                return kRootSystemTask;
+            case OperationKind::kDpicImport:
+                return kRootDpicImport;
+            case OperationKind::kDpicCall:
+                return kRootDpicCall;
+            case OperationKind::kXMRWrite:
+                return kRootXmrWrite;
+            default:
+                return 0;
+            }
+        }
+
+        bool isStateDeclOp(OperationKind kind)
+        {
+            switch (kind)
+            {
+            case OperationKind::kRegister:
+            case OperationKind::kLatch:
+            case OperationKind::kMemory:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        bool isStateReadOp(OperationKind kind)
+        {
+            switch (kind)
+            {
+            case OperationKind::kRegisterReadPort:
+            case OperationKind::kLatchReadPort:
+            case OperationKind::kMemoryReadPort:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        bool isStateWriteOp(OperationKind kind)
+        {
+            switch (kind)
+            {
+            case OperationKind::kRegisterWritePort:
+            case OperationKind::kLatchWritePort:
+            case OperationKind::kMemoryWritePort:
+            case OperationKind::kMemoryFillPort:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        bool isPortValue(const Value &value)
         {
             return value.isInput() || value.isOutput() || value.isInout();
         }
 
-        bool isDeadOp(const wolvrix::lib::grh::Graph &graph, const wolvrix::lib::grh::Operation &op,
-                      const std::vector<uint8_t> &isDeclared)
+        std::optional<std::string> getAttrString(const Operation &op, std::string_view key)
         {
-            if (isSideEffectOp(op.kind()))
+            auto attr = op.attr(key);
+            if (!attr)
             {
-                return false;
+                return std::nullopt;
             }
-            if (op.results().empty())
+            if (const auto *value = std::get_if<std::string>(&*attr))
             {
-                return false;
+                return *value;
             }
-            for (const auto resId : op.results())
+            return std::nullopt;
+        }
+
+        StorageInfo &ensureStorage(std::unordered_map<std::string, StorageInfo> &map, const std::string &sym)
+        {
+            auto [it, inserted] = map.try_emplace(sym);
+            (void)inserted;
+            return it->second;
+        }
+
+        std::unordered_map<std::string, StorageInfo> *storageMapForKind(
+            OperationKind kind,
+            std::unordered_map<std::string, StorageInfo> &regInfos,
+            std::unordered_map<std::string, StorageInfo> &latchInfos,
+            std::unordered_map<std::string, StorageInfo> &memInfos)
+        {
+            switch (kind)
             {
-                if (!resId.valid())
+            case OperationKind::kRegister:
+            case OperationKind::kRegisterReadPort:
+            case OperationKind::kRegisterWritePort:
+                return &regInfos;
+            case OperationKind::kLatch:
+            case OperationKind::kLatchReadPort:
+            case OperationKind::kLatchWritePort:
+                return &latchInfos;
+            case OperationKind::kMemory:
+            case OperationKind::kMemoryReadPort:
+            case OperationKind::kMemoryWritePort:
+            case OperationKind::kMemoryFillPort:
+                return &memInfos;
+            default:
+                return nullptr;
+            }
+        }
+
+        std::optional<std::string> getStorageSymbol(const Operation &op)
+        {
+            switch (op.kind())
+            {
+            case OperationKind::kRegister:
+            case OperationKind::kLatch:
+            case OperationKind::kMemory:
+                if (!op.symbolText().empty())
+                {
+                    return std::string(op.symbolText());
+                }
+                return std::nullopt;
+            case OperationKind::kRegisterReadPort:
+            case OperationKind::kRegisterWritePort:
+                return getAttrString(op, "regSymbol");
+            case OperationKind::kLatchReadPort:
+            case OperationKind::kLatchWritePort:
+                return getAttrString(op, "latchSymbol");
+            case OperationKind::kMemoryReadPort:
+            case OperationKind::kMemoryWritePort:
+            case OperationKind::kMemoryFillPort:
+                return getAttrString(op, "memSymbol");
+            default:
+                return std::nullopt;
+            }
+        }
+
+        std::string jsonEscape(std::string_view text)
+        {
+            std::string out;
+            out.reserve(text.size() + 8);
+            for (const unsigned char ch : text)
+            {
+                switch (ch)
+                {
+                case '\\':
+                    out.append("\\\\");
+                    break;
+                case '"':
+                    out.append("\\\"");
+                    break;
+                case '\b':
+                    out.append("\\b");
+                    break;
+                case '\f':
+                    out.append("\\f");
+                    break;
+                case '\n':
+                    out.append("\\n");
+                    break;
+                case '\r':
+                    out.append("\\r");
+                    break;
+                case '\t':
+                    out.append("\\t");
+                    break;
+                default:
+                    if (ch < 0x20)
+                    {
+                        static constexpr char kHex[] = "0123456789abcdef";
+                        out.append("\\u00");
+                        out.push_back(kHex[(ch >> 4) & 0xf]);
+                        out.push_back(kHex[ch & 0xf]);
+                    }
+                    else
+                    {
+                        out.push_back(static_cast<char>(ch));
+                    }
+                    break;
+                }
+            }
+            return out;
+        }
+
+        std::string maskToKey(uint32_t mask)
+        {
+            if (mask == 0)
+            {
+                return "none";
+            }
+            std::string out;
+            for (const auto &entry : kRootMaskTable)
+            {
+                if ((mask & entry.bit) == 0)
                 {
                     continue;
                 }
-                const wolvrix::lib::grh::Value res = graph.getValue(resId);
-                if (isPortValue(res))
+                if (!out.empty())
                 {
-                    return false;
+                    out.push_back('|');
                 }
-                if (resId.index < isDeclared.size() && isDeclared[resId.index] != 0)
-                {
-                    return false;
-                }
-                if (!res.users().empty())
-                {
-                    return false;
-                }
+                out.append(entry.name);
             }
-            return true;
+            return out;
+        }
+
+        std::string prefixAtDepth(std::string_view sym, std::size_t depth)
+        {
+            std::size_t parts = 1;
+            for (std::size_t i = 0; i < sym.size(); ++i)
+            {
+                if (sym[i] != '$')
+                {
+                    continue;
+                }
+                if (parts >= depth)
+                {
+                    return std::string(sym.substr(0, i));
+                }
+                ++parts;
+            }
+            return std::string(sym);
         }
 
     } // namespace
 
     DeadCodeElimPass::DeadCodeElimPass()
-        : Pass("dead-code-elim", "dead-code-elim", "Remove unused operations and values")
+        : Pass("dead-code-elim", "dead-code-elim", "Remove unused operations and values"),
+          options_({})
+    {
+    }
+
+    DeadCodeElimPass::DeadCodeElimPass(DeadCodeElimOptions options)
+        : Pass("dead-code-elim", "dead-code-elim", "Remove unused operations and values"),
+          options_(std::move(options))
     {
     }
 
@@ -117,19 +365,23 @@ namespace wolvrix::lib::transform
             }
 
             std::vector<uint8_t> isPort;
-            std::vector<uint8_t> isDeclared;
-            std::vector<std::size_t> useCounts;
-            std::vector<wolvrix::lib::grh::OperationId> defOpByValue;
+            std::vector<uint8_t> isDeclaredValue;
+            std::vector<uint32_t> liveValueMask;
+            std::vector<uint32_t> liveOpMask;
+            std::vector<OperationId> defOpByValue;
             if (maxValueIndex > 0)
             {
                 isPort.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
-                isDeclared.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
-                useCounts.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
-                defOpByValue.assign(static_cast<std::size_t>(maxValueIndex + 1),
-                                    wolvrix::lib::grh::OperationId::invalid());
+                isDeclaredValue.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
+                liveValueMask.assign(static_cast<std::size_t>(maxValueIndex + 1), 0);
+                defOpByValue.assign(static_cast<std::size_t>(maxValueIndex + 1), OperationId::invalid());
+            }
+            if (maxOpIndex > 0)
+            {
+                liveOpMask.assign(static_cast<std::size_t>(maxOpIndex + 1), 0);
             }
 
-            auto markPort = [&](wolvrix::lib::grh::ValueId valueId) {
+            auto markPort = [&](ValueId valueId) {
                 if (!valueId.valid())
                 {
                     return;
@@ -154,25 +406,13 @@ namespace wolvrix::lib::transform
                 markPort(port.out);
                 markPort(port.oe);
             }
-            if (keepDeclaredSymbols())
-            {
-                for (const auto sym : graph.declaredSymbols())
-                {
-                    const wolvrix::lib::grh::ValueId valueId = graph.findValue(sym);
-                    if (!valueId.valid() || valueId.index >= isDeclared.size())
-                    {
-                        continue;
-                    }
-                    isDeclared[valueId.index] = 1;
-                }
-            }
 
             struct OpInfo
             {
-                wolvrix::lib::grh::OperationId id;
-                bool sideEffect = false;
-                std::vector<wolvrix::lib::grh::ValueId> operands;
-                std::vector<wolvrix::lib::grh::ValueId> results;
+                OperationId id;
+                OperationKind kind = OperationKind::kConstant;
+                std::vector<ValueId> operands;
+                std::vector<ValueId> results;
             };
 
             std::vector<OpInfo> ops;
@@ -192,23 +432,14 @@ namespace wolvrix::lib::transform
                 const wolvrix::lib::grh::Operation op = graph.getOperation(opId);
                 OpInfo info;
                 info.id = opId;
-                info.sideEffect = isSideEffectOp(op.kind());
-                info.operands = std::vector<wolvrix::lib::grh::ValueId>(op.operands().begin(),
-                                                             op.operands().end());
-                info.results = std::vector<wolvrix::lib::grh::ValueId>(op.results().begin(),
-                                                            op.results().end());
+                info.kind = op.kind();
+                info.operands = std::vector<ValueId>(op.operands().begin(), op.operands().end());
+                info.results = std::vector<ValueId>(op.results().begin(), op.results().end());
                 const std::size_t infoIndex = ops.size();
                 ops.push_back(std::move(info));
                 if (opId.index < opIndexById.size())
                 {
                     opIndexById[opId.index] = static_cast<int32_t>(infoIndex);
-                }
-                for (const auto valueId : ops.back().operands)
-                {
-                    if (valueId.valid() && valueId.index < useCounts.size())
-                    {
-                        useCounts[valueId.index] += 1;
-                    }
                 }
                 for (const auto valueId : ops.back().results)
                 {
@@ -219,132 +450,465 @@ namespace wolvrix::lib::transform
                 }
             }
 
-            auto isDeadByCounts = [&](const OpInfo &info) -> bool {
-                if (info.sideEffect)
+            std::unordered_map<std::string, StorageInfo> regInfos;
+            std::unordered_map<std::string, StorageInfo> latchInfos;
+            std::unordered_map<std::string, StorageInfo> memInfos;
+            regInfos.reserve(1024);
+            latchInfos.reserve(128);
+            memInfos.reserve(256);
+
+            for (const auto &info : ops)
+            {
+                const Operation op = graph.getOperation(info.id);
+                switch (info.kind)
                 {
-                    return false;
+                case OperationKind::kRegister:
+                case OperationKind::kLatch:
+                case OperationKind::kMemory: {
+                    auto sym = getStorageSymbol(op);
+                    if (sym)
+                    {
+                        ensureStorage(*storageMapForKind(info.kind, regInfos, latchInfos, memInfos), *sym).declOp = info.id;
+                    }
+                    break;
                 }
-                if (info.results.empty())
-                {
-                    return false;
+                case OperationKind::kRegisterReadPort:
+                case OperationKind::kLatchReadPort:
+                case OperationKind::kMemoryReadPort:
+                    break;
+                case OperationKind::kRegisterWritePort:
+                case OperationKind::kLatchWritePort:
+                case OperationKind::kMemoryWritePort: {
+                    auto sym = getStorageSymbol(op);
+                    auto *map = storageMapForKind(info.kind, regInfos, latchInfos, memInfos);
+                    if (sym && map)
+                    {
+                        ensureStorage(*map, *sym).writePorts.push_back(info.id);
+                    }
+                    break;
                 }
-                for (const auto valueId : info.results)
-                {
-                    if (!valueId.valid() || valueId.index >= useCounts.size())
-                    {
-                        continue;
-                    }
-                    if (isPort[valueId.index] != 0)
-                    {
-                        return false;
-                    }
-                    if (valueId.index < isDeclared.size() && isDeclared[valueId.index] != 0)
-                    {
-                        return false;
-                    }
-                    if (useCounts[valueId.index] != 0)
-                    {
-                        return false;
-                    }
+                default:
+                    break;
                 }
-                return true;
+            }
+
+            struct ValueWorkItem
+            {
+                ValueId id = ValueId::invalid();
+                uint32_t deltaMask = 0;
+            };
+            struct OpWorkItem
+            {
+                OperationId id = OperationId::invalid();
+                uint32_t deltaMask = 0;
             };
 
-            std::deque<int32_t> worklist;
-            worklist.resize(0);
-            for (std::size_t idx = 0; idx < ops.size(); ++idx)
-            {
-                if (isDeadByCounts(ops[idx]))
+            auto markValueLive = [&](ValueId valueId, uint32_t mask, std::deque<ValueWorkItem> &worklist) {
+                if (!valueId.valid() || valueId.index >= liveValueMask.size())
                 {
-                    worklist.push_back(static_cast<int32_t>(idx));
+                    return;
+                }
+                const uint32_t prevMask = liveValueMask[valueId.index];
+                const uint32_t deltaMask = mask & ~prevMask;
+                if (deltaMask == 0)
+                {
+                    return;
+                }
+                liveValueMask[valueId.index] = prevMask | deltaMask;
+                worklist.push_back({valueId, deltaMask});
+            };
+            auto markOpLive = [&](OperationId opId, uint32_t mask, std::deque<OpWorkItem> &worklist) {
+                if (!opId.valid() || opId.index >= liveOpMask.size())
+                {
+                    return;
+                }
+                const uint32_t prevMask = liveOpMask[opId.index];
+                const uint32_t deltaMask = mask & ~prevMask;
+                if (deltaMask == 0)
+                {
+                    return;
+                }
+                liveOpMask[opId.index] = prevMask | deltaMask;
+                worklist.push_back({opId, deltaMask});
+            };
+            auto markStorageLive = [&](std::unordered_map<std::string, StorageInfo> &map,
+                                       const std::string &sym,
+                                       uint32_t mask,
+                                       std::deque<OpWorkItem> &worklist) {
+                auto it = map.find(sym);
+                if (it == map.end())
+                {
+                    return;
+                }
+                it->second.live = true;
+                const uint32_t deltaMask = mask & ~it->second.rootMask;
+                if (deltaMask == 0)
+                {
+                    return;
+                }
+                it->second.rootMask |= deltaMask;
+                if (it->second.declOp.valid())
+                {
+                    markOpLive(it->second.declOp, deltaMask, worklist);
+                }
+                for (const auto writeOp : it->second.writePorts)
+                {
+                    markOpLive(writeOp, deltaMask, worklist);
+                }
+            };
+
+            if (keepDeclaredSymbols())
+            {
+                for (const auto sym : graph.declaredSymbols())
+                {
+                    const ValueId valueId = graph.findValue(sym);
+                    if (valueId.valid() && valueId.index < isDeclaredValue.size())
+                    {
+                        isDeclaredValue[valueId.index] = 1;
+                    }
+                    const OperationId opId = graph.findOperation(sym);
+                    if (!opId.valid())
+                    {
+                        continue;
+                    }
+                    const Operation op = graph.getOperation(opId);
+                    auto symText = getStorageSymbol(op);
+                    auto *map = storageMapForKind(op.kind(), regInfos, latchInfos, memInfos);
+                    if (symText && map)
+                    {
+                        ensureStorage(*map, *symText).declaredRoot = true;
+                    }
                 }
             }
 
-            std::vector<uint8_t> opRemoved(ops.size(), 0);
+            std::deque<ValueWorkItem> liveValueWorklist;
+            std::deque<OpWorkItem> liveOpWorklist;
 
-            while (!worklist.empty())
-            {
-                const int32_t idx = worklist.front();
-                worklist.pop_front();
-                if (idx < 0 || static_cast<std::size_t>(idx) >= ops.size())
-                {
-                    continue;
-                }
-                if (opRemoved[static_cast<std::size_t>(idx)] != 0)
-                {
-                    continue;
-                }
-                const OpInfo &info = ops[static_cast<std::size_t>(idx)];
-                if (!isDeadByCounts(info))
-                {
-                    continue;
-                }
-                if (!graph.eraseOpUnchecked(info.id))
-                {
-                    continue;
-                }
-                opRemoved[static_cast<std::size_t>(idx)] = 1;
-                graphChanged = true;
-
-                for (const auto valueId : info.results)
-                {
-                    if (valueId.valid() && valueId.index < defOpByValue.size())
-                    {
-                        defOpByValue[valueId.index] = wolvrix::lib::grh::OperationId::invalid();
-                    }
-                }
-
-                for (const auto valueId : info.operands)
-                {
-                    if (!valueId.valid() || valueId.index >= useCounts.size())
-                    {
-                        continue;
-                    }
-                    if (useCounts[valueId.index] > 0)
-                    {
-                        useCounts[valueId.index] -= 1;
-                    }
-                    if (useCounts[valueId.index] != 0)
-                    {
-                        continue;
-                    }
-                    const wolvrix::lib::grh::OperationId defOp = defOpByValue[valueId.index];
-                    if (!defOp.valid())
-                    {
-                        continue;
-                    }
-                    if (defOp.index >= opIndexById.size())
-                    {
-                        continue;
-                    }
-                    const int32_t defIdx = opIndexById[defOp.index];
-                    if (defIdx >= 0)
-                    {
-                        worklist.push_back(defIdx);
-                    }
-                }
-            }
-
-            std::vector<wolvrix::lib::grh::ValueId> deadValues;
             for (const auto valueId : valueSpan)
             {
-                if (!valueId.valid() || valueId.index >= useCounts.size())
+                if (!valueId.valid() || valueId.index >= isPort.size())
                 {
                     continue;
                 }
                 if (isPort[valueId.index] != 0)
                 {
-                    continue;
+                    markValueLive(valueId, kRootPort, liveValueWorklist);
                 }
-                if (valueId.index < isDeclared.size() && isDeclared[valueId.index] != 0)
+                if (valueId.index < isDeclaredValue.size() && isDeclaredValue[valueId.index] != 0)
+                {
+                    markValueLive(valueId, kRootDeclaredValue, liveValueWorklist);
+                }
+            }
+
+            for (auto &[sym, info] : regInfos)
+            {
+                if (info.declaredRoot)
+                {
+                    markStorageLive(regInfos, sym, kRootDeclaredStorage, liveOpWorklist);
+                }
+            }
+            for (auto &[sym, info] : latchInfos)
+            {
+                if (info.declaredRoot)
+                {
+                    markStorageLive(latchInfos, sym, kRootDeclaredStorage, liveOpWorklist);
+                }
+            }
+            for (auto &[sym, info] : memInfos)
+            {
+                if (info.declaredRoot)
+                {
+                    markStorageLive(memInfos, sym, kRootDeclaredStorage, liveOpWorklist);
+                }
+            }
+
+            for (const auto &info : ops)
+            {
+                if (isObservableBoundaryOp(info.kind))
+                {
+                    const uint32_t rootMask = rootMaskForObservableBoundaryOp(info.kind);
+                    if (rootMask != 0)
+                    {
+                        markOpLive(info.id, rootMask, liveOpWorklist);
+                    }
+                }
+            }
+
+            while (!liveValueWorklist.empty() || !liveOpWorklist.empty())
+            {
+                while (!liveValueWorklist.empty())
+                {
+                    const ValueWorkItem item = liveValueWorklist.front();
+                    liveValueWorklist.pop_front();
+                    const ValueId valueId = item.id;
+                    if (!valueId.valid() || valueId.index >= defOpByValue.size())
+                    {
+                        continue;
+                    }
+                    const OperationId defOp = defOpByValue[valueId.index];
+                    if (defOp.valid())
+                    {
+                        markOpLive(defOp, item.deltaMask, liveOpWorklist);
+                    }
+                }
+
+                while (!liveOpWorklist.empty())
+                {
+                    const OpWorkItem item = liveOpWorklist.front();
+                    liveOpWorklist.pop_front();
+                    const OperationId opId = item.id;
+                    if (!opId.valid() || opId.index >= opIndexById.size())
+                    {
+                        continue;
+                    }
+                    const int32_t opIdx = opIndexById[opId.index];
+                    if (opIdx < 0 || static_cast<std::size_t>(opIdx) >= ops.size())
+                    {
+                        continue;
+                    }
+
+                    const OpInfo &info = ops[static_cast<std::size_t>(opIdx)];
+                    const Operation op = graph.getOperation(opId);
+                    if (isStateReadOp(info.kind) || isStateWriteOp(info.kind) || isStateDeclOp(info.kind))
+                    {
+                        auto sym = getStorageSymbol(op);
+                        auto *map = storageMapForKind(info.kind, regInfos, latchInfos, memInfos);
+                        if (sym && map)
+                        {
+                            markStorageLive(*map, *sym, item.deltaMask, liveOpWorklist);
+                        }
+                    }
+
+                    for (const auto operandId : info.operands)
+                    {
+                        markValueLive(operandId, item.deltaMask, liveValueWorklist);
+                    }
+                }
+            }
+
+            if (!options_.outputKey.empty())
+            {
+                auto recordSample = [&](std::vector<std::string> &samples, const std::string &sym) {
+                    if (samples.size() >= options_.sampleLimit)
+                    {
+                        return;
+                    }
+                    samples.push_back(sym);
+                };
+                auto emitPrefixCounts = [&](std::ostringstream &out, const std::map<std::string, std::size_t> &counts, std::size_t limit) {
+                    out << "[";
+                    std::vector<std::pair<std::string, std::size_t>> items(counts.begin(), counts.end());
+                    std::sort(items.begin(), items.end(), [](const auto &lhs, const auto &rhs) {
+                        if (lhs.second != rhs.second)
+                        {
+                            return lhs.second > rhs.second;
+                        }
+                        return lhs.first < rhs.first;
+                    });
+                    for (std::size_t i = 0; i < items.size() && i < limit; ++i)
+                    {
+                        if (i != 0)
+                        {
+                            out << ",";
+                        }
+                        out << "{\"prefix\":\"" << jsonEscape(items[i].first) << "\",\"count\":" << items[i].second << "}";
+                    }
+                    out << "]";
+                };
+                auto emitSamples = [&](std::ostringstream &out, const std::vector<std::string> &samples) {
+                    out << "[";
+                    for (std::size_t i = 0; i < samples.size(); ++i)
+                    {
+                        if (i != 0)
+                        {
+                            out << ",";
+                        }
+                        out << "\"" << jsonEscape(samples[i]) << "\"";
+                    }
+                    out << "]";
+                };
+                auto emitMaskCounts = [&](std::ostringstream &out, const std::map<uint32_t, std::size_t> &counts) {
+                    out << "{";
+                    bool first = true;
+                    for (const auto &[mask, count] : counts)
+                    {
+                        if (!first)
+                        {
+                            out << ",";
+                        }
+                        first = false;
+                        out << "\"" << jsonEscape(maskToKey(mask)) << "\":" << count;
+                    }
+                    out << "}";
+                };
+
+                std::size_t liveRegisters = 0;
+                std::size_t deadRegisters = 0;
+                std::size_t liveRegistersWithPort = 0;
+                std::size_t liveRegistersWithBoundary = 0;
+                std::size_t liveRegistersWithDeclared = 0;
+                std::size_t liveRegistersPortOnly = 0;
+                std::size_t liveRegistersBoundaryOnly = 0;
+                std::size_t liveRegistersPortAndBoundary = 0;
+                std::map<std::string, std::size_t> livePrefixCounts;
+                std::map<std::string, std::size_t> deadPrefixCounts;
+                std::map<std::string, std::size_t> boundaryOnlyPrefixCounts;
+                std::map<uint32_t, std::size_t> liveRegisterMaskCounts;
+                std::map<std::string, std::size_t> liveRegisterRootBitCounts;
+                std::vector<std::string> liveSamples;
+                std::vector<std::string> deadSamples;
+                std::vector<std::string> boundaryOnlySamples;
+
+                constexpr uint32_t kBoundaryMask = kRootInstance | kRootBlackbox | kRootSystemFunction |
+                                                   kRootSystemTask | kRootDpicImport | kRootDpicCall | kRootXmrWrite;
+                constexpr std::size_t kPrefixDepth = 5;
+                constexpr std::size_t kPrefixLimit = 20;
+
+                for (const auto &[sym, info] : regInfos)
+                {
+                    const std::string prefix = prefixAtDepth(sym, kPrefixDepth);
+                    if (info.live)
+                    {
+                        ++liveRegisters;
+                        ++liveRegisterMaskCounts[info.rootMask];
+                        livePrefixCounts[prefix] += 1;
+                        recordSample(liveSamples, sym);
+
+                        const bool hasPort = (info.rootMask & kRootPort) != 0;
+                        const bool hasBoundary = (info.rootMask & kBoundaryMask) != 0;
+                        const bool hasDeclared = (info.rootMask & (kRootDeclaredValue | kRootDeclaredStorage)) != 0;
+                        if (hasPort)
+                        {
+                            ++liveRegistersWithPort;
+                        }
+                        if (hasBoundary)
+                        {
+                            ++liveRegistersWithBoundary;
+                        }
+                        if (hasDeclared)
+                        {
+                            ++liveRegistersWithDeclared;
+                        }
+                        if (hasPort && !hasBoundary)
+                        {
+                            ++liveRegistersPortOnly;
+                        }
+                        if (hasBoundary && !hasPort)
+                        {
+                            ++liveRegistersBoundaryOnly;
+                            boundaryOnlyPrefixCounts[prefix] += 1;
+                            recordSample(boundaryOnlySamples, sym);
+                        }
+                        if (hasBoundary && hasPort)
+                        {
+                            ++liveRegistersPortAndBoundary;
+                        }
+                        for (const auto &desc : kRootMaskTable)
+                        {
+                            if ((info.rootMask & desc.bit) != 0)
+                            {
+                                liveRegisterRootBitCounts[std::string(desc.name)] += 1;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        ++deadRegisters;
+                        deadPrefixCounts[prefix] += 1;
+                        recordSample(deadSamples, sym);
+                    }
+                }
+
+                std::ostringstream report;
+                report << "{";
+                report << "\"graph\":\"" << jsonEscape(graph.symbol()) << "\",";
+                report << "\"keepDeclaredSymbols\":" << (keepDeclaredSymbols() ? "true" : "false") << ",";
+                report << "\"registers\":{";
+                report << "\"total\":" << regInfos.size() << ",";
+                report << "\"live\":" << liveRegisters << ",";
+                report << "\"dead\":" << deadRegisters << ",";
+                report << "\"liveWithPort\":" << liveRegistersWithPort << ",";
+                report << "\"liveWithBoundary\":" << liveRegistersWithBoundary << ",";
+                report << "\"liveWithDeclared\":" << liveRegistersWithDeclared << ",";
+                report << "\"livePortOnly\":" << liveRegistersPortOnly << ",";
+                report << "\"liveBoundaryOnly\":" << liveRegistersBoundaryOnly << ",";
+                report << "\"livePortAndBoundary\":" << liveRegistersPortAndBoundary << ",";
+                report << "\"liveRootBitCounts\":{";
+                bool firstRootBit = true;
+                for (const auto &[name, count] : liveRegisterRootBitCounts)
+                {
+                    if (!firstRootBit)
+                    {
+                        report << ",";
+                    }
+                    firstRootBit = false;
+                    report << "\"" << jsonEscape(name) << "\":" << count;
+                }
+                report << "},";
+                report << "\"liveMaskCounts\":";
+                emitMaskCounts(report, liveRegisterMaskCounts);
+                report << ",";
+                report << "\"topLivePrefixes\":";
+                emitPrefixCounts(report, livePrefixCounts, kPrefixLimit);
+                report << ",";
+                report << "\"topDeadPrefixes\":";
+                emitPrefixCounts(report, deadPrefixCounts, kPrefixLimit);
+                report << ",";
+                report << "\"topBoundaryOnlyPrefixes\":";
+                emitPrefixCounts(report, boundaryOnlyPrefixCounts, kPrefixLimit);
+                report << ",";
+                report << "\"liveSamples\":";
+                emitSamples(report, liveSamples);
+                report << ",";
+                report << "\"deadSamples\":";
+                emitSamples(report, deadSamples);
+                report << ",";
+                report << "\"boundaryOnlySamples\":";
+                emitSamples(report, boundaryOnlySamples);
+                report << "}";
+                report << "}";
+                setSessionValue(options_.outputKey, report.str(), "stats");
+            }
+
+            for (const auto &info : ops)
+            {
+                if (info.id.valid() && info.id.index < liveOpMask.size() && liveOpMask[info.id.index] != 0)
                 {
                     continue;
                 }
-                if (useCounts[valueId.index] != 0)
+                if (graph.eraseOpUnchecked(info.id))
+                {
+                    graphChanged = true;
+                }
+            }
+
+            std::vector<ValueId> deadValues;
+            for (const auto valueId : valueSpan)
+            {
+                if (!valueId.valid())
                 {
                     continue;
                 }
-                if (defOpByValue[valueId.index].valid())
+                const Value value = graph.getValue(valueId);
+                if (isPortValue(value))
+                {
+                    continue;
+                }
+                if (valueId.index < liveValueMask.size() && liveValueMask[valueId.index] != 0)
+                {
+                    continue;
+                }
+                if (keepDeclaredSymbols() && valueId.index < isDeclaredValue.size() &&
+                    isDeclaredValue[valueId.index] != 0)
+                {
+                    continue;
+                }
+                if (!value.users().empty())
+                {
+                    continue;
+                }
+                const OperationId defOp = value.definingOp();
+                if (defOp.valid() && defOp.index < liveOpMask.size() && liveOpMask[defOp.index] != 0)
                 {
                     continue;
                 }

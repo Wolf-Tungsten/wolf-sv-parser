@@ -20,9 +20,12 @@ namespace wolvrix::app::pybind
         PyObject *passArgsObj = Py_None;
         int dryrun = 0;
         const char *logLevelText = "warn";
-        static const char *kwlist[] = {"session", "name", "design", "args", "dryrun", "log_level", nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|Ops", const_cast<char **>(kwlist),
-                                         &sessionObj, &passName, &designKey, &passArgsObj, &dryrun, &logLevelText))
+        int keepDeclaredSymbols = 1;
+        static const char *kwlist[] = {"session", "name", "design", "args", "dryrun", "log_level",
+                                       "keep_declared_symbols", nullptr};
+        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|Opsp", const_cast<char **>(kwlist),
+                                         &sessionObj, &passName, &designKey, &passArgsObj, &dryrun, &logLevelText,
+                                         &keepDeclaredSymbols))
         {
             return nullptr;
         }
@@ -76,6 +79,7 @@ namespace wolvrix::app::pybind
         wolvrix::lib::transform::PassManager manager;
         auto &options = manager.options();
         options.logLevel = logLevel;
+        options.keepDeclaredSymbols = keepDeclaredSymbols != 0;
         options.session = dryrun ? nullptr : &session->nativeValues;
         if (logLevel != wolvrix::lib::LogLevel::Off)
         {

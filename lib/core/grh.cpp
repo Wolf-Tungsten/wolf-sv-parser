@@ -2629,6 +2629,7 @@ namespace wolvrix::lib::grh
             "kMemory",
             "kMemoryReadPort",
             "kMemoryWritePort",
+            "kMemoryFillPort",
             "kInstance",
             "kBlackbox",
             "kSystemFunction",

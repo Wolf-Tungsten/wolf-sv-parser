@@ -72,6 +72,7 @@ enum class OperationKind {
     kMemory,
     kMemoryReadPort,
     kMemoryWritePort,
+    kMemoryFillPort,
     kInstance,
     kBlackbox,
     kSystemFunction,
