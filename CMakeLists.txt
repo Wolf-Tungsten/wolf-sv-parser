@@ -128,6 +128,7 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/multidriven_guard.cpp
     lib/transform/blackbox_guard.cpp
     lib/transform/comb_lane_pack.cpp
+    lib/transform/merge_reg.cpp
     lib/transform/record_slot_repack.cpp
     lib/transform/scalar_memory_pack.cpp
     lib/transform/comb_loop_elim.cpp
@@ -638,6 +639,18 @@ target_link_libraries(transform-record-slot-repack
 )
 
 register_test_exe(transform-record-slot-repack)
+
+# transform: merge-reg
+add_executable(transform-merge-reg
+    tests/transform/test_merge_reg.cpp
+)
+
+target_link_libraries(transform-merge-reg
+    PRIVATE
+        wolvrix-lib
+)
+
+register_test_exe(transform-merge-reg)
 
 # transform: strip-debug
 add_executable(transform-strip-debug

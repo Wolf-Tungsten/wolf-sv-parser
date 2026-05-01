@@ -10,6 +10,7 @@
 #include "transform/instance_inline.hpp"
 #include "transform/latch_transparent_read.hpp"
 #include "transform/mem_to_reg.hpp"
+#include "transform/merge_reg.hpp"
 #include "transform/memory_init_check.hpp"
 #include "transform/memory_read_retime.hpp"
 #include "transform/multidriven_guard.hpp"
@@ -424,6 +425,7 @@ namespace wolvrix::lib::transform
             "xmr-resolve",
             "memory-init-check",
             "mem-to-reg",
+            "merge-reg",
             "record-slot-repack",
             "scalar-memory-pack",
             "simplify",
@@ -1596,6 +1598,15 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<ScalarMemoryPackPass>();
+        }
+        if (normalized == "merge-reg")
+        {
+            if (!args.empty())
+            {
+                error = "merge-reg does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<MergeRegPass>();
         }
         if (normalized == "record-slot-repack")
         {

@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <span>
@@ -87,6 +89,53 @@ namespace wolvrix::lib::transform
                 }
             }
             return false;
+        }
+
+        std::string jsonEscape(std::string_view text)
+        {
+            std::string out;
+            out.reserve(text.size() + 8);
+            for (const unsigned char ch : text)
+            {
+                switch (ch)
+                {
+                case '"':
+                    out += "\\\"";
+                    break;
+                case '\\':
+                    out += "\\\\";
+                    break;
+                case '\b':
+                    out += "\\b";
+                    break;
+                case '\f':
+                    out += "\\f";
+                    break;
+                case '\n':
+                    out += "\\n";
+                    break;
+                case '\r':
+                    out += "\\r";
+                    break;
+                case '\t':
+                    out += "\\t";
+                    break;
+                default:
+                    if (ch < 0x20)
+                    {
+                        constexpr char digits[] = "0123456789abcdef";
+                        out += "\\u00";
+                        out.push_back(digits[(ch >> 4) & 0xf]);
+                        out.push_back(digits[ch & 0xf]);
+                    }
+                    else
+                    {
+                        out.push_back(static_cast<char>(ch));
+                    }
+                    break;
+                }
+            }
+            return out;
         }
 
         template <typename T>
@@ -359,6 +408,100 @@ namespace wolvrix::lib::transform
         {
             std::unordered_map<std::string, std::vector<OperationId>> readPortsBySymbol;
             std::unordered_map<std::string, std::vector<OperationId>> writePortsBySymbol;
+        };
+
+        class ScalarMemoryPackReport
+        {
+        public:
+            ScalarMemoryPackReport()
+            {
+                const char *path = std::getenv("WOLVRIX_SCALAR_MEMORY_PACK_REPORT_JSON");
+                if (!path || *path == '\0')
+                {
+                    return;
+                }
+
+                path_ = path;
+                const std::filesystem::path reportPath(path_);
+                if (reportPath.has_parent_path())
+                {
+                    std::filesystem::create_directories(reportPath.parent_path());
+                }
+                out_.open(reportPath, std::ios::out | std::ios::trunc);
+                if (!out_)
+                {
+                    throw std::runtime_error("failed to open scalar-memory-pack report: " + path_);
+                }
+                out_ << "{\n  \"records\": [\n";
+            }
+
+            ~ScalarMemoryPackReport()
+            {
+                if (out_.is_open())
+                {
+                    finish(0, 0, 0, 0);
+                }
+            }
+
+            bool enabled() const noexcept { return out_.is_open(); }
+
+            void addCluster(const Graph &graph,
+                            const CandidateCluster &candidate,
+                            std::string_view memoryName,
+                            std::size_t clusterIndex)
+            {
+                if (!enabled())
+                {
+                    return;
+                }
+
+                for (const ClusterMember &member : candidate.members)
+                {
+                    if (!firstRecord_)
+                    {
+                        out_ << ",\n";
+                    }
+                    firstRecord_ = false;
+                    ++recordCount_;
+                    out_ << "    {"
+                         << "\"cluster_index\":" << clusterIndex
+                         << ",\"graph\":\"" << jsonEscape(graph.symbol()) << "\""
+                         << ",\"memory\":\"" << jsonEscape(memoryName) << "\""
+                         << ",\"register\":\"" << jsonEscape(member.symbol) << "\""
+                         << ",\"row\":" << member.index
+                         << ",\"row_count\":" << candidate.members.size()
+                         << ",\"width\":" << candidate.key.width
+                         << ",\"is_signed\":" << (candidate.key.isSigned ? "true" : "false")
+                         << "}";
+                }
+            }
+
+            void finish(std::size_t graphCount,
+                        std::size_t candidateClusterCount,
+                        std::size_t candidateMemberCount,
+                        std::size_t rewrittenClusterCount)
+            {
+                if (!enabled())
+                {
+                    return;
+                }
+                out_ << "\n  ],\n"
+                     << "  \"summary\": {"
+                     << "\"graphs\":" << graphCount
+                     << ",\"candidate_clusters\":" << candidateClusterCount
+                     << ",\"candidate_members\":" << candidateMemberCount
+                     << ",\"rewritten_clusters\":" << rewrittenClusterCount
+                     << ",\"rewritten_members\":" << recordCount_
+                     << "}\n"
+                     << "}\n";
+                out_.close();
+            }
+
+        private:
+            std::string path_;
+            std::ofstream out_;
+            bool firstRecord_ = true;
+            std::size_t recordCount_ = 0;
         };
 
         ReadWriteRefs collectReadWriteRefs(const Graph &graph)
@@ -1283,7 +1426,15 @@ namespace wolvrix::lib::transform
 
         void pruneDeadValueDef(Graph &graph, ValueId value)
         {
-            const OperationId defOpId = graph.valueDef(value);
+            OperationId defOpId = OperationId::invalid();
+            try
+            {
+                defOpId = graph.valueDef(value);
+            }
+            catch (const std::runtime_error &)
+            {
+                return;
+            }
             if (!defOpId.valid())
             {
                 return;
@@ -1316,6 +1467,23 @@ namespace wolvrix::lib::transform
             for (ValueId operand : operands)
             {
                 pruneDeadValueDef(graph, operand);
+            }
+        }
+
+        bool operationExists(const Graph &graph, OperationId opId)
+        {
+            if (!opId.valid())
+            {
+                return false;
+            }
+            try
+            {
+                (void)graph.getOperation(opId);
+                return true;
+            }
+            catch (const std::runtime_error &)
+            {
+                return false;
             }
         }
 
@@ -3309,7 +3477,7 @@ namespace wolvrix::lib::transform
                                   "reverse_index");
         }
 
-        void rewriteCandidate(Graph &graph, const CandidateCluster &candidate)
+        std::string rewriteCandidate(Graph &graph, const CandidateCluster &candidate)
         {
             const std::string memoryName = makeUniqueMemoryName(graph, candidate.key);
             const SymbolId memorySym = graph.internSymbol(memoryName);
@@ -3334,52 +3502,71 @@ namespace wolvrix::lib::transform
                 graph.addDeclaredSymbol(memorySym);
             }
 
-            for (const ReadRewritePlan::Consumer &consumer : candidate.readPlan.consumers)
-            {
-                ValueId addr = consumer.addr;
-                if (consumer.constIndex >= 0)
+            auto rewriteReadConsumers = [&]() {
+                for (const ReadRewritePlan::Consumer &consumer : candidate.readPlan.consumers)
                 {
-                    const int32_t addrWidth = addressWidthForRows(candidate.members.size());
-                    addr = createConstantValue(graph,
-                                               addrWidth,
-                                               false,
-                                               std::to_string(addrWidth) + "'d" + std::to_string(consumer.constIndex),
-                                               "direct_memory_read_index");
-                }
-                if (consumer.reverseAddr)
-                {
-                    addr = createReverseIndex(graph, addr, candidate.members.size());
-                }
-                addr = createAdjustedAddress(graph,
-                                             addr,
-                                             consumer.reverseAddr ? -consumer.rowOffset : consumer.rowOffset,
-                                             "read_row_offset");
-                const OperationId readOp = graph.createOperation(OperationKind::kMemoryReadPort, graph.makeInternalOpSym());
-                graph.setAttr(readOp, "memSymbol", memoryName);
-                graph.addOperand(readOp, addr);
-                const ValueId newResult = graph.createValue(graph.makeInternalValSym(),
-                                                            candidate.key.width,
-                                                            candidate.key.isSigned,
-                                                            ValueType::Logic);
-                graph.addResult(readOp, newResult);
-                const SrcLoc srcLoc = makeTransformSrcLoc("scalar-memory-pack", "dynamic_memory_read");
-                graph.setOpSrcLoc(readOp, srcLoc);
-                graph.setValueSrcLoc(newResult, srcLoc);
-                replacePortBinding(graph, consumer.oldResult, newResult);
-                graph.eraseOp(consumer.eraseOp, std::array<ValueId, 1>{newResult});
-            }
-
-            for (OperationId concatOpId : candidate.readPlan.concatOps)
-            {
-                graph.eraseOp(concatOpId);
-            }
-            if (!candidate.readPlan.concatOps.empty())
-            {
-                for (const ClusterMember &member : candidate.members)
-                {
-                    if (member.readOp.valid())
+                    if (!operationExists(graph, consumer.eraseOp))
                     {
-                        graph.eraseOp(member.readOp);
+                        continue;
+                    }
+                    ValueId addr = consumer.addr;
+                    if (consumer.constIndex >= 0)
+                    {
+                        const int32_t addrWidth = addressWidthForRows(candidate.members.size());
+                        addr = createConstantValue(graph,
+                                                   addrWidth,
+                                                   false,
+                                                   std::to_string(addrWidth) + "'d" + std::to_string(consumer.constIndex),
+                                                   "direct_memory_read_index");
+                    }
+                    if (!addr.valid())
+                    {
+                        throw std::runtime_error("scalar-memory-pack internal error: memory read address is invalid");
+                    }
+                    if (consumer.reverseAddr)
+                    {
+                        addr = createReverseIndex(graph, addr, candidate.members.size());
+                    }
+                    addr = createAdjustedAddress(graph,
+                                                 addr,
+                                                 consumer.reverseAddr ? -consumer.rowOffset : consumer.rowOffset,
+                                                 "read_row_offset");
+                    const OperationId readOp = graph.createOperation(OperationKind::kMemoryReadPort, graph.makeInternalOpSym());
+                    graph.setAttr(readOp, "memSymbol", memoryName);
+                    graph.addOperand(readOp, addr);
+                    const ValueId newResult = graph.createValue(graph.makeInternalValSym(),
+                                                                candidate.key.width,
+                                                                candidate.key.isSigned,
+                                                                ValueType::Logic);
+                    graph.addResult(readOp, newResult);
+                    const SrcLoc srcLoc = makeTransformSrcLoc("scalar-memory-pack", "dynamic_memory_read");
+                    graph.setOpSrcLoc(readOp, srcLoc);
+                    graph.setValueSrcLoc(newResult, srcLoc);
+                    replacePortBinding(graph, consumer.oldResult, newResult);
+                    graph.eraseOp(consumer.eraseOp, std::array<ValueId, 1>{newResult});
+                }
+            };
+
+            const bool concatDrivenRead = candidate.readPlan.concatOp.valid();
+            if (concatDrivenRead)
+            {
+                rewriteReadConsumers();
+
+                for (OperationId concatOpId : candidate.readPlan.concatOps)
+                {
+                    if (operationExists(graph, concatOpId))
+                    {
+                        graph.eraseOp(concatOpId);
+                    }
+                }
+                if (!candidate.readPlan.concatOps.empty())
+                {
+                    for (const ClusterMember &member : candidate.members)
+                    {
+                        if (operationExists(graph, member.readOp))
+                        {
+                            graph.eraseOp(member.readOp);
+                        }
                     }
                 }
             }
@@ -3438,9 +3625,17 @@ namespace wolvrix::lib::transform
             }
             for (OperationId oldWrite : erasedWrites)
             {
+                if (!operationExists(graph, oldWrite))
+                {
+                    continue;
+                }
                 const Operation oldWriteOp = graph.getOperation(oldWrite);
                 pruneSeeds.insert(pruneSeeds.end(), oldWriteOp.operands().begin(), oldWriteOp.operands().end());
                 graph.eraseOp(oldWrite);
+            }
+            if (!concatDrivenRead)
+            {
+                rewriteReadConsumers();
             }
             for (ValueId seed : pruneSeeds)
             {
@@ -3448,8 +3643,12 @@ namespace wolvrix::lib::transform
             }
             for (const ClusterMember &member : candidate.members)
             {
-                graph.eraseOp(member.regOp);
+                if (operationExists(graph, member.regOp))
+                {
+                    graph.eraseOp(member.regOp);
+                }
             }
+            return memoryName;
         }
     } // namespace
 
@@ -3469,6 +3668,7 @@ namespace wolvrix::lib::transform
         std::size_t rewrittenClusterCount = 0;
         std::size_t rewrittenMemberCount = 0;
         std::unordered_map<std::string, RejectAggregate> rejectAggregates;
+        ScalarMemoryPackReport report;
 
         for (const auto &entry : design().graphs())
         {
@@ -3494,6 +3694,7 @@ namespace wolvrix::lib::transform
                 readShapesBySequence[makeMemberSequenceKey(readShape->members)].push_back(std::move(*readShape));
             }
 
+            std::vector<CandidateCluster> acceptedCandidates;
             const std::vector<NamedSegment> segments = collectNamedSegments(graph, refs);
             for (const NamedSegment &segment : segments)
             {
@@ -3515,8 +3716,7 @@ namespace wolvrix::lib::transform
                 const auto readShapeIt = readShapesBySequence.find(sequenceKey);
                 if (readShapeIt == readShapesBySequence.end())
                 {
-                    const std::string reason = "no matching concat-driven packed read sequence";
-                    RejectAggregate &aggregate = rejectAggregates[reason];
+                    RejectAggregate &aggregate = rejectAggregates["no matching concat-driven packed read sequence"];
                     ++aggregate.rejectCount;
                     aggregate.memberCount += segment.members.size();
                     addRejectExample(aggregate.examples, segment.members.front().symbol + " ...");
@@ -3538,8 +3738,7 @@ namespace wolvrix::lib::transform
                 }
                 if (!accepted)
                 {
-                    const std::string rawReason =
-                        lastRejectReason.empty() ? std::string("unknown") : std::move(lastRejectReason);
+                    const std::string rawReason = lastRejectReason.empty() ? std::string("unknown") : lastRejectReason;
                     const std::string reason = normalizeRejectReason(rawReason);
                     RejectAggregate &aggregate = rejectAggregates[reason];
                     ++aggregate.rejectCount;
@@ -3554,10 +3753,16 @@ namespace wolvrix::lib::transform
                 }
                 ++candidateClusterCount;
                 candidateMemberCount += accepted->members.size();
-                rewriteCandidate(graph, *accepted);
+                acceptedCandidates.push_back(std::move(*accepted));
+            }
+
+            for (const CandidateCluster &candidate : acceptedCandidates)
+            {
+                const std::string memoryName = rewriteCandidate(graph, candidate);
                 result.changed = true;
                 ++rewrittenClusterCount;
-                rewrittenMemberCount += accepted->members.size();
+                rewrittenMemberCount += candidate.members.size();
+                report.addCluster(graph, candidate, memoryName, rewrittenClusterCount - 1);
             }
         }
 
@@ -3607,6 +3812,7 @@ namespace wolvrix::lib::transform
                         " examples=" + formatRejectExamples(aggregate->examples));
             }
         }
+        report.finish(graphCount, candidateClusterCount, candidateMemberCount, rewrittenClusterCount);
         return result;
     }
 

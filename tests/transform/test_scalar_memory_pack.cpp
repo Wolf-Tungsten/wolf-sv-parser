@@ -2611,7 +2611,7 @@ int main()
         }
         if (result.changed)
         {
-            return fail("direct-read family should stay scalar because it does not prove a packed read access pattern");
+            return fail("direct-read family should stay scalar because it does not reduce read ports");
         }
         if (countOps(*graph, OperationKind::kRegister) != 4 ||
             countOps(*graph, OperationKind::kRegisterReadPort) != 4 ||
