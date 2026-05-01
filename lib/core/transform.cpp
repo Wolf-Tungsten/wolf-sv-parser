@@ -13,6 +13,7 @@
 #include "transform/memory_init_check.hpp"
 #include "transform/memory_read_retime.hpp"
 #include "transform/multidriven_guard.hpp"
+#include "transform/record_slot_repack.hpp"
 #include "transform/repcut.hpp"
 #include "transform/scalar_memory_pack.hpp"
 #include "transform/simplify.hpp"
@@ -423,6 +424,7 @@ namespace wolvrix::lib::transform
             "xmr-resolve",
             "memory-init-check",
             "mem-to-reg",
+            "record-slot-repack",
             "scalar-memory-pack",
             "simplify",
             "stats",
@@ -1594,6 +1596,15 @@ namespace wolvrix::lib::transform
                 return nullptr;
             }
             return std::make_unique<ScalarMemoryPackPass>();
+        }
+        if (normalized == "record-slot-repack")
+        {
+            if (!args.empty())
+            {
+                error = "record-slot-repack does not accept arguments";
+                return nullptr;
+            }
+            return std::make_unique<RecordSlotRepackPass>();
         }
         if (normalized == "memory-read-retime")
         {

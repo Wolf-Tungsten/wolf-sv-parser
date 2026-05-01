@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <iostream>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -138,8 +139,10 @@ namespace wolvrix::lib::transform
         {
             struct Consumer
             {
-                OperationId opId;
+                OperationId eraseOp;
+                ValueId oldResult;
                 ValueId addr;
+                int64_t constIndex = -1;
                 bool reverseAddr = false;
                 int64_t rowOffset = 0;
             };
@@ -153,7 +156,16 @@ namespace wolvrix::lib::transform
         struct FillGroupKey
         {
             std::vector<ValueId> condBranches;
-            ValueId data;
+            struct DataRef
+            {
+                ValueId value;
+                int32_t width = 0;
+                bool isSigned = false;
+                std::string literal;
+                int64_t sliceStart = -1;
+
+                bool operator==(const DataRef &) const = default;
+            } data;
             ValueId mask;
             std::vector<ValueId> eventValues;
             std::vector<std::string> eventEdges;
@@ -170,7 +182,49 @@ namespace wolvrix::lib::transform
                 {
                     hashCombine(seed, hashValueId(value));
                 }
-                hashCombine(seed, hashValueId(key.data));
+                if (key.data.value.valid())
+                {
+                    hashCombine(seed, hashValueId(key.data.value));
+                }
+                else
+                {
+                    hashCombine(seed, key.data.width);
+                    hashCombine(seed, key.data.isSigned);
+                    hashCombine(seed, key.data.literal);
+                    hashCombine(seed, key.data.sliceStart);
+                }
+                hashCombine(seed, hashValueId(key.mask));
+                for (ValueId value : key.eventValues)
+                {
+                    hashCombine(seed, hashValueId(value));
+                }
+                for (const std::string &edge : key.eventEdges)
+                {
+                    hashCombine(seed, edge);
+                }
+                return seed;
+            }
+        };
+
+        struct FillFamilyKey
+        {
+            std::vector<ValueId> condBranches;
+            ValueId mask;
+            std::vector<ValueId> eventValues;
+            std::vector<std::string> eventEdges;
+
+            bool operator==(const FillFamilyKey &) const = default;
+        };
+
+        struct FillFamilyKeyHash
+        {
+            std::size_t operator()(const FillFamilyKey &key) const noexcept
+            {
+                std::size_t seed = 0;
+                for (ValueId value : key.condBranches)
+                {
+                    hashCombine(seed, hashValueId(value));
+                }
                 hashCombine(seed, hashValueId(key.mask));
                 for (ValueId value : key.eventValues)
                 {
@@ -188,7 +242,7 @@ namespace wolvrix::lib::transform
         {
             std::vector<ValueId> baseTerms;
             ValueId addr;
-            ValueId data;
+            FillGroupKey::DataRef data;
             ValueId mask;
             std::vector<ValueId> eventValues;
             std::vector<std::string> eventEdges;
@@ -206,7 +260,17 @@ namespace wolvrix::lib::transform
                     hashCombine(seed, hashValueId(value));
                 }
                 hashCombine(seed, hashValueId(key.addr));
-                hashCombine(seed, hashValueId(key.data));
+                if (key.data.value.valid())
+                {
+                    hashCombine(seed, hashValueId(key.data.value));
+                }
+                else
+                {
+                    hashCombine(seed, key.data.width);
+                    hashCombine(seed, key.data.isSigned);
+                    hashCombine(seed, key.data.literal);
+                    hashCombine(seed, key.data.sliceStart);
+                }
                 hashCombine(seed, hashValueId(key.mask));
                 for (ValueId value : key.eventValues)
                 {
@@ -231,7 +295,7 @@ namespace wolvrix::lib::transform
         struct ParsedFillArm
         {
             std::vector<ValueId> condBranches;
-            ValueId data;
+            FillGroupKey::DataRef data;
         };
 
         struct ParsedPointArm
@@ -239,7 +303,7 @@ namespace wolvrix::lib::transform
             std::vector<ValueId> baseTerms;
             ValueId addr;
             int64_t constIndex = -1;
-            ValueId data;
+            FillGroupKey::DataRef data;
         };
 
         struct ParsedWritePattern
@@ -248,17 +312,33 @@ namespace wolvrix::lib::transform
             ValueId mask;
             std::vector<ValueId> eventValues;
             std::vector<std::string> eventEdges;
-            std::optional<ParsedFillArm> fill;
+            std::vector<ParsedFillArm> fills;
             std::vector<ParsedPointArm> points;
         };
 
         struct CandidateCluster
         {
             ClusterKey key;
+            int64_t indexBase = 0;
             std::vector<ClusterMember> members;
             ReadRewritePlan readPlan;
             std::vector<std::pair<FillGroupKey, std::vector<OperationId>>> fillGroups;
             std::vector<std::pair<PointWriteKey, std::vector<OperationId>>> pointWriteGroups;
+        };
+
+        struct FlatConcatInfo
+        {
+            OperationId concatOpId;
+            std::vector<ValueId> flattenedLeaves;
+            std::vector<OperationId> concatOps;
+            std::vector<ClusterMember> members;
+        };
+
+        struct NamedSegment
+        {
+            ClusterKey key;
+            int64_t indexBase = 0;
+            std::vector<ClusterMember> members;
         };
 
         struct RejectAggregate
@@ -266,6 +346,13 @@ namespace wolvrix::lib::transform
             std::size_t rejectCount = 0;
             std::size_t memberCount = 0;
             std::vector<std::string> examples;
+        };
+
+        struct IndexedSymbolSplit
+        {
+            std::string prefix;
+            std::string suffix;
+            int64_t index = -1;
         };
 
         struct ReadWriteRefs
@@ -296,6 +383,55 @@ namespace wolvrix::lib::transform
                 }
             }
             return refs;
+        }
+
+        bool isGeneratedRegisterSymbol(const Graph &graph, OperationId regOpId)
+        {
+            const std::string_view symbol = graph.getOperation(regOpId).symbolText();
+            return symbol.empty() || symbol.front() == '_';
+        }
+
+        bool isIndexDelimiter(char ch) noexcept
+        {
+            return ch == '_' || ch == '$';
+        }
+
+        std::vector<IndexedSymbolSplit> enumerateIndexedSymbolSplits(std::string_view symbol)
+        {
+            std::vector<IndexedSymbolSplit> splits;
+            for (std::size_t pos = 0; pos < symbol.size(); ++pos)
+            {
+                if (!std::isdigit(static_cast<unsigned char>(symbol[pos])))
+                {
+                    continue;
+                }
+                const std::size_t start = pos;
+                while (pos < symbol.size() &&
+                       std::isdigit(static_cast<unsigned char>(symbol[pos])))
+                {
+                    ++pos;
+                }
+                const std::size_t end = pos;
+                if (start == 0 || !isIndexDelimiter(symbol[start - 1]))
+                {
+                    continue;
+                }
+                if (end < symbol.size() && !isIndexDelimiter(symbol[end]))
+                {
+                    continue;
+                }
+                try
+                {
+                    splits.push_back(IndexedSymbolSplit{
+                        .prefix = std::string(symbol.substr(0, start)),
+                        .suffix = std::string(symbol.substr(end)),
+                        .index = std::stoll(std::string(symbol.substr(start, end - start)))});
+                }
+                catch (const std::exception &)
+                {
+                }
+            }
+            return splits;
         }
 
         bool isAllOnesLiteral(std::string_view literal, int32_t width)
@@ -354,6 +490,242 @@ namespace wolvrix::lib::transform
             }
             const auto literal = getAttr<std::string>(defOp, "constValue");
             return literal.has_value() && isAllOnesLiteral(*literal, width);
+        }
+
+        bool isAllZeroLiteral(std::string_view literal, int32_t width)
+        {
+            if (literal.empty() || width <= 0)
+            {
+                return false;
+            }
+            std::string cleaned;
+            cleaned.reserve(literal.size());
+            for (char ch : literal)
+            {
+                if (ch != '_' && !std::isspace(static_cast<unsigned char>(ch)))
+                {
+                    cleaned.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+                }
+            }
+            const std::size_t tick = cleaned.find('\'');
+            if (tick == std::string::npos || tick + 2 >= cleaned.size())
+            {
+                return false;
+            }
+            const int parsedWidth = std::stoi(cleaned.substr(0, tick));
+            if (parsedWidth != width)
+            {
+                return false;
+            }
+            const char base = cleaned[tick + 1];
+            const std::string digits = cleaned.substr(tick + 2);
+            if (base == 'b')
+            {
+                return std::all_of(digits.begin(), digits.end(), [](char ch) { return ch == '0'; });
+            }
+            if (base == 'h')
+            {
+                return std::all_of(digits.begin(), digits.end(), [](char ch) { return ch == '0'; });
+            }
+            if (base == 'd')
+            {
+                return digits == "0";
+            }
+            return false;
+        }
+
+        FillGroupKey::DataRef makeDataRefFromValue(const Graph &graph, ValueId value)
+        {
+            FillGroupKey::DataRef data;
+            data.width = value.valid() ? graph.valueWidth(value) : 0;
+            data.isSigned = value.valid() ? graph.valueSigned(value) : false;
+            if (!value.valid())
+            {
+                return data;
+            }
+            const OperationId defOpId = graph.valueDef(value);
+            if (defOpId.valid())
+            {
+                const Operation defOp = graph.getOperation(defOpId);
+                if (defOp.kind() == OperationKind::kConstant)
+                {
+                    if (const auto literal = getAttr<std::string>(defOp, "constValue"))
+                    {
+                        data.literal = *literal;
+                        return data;
+                    }
+                }
+            }
+            data.value = value;
+            return data;
+        }
+
+        FillGroupKey::DataRef makeDataRefFromSlice(const Graph &graph,
+                                                   ValueId value,
+                                                   int32_t sliceWidth,
+                                                   int64_t sliceStart,
+                                                   bool isSigned)
+        {
+            FillGroupKey::DataRef data;
+            data.value = value;
+            data.width = sliceWidth;
+            data.isSigned = isSigned;
+            data.sliceStart = sliceStart;
+            return data;
+        }
+
+        std::optional<ValueId> projectStaticSliceLeaf(const Graph &graph,
+                                                      ValueId value,
+                                                      int64_t sliceStart,
+                                                      int32_t sliceWidth)
+        {
+            if (!value.valid() || sliceStart < 0 || sliceWidth <= 0)
+            {
+                return std::nullopt;
+            }
+            if (sliceStart == 0 && graph.valueWidth(value) == sliceWidth)
+            {
+                return value;
+            }
+            const OperationId defOpId = graph.valueDef(value);
+            if (!defOpId.valid())
+            {
+                return std::nullopt;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() == OperationKind::kAssign && defOp.operands().size() == 1)
+            {
+                return projectStaticSliceLeaf(graph, defOp.operands()[0], sliceStart, sliceWidth);
+            }
+            if (defOp.kind() == OperationKind::kSliceStatic && defOp.operands().size() == 1)
+            {
+                const int64_t innerStart = getAttr<int64_t>(defOp, "sliceStart").value_or(-1);
+                if (innerStart >= 0)
+                {
+                    return projectStaticSliceLeaf(graph, defOp.operands()[0], innerStart + sliceStart, sliceWidth);
+                }
+            }
+            if (defOp.kind() == OperationKind::kConcat)
+            {
+                int64_t offset = 0;
+                for (auto it = defOp.operands().rbegin(); it != defOp.operands().rend(); ++it)
+                {
+                    const ValueId operand = *it;
+                    const int32_t operandWidth = graph.valueWidth(operand);
+                    if (sliceStart >= offset && sliceStart + sliceWidth <= offset + operandWidth)
+                    {
+                        return projectStaticSliceLeaf(graph, operand, sliceStart - offset, sliceWidth);
+                    }
+                    offset += operandWidth;
+                }
+            }
+            return std::nullopt;
+        }
+
+        FillGroupKey::DataRef makeProjectedDataRef(const Graph &graph,
+                                                   ValueId value,
+                                                   int64_t sliceStart,
+                                                   int32_t sliceWidth,
+                                                   bool isSigned)
+        {
+            if (auto projected = projectStaticSliceLeaf(graph, value, sliceStart, sliceWidth))
+            {
+                return makeDataRefFromValue(graph, *projected);
+            }
+            const OperationId defOpId = graph.valueDef(value);
+            if (defOpId.valid())
+            {
+                const Operation defOp = graph.getOperation(defOpId);
+                if (defOp.kind() == OperationKind::kConstant)
+                {
+                    if (const auto literal = getAttr<std::string>(defOp, "constValue"))
+                    {
+                        if (isAllZeroLiteral(*literal, graph.valueWidth(value)))
+                        {
+                            return FillGroupKey::DataRef{
+                                .value = ValueId::invalid(),
+                                .width = sliceWidth,
+                                .isSigned = isSigned,
+                                .literal = std::to_string(sliceWidth) + "'d0",
+                                .sliceStart = -1};
+                        }
+                    }
+                }
+            }
+            return makeDataRefFromSlice(graph, value, sliceWidth, sliceStart, isSigned);
+        }
+
+        bool matchesCondMaskExpr(const Graph &graph,
+                                 ValueId value,
+                                 int32_t width,
+                                 ValueId cond,
+                                 bool expectTrue)
+        {
+            if (value == cond)
+            {
+                return expectTrue && width == 1;
+            }
+            const OperationId defOpId = graph.valueDef(value);
+            if (!defOpId.valid())
+            {
+                return false;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() == OperationKind::kAssign && defOp.operands().size() == 1)
+            {
+                return matchesCondMaskExpr(graph, defOp.operands()[0], width, cond, expectTrue);
+            }
+            if ((defOp.kind() == OperationKind::kLogicNot || defOp.kind() == OperationKind::kNot) &&
+                defOp.operands().size() == 1)
+            {
+                return matchesCondMaskExpr(graph, defOp.operands()[0], width, cond, !expectTrue);
+            }
+            if (defOp.kind() == OperationKind::kReplicate &&
+                defOp.operands().size() == 1 &&
+                getAttr<int64_t>(defOp, "rep").value_or(0) * graph.valueWidth(defOp.operands()[0]) == width)
+            {
+                return matchesCondMaskExpr(graph, defOp.operands()[0], graph.valueWidth(defOp.operands()[0]), cond, expectTrue);
+            }
+            return false;
+        }
+
+        bool matchesProjectedCondMask(const Graph &graph,
+                                      ValueId maskValue,
+                                      int64_t sliceStart,
+                                      int32_t sliceWidth,
+                                      ValueId cond,
+                                      bool expectTrue)
+        {
+            const OperationId defOpId = graph.valueDef(maskValue);
+            if (defOpId.valid())
+            {
+                const Operation defOp = graph.getOperation(defOpId);
+                if (defOp.kind() == OperationKind::kAssign && defOp.operands().size() == 1)
+                {
+                    return matchesProjectedCondMask(graph,
+                                                    defOp.operands()[0],
+                                                    sliceStart,
+                                                    sliceWidth,
+                                                    cond,
+                                                    expectTrue);
+                }
+                if ((defOp.kind() == OperationKind::kLogicNot || defOp.kind() == OperationKind::kNot) &&
+                    defOp.operands().size() == 1)
+                {
+                    return matchesProjectedCondMask(graph,
+                                                    defOp.operands()[0],
+                                                    sliceStart,
+                                                    sliceWidth,
+                                                    cond,
+                                                    !expectTrue);
+                }
+            }
+            auto projected = projectStaticSliceLeaf(graph, maskValue, sliceStart, sliceWidth);
+            if (!projected)
+            {
+                return false;
+            }
+            return matchesCondMaskExpr(graph, *projected, sliceWidth, cond, expectTrue);
         }
 
         bool parseConstIntLiteral(std::string_view literal, int64_t &valueOut)
@@ -581,24 +953,49 @@ namespace wolvrix::lib::transform
             return std::pair<ValueId, int64_t>{addr, static_cast<int64_t>(rowCount - 1u)};
         }
 
-        struct PointCondInfo
-        {
-            std::vector<ValueId> baseTerms;
-            ValueId addr;
-            int64_t constIndex = -1;
-        };
-
-        std::optional<PointCondInfo> parsePointCond(const Graph &graph,
-                                                    ValueId cond,
-                                                    std::size_t clusterRows)
+        std::optional<std::pair<ValueId, int64_t>> parseAllZeroAddrMatch(const Graph &graph, ValueId cond)
         {
             if (!cond.valid())
             {
                 return std::nullopt;
             }
+            const OperationId defOpId = graph.valueDef(cond);
+            if (!defOpId.valid())
+            {
+                return std::nullopt;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if ((defOp.kind() != OperationKind::kNot && defOp.kind() != OperationKind::kLogicNot) ||
+                defOp.operands().size() != 1)
+            {
+                return std::nullopt;
+            }
+            const OperationId innerDefId = graph.valueDef(defOp.operands()[0]);
+            if (!innerDefId.valid())
+            {
+                return std::nullopt;
+            }
+            const Operation innerDef = graph.getOperation(innerDefId);
+            if (innerDef.kind() != OperationKind::kReduceOr || innerDef.operands().size() != 1)
+            {
+                return std::nullopt;
+            }
+            return std::pair<ValueId, int64_t>{innerDef.operands()[0], 0};
+        }
 
-            std::vector<ValueId> terms;
-            flattenAndTerms(graph, cond, terms);
+        struct PointCondInfo
+        {
+            std::vector<ValueId> baseTerms;
+            ValueId addr;
+            int64_t constIndex = -1;
+
+            bool operator==(const PointCondInfo &) const = default;
+        };
+
+        std::optional<PointCondInfo> parsePointCondTerms(const Graph &graph,
+                                                         std::vector<ValueId> terms,
+                                                         std::size_t clusterRows)
+        {
             std::optional<std::pair<ValueId, int64_t>> eqInfo;
             std::vector<ValueId> baseTerms;
             for (ValueId term : terms)
@@ -619,6 +1016,14 @@ namespace wolvrix::lib::transform
                     }
                     eqInfo = *allOnes;
                 }
+                else if (auto allZero = parseAllZeroAddrMatch(graph, term))
+                {
+                    if (eqInfo)
+                    {
+                        return std::nullopt;
+                    }
+                    eqInfo = *allZero;
+                }
                 else
                 {
                     baseTerms.push_back(term);
@@ -633,6 +1038,121 @@ namespace wolvrix::lib::transform
                 .baseTerms = std::move(baseTerms),
                 .addr = eqInfo->first,
                 .constIndex = eqInfo->second};
+        }
+
+        bool flattenPointOrBundleTerms(const Graph &graph, ValueId value, std::vector<ValueId> &leaves)
+        {
+            if (!value.valid())
+            {
+                return false;
+            }
+            const OperationId defOpId = graph.valueDef(value);
+            if (!defOpId.valid())
+            {
+                return false;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() == OperationKind::kAssign && defOp.operands().size() == 1)
+            {
+                return flattenPointOrBundleTerms(graph, defOp.operands()[0], leaves);
+            }
+            if (isOrKind(defOp.kind()) && defOp.operands().size() == 2)
+            {
+                return flattenPointOrBundleTerms(graph, defOp.operands()[0], leaves) &&
+                       flattenPointOrBundleTerms(graph, defOp.operands()[1], leaves);
+            }
+            if (defOp.kind() != OperationKind::kReduceOr || defOp.operands().size() != 1)
+            {
+                return false;
+            }
+            const OperationId concatDefId = graph.valueDef(defOp.operands()[0]);
+            if (!concatDefId.valid())
+            {
+                return false;
+            }
+            const Operation concatDef = graph.getOperation(concatDefId);
+            if (concatDef.kind() != OperationKind::kConcat || concatDef.operands().empty())
+            {
+                return false;
+            }
+            for (ValueId operand : concatDef.operands())
+            {
+                if (graph.valueWidth(operand) != 1)
+                {
+                    return false;
+                }
+                leaves.push_back(operand);
+            }
+            return true;
+        }
+
+        struct PointCondBundle
+        {
+            std::vector<ValueId> globalBaseTerms;
+            std::vector<std::pair<ValueId, PointCondInfo>> leaves;
+        };
+
+        std::optional<PointCondBundle> parsePointCondBundle(const Graph &graph,
+                                                            ValueId cond,
+                                                            std::size_t clusterRows)
+        {
+            std::vector<ValueId> terms;
+            flattenAndTerms(graph, cond, terms);
+
+            std::vector<ValueId> globalBaseTerms;
+            std::vector<ValueId> bundleLeaves;
+            bool sawBundle = false;
+            for (ValueId term : terms)
+            {
+                std::vector<ValueId> currentLeaves;
+                if (flattenPointOrBundleTerms(graph, term, currentLeaves) && currentLeaves.size() > 1)
+                {
+                    if (sawBundle)
+                    {
+                        return std::nullopt;
+                    }
+                    bundleLeaves = std::move(currentLeaves);
+                    sawBundle = true;
+                }
+                else
+                {
+                    globalBaseTerms.push_back(term);
+                }
+            }
+            if (!sawBundle)
+            {
+                return std::nullopt;
+            }
+
+            PointCondBundle bundle;
+            bundle.globalBaseTerms = std::move(globalBaseTerms);
+            canonicalizeValues(bundle.globalBaseTerms);
+            for (ValueId leaf : bundleLeaves)
+            {
+                std::vector<ValueId> leafExpandedTerms;
+                flattenAndTerms(graph, leaf, leafExpandedTerms);
+                auto parsed = parsePointCondTerms(graph, std::move(leafExpandedTerms), clusterRows);
+                if (!parsed)
+                {
+                    return std::nullopt;
+                }
+                bundle.leaves.push_back({leaf, std::move(*parsed)});
+            }
+            return bundle;
+        }
+
+        std::optional<PointCondInfo> parsePointCond(const Graph &graph,
+                                                    ValueId cond,
+                                                    std::size_t clusterRows)
+        {
+            if (!cond.valid())
+            {
+                return std::nullopt;
+            }
+
+            std::vector<ValueId> terms;
+            flattenAndTerms(graph, cond, terms);
+            return parsePointCondTerms(graph, std::move(terms), clusterRows);
         }
 
         bool sameOperands(std::span<const ValueId> lhs, std::span<const ValueId> rhs) noexcept
@@ -676,6 +1196,126 @@ namespace wolvrix::lib::transform
                                         port.out == from ? to : port.out,
                                         port.oe == from ? to : port.oe);
                 }
+            }
+        }
+
+        bool isValueBoundToPort(const Graph &graph, ValueId value)
+        {
+            for (const auto &port : graph.outputPorts())
+            {
+                if (port.value == value)
+                {
+                    return true;
+                }
+            }
+            for (const auto &port : graph.inputPorts())
+            {
+                if (port.value == value)
+                {
+                    return true;
+                }
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                if (port.in == value || port.out == value || port.oe == value)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool isContainedInWriteCone(const Graph &graph,
+                                    OperationId opId,
+                                    const std::unordered_set<OperationId, OperationIdHash> &writeOps,
+                                    std::unordered_map<OperationId, bool, OperationIdHash> &memo,
+                                    std::unordered_set<OperationId, OperationIdHash> &visiting)
+        {
+            if (writeOps.contains(opId))
+            {
+                return true;
+            }
+            if (const auto it = memo.find(opId); it != memo.end())
+            {
+                return it->second;
+            }
+            if (!visiting.insert(opId).second)
+            {
+                memo[opId] = false;
+                return false;
+            }
+
+            bool ok = true;
+            const Operation op = graph.getOperation(opId);
+            if (op.results().empty())
+            {
+                ok = false;
+            }
+            else
+            {
+                for (ValueId result : op.results())
+                {
+                    if (isValueBoundToPort(graph, result))
+                    {
+                        ok = false;
+                        break;
+                    }
+                    const Value value = graph.getValue(result);
+                    for (const ValueUser &user : value.users())
+                    {
+                        if (!isContainedInWriteCone(graph, user.operation, writeOps, memo, visiting))
+                        {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (!ok)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            visiting.erase(opId);
+            memo[opId] = ok;
+            return ok;
+        }
+
+        void pruneDeadValueDef(Graph &graph, ValueId value)
+        {
+            const OperationId defOpId = graph.valueDef(value);
+            if (!defOpId.valid())
+            {
+                return;
+            }
+
+            std::optional<Operation> op;
+            try
+            {
+                op = graph.getOperation(defOpId);
+            }
+            catch (const std::runtime_error &)
+            {
+                return;
+            }
+
+            for (ValueId result : op->results())
+            {
+                if (isValueBoundToPort(graph, result))
+                {
+                    return;
+                }
+                if (!graph.getValue(result).users().empty())
+                {
+                    return;
+                }
+            }
+
+            const std::vector<ValueId> operands(op->operands().begin(), op->operands().end());
+            graph.eraseOp(defOpId);
+            for (ValueId operand : operands)
+            {
+                pruneDeadValueDef(graph, operand);
             }
         }
 
@@ -805,24 +1445,119 @@ namespace wolvrix::lib::transform
             }
         }
 
-        std::size_t estimateFlattenedConcatLeafCount(const Graph &graph, OperationId opId)
+        std::string makeMemberSequenceKey(std::span<const ClusterMember> members)
         {
-            try
+            std::size_t totalSize = 0;
+            for (const ClusterMember &member : members)
             {
-                if (graph.getOperation(opId).kind() != OperationKind::kConcat)
-                {
-                    return 0;
-                }
-            }
-            catch (const std::runtime_error &)
-            {
-                return 0;
+                totalSize += member.symbol.size() + 1;
             }
 
-            std::vector<ValueId> leaves;
-            std::vector<OperationId> concatOps;
-            flattenConcatLeaves(graph, opId, leaves, concatOps);
-            return leaves.size();
+            std::string key;
+            key.reserve(totalSize);
+            for (const ClusterMember &member : members)
+            {
+                key.append(member.symbol);
+                key.push_back('\n');
+            }
+            return key;
+        }
+
+        std::vector<NamedSegment> collectNamedSegments(const Graph &graph, const ReadWriteRefs &refs)
+        {
+            std::unordered_map<ClusterKey, std::vector<ClusterMember>, ClusterKeyHash> families;
+            for (const OperationId opId : graph.operations())
+            {
+                const Operation regOp = graph.getOperation(opId);
+                if (regOp.kind() != OperationKind::kRegister || isGeneratedRegisterSymbol(graph, opId))
+                {
+                    continue;
+                }
+
+                const std::string symbol(regOp.symbolText());
+                if (symbol.empty() ||
+                    !refs.readPortsBySymbol.contains(symbol) ||
+                    !refs.writePortsBySymbol.contains(symbol))
+                {
+                    continue;
+                }
+
+                const int32_t width = static_cast<int32_t>(getAttr<int64_t>(regOp, "width").value_or(0));
+                const bool isSigned = getAttr<bool>(regOp, "isSigned").value_or(false);
+                if (width <= 0)
+                {
+                    continue;
+                }
+
+                std::unordered_set<ClusterKey, ClusterKeyHash> seenKeys;
+                for (const IndexedSymbolSplit &split : enumerateIndexedSymbolSplits(symbol))
+                {
+                    ClusterKey key{
+                        .prefix = split.prefix,
+                        .suffix = split.suffix,
+                        .width = width,
+                        .isSigned = isSigned};
+                    if (!seenKeys.insert(key).second)
+                    {
+                        continue;
+                    }
+                    families[key].push_back(ClusterMember{
+                        .symbol = symbol,
+                        .regOp = opId,
+                        .readOp = OperationId::invalid(),
+                        .readResult = ValueId::invalid(),
+                        .index = split.index});
+                }
+            }
+
+            std::vector<NamedSegment> segments;
+            for (auto &[key, members] : families)
+            {
+                if (members.size() < 4)
+                {
+                    continue;
+                }
+
+                std::sort(members.begin(),
+                          members.end(),
+                          [](const ClusterMember &lhs, const ClusterMember &rhs) {
+                              if (lhs.index != rhs.index)
+                              {
+                                  return lhs.index < rhs.index;
+                              }
+                              return lhs.symbol < rhs.symbol;
+                          });
+
+                auto flushSegment = [&](std::size_t start, std::size_t end) {
+                    if (end <= start || end - start < 4)
+                    {
+                        return;
+                    }
+                    NamedSegment segment;
+                    segment.key = key;
+                    segment.indexBase = members[start].index;
+                    segment.members.reserve(end - start);
+                    for (std::size_t i = start; i < end; ++i)
+                    {
+                        segment.members.push_back(members[i]);
+                    }
+                    segments.push_back(std::move(segment));
+                };
+
+                std::size_t start = 0;
+                for (std::size_t i = 1; i < members.size(); ++i)
+                {
+                    const bool duplicateIndex = members[i].index == members[i - 1].index;
+                    const bool nonContiguous = members[i].index != members[i - 1].index + 1;
+                    if (duplicateIndex || nonContiguous)
+                    {
+                        flushSegment(start, i);
+                        start = i;
+                    }
+                }
+                flushSegment(start, members.size());
+            }
+            return segments;
         }
 
         void addRejectExample(std::vector<std::string> &examples, std::string example, std::size_t cap = 5)
@@ -1123,6 +1858,7 @@ namespace wolvrix::lib::transform
 
         ReadRewritePlan analyzeReadPlan(const Graph &graph,
                                         const CandidateCluster &candidate,
+                                        const ReadWriteRefs &refs,
                                         OperationId concatOpId,
                                         std::span<const ValueId> flattenedLeaves,
                                         std::span<const OperationId> concatOps,
@@ -1167,13 +1903,39 @@ namespace wolvrix::lib::transform
             }
 
             std::unordered_set<OperationId, OperationIdHash> concatOpSet(concatOps.begin(), concatOps.end());
+            std::unordered_set<OperationId, OperationIdHash> writeOps;
+            for (const ClusterMember &member : candidate.members)
+            {
+                if (const auto it = refs.writePortsBySymbol.find(member.symbol); it != refs.writePortsBySymbol.end())
+                {
+                    writeOps.insert(it->second.begin(), it->second.end());
+                }
+            }
+            std::unordered_map<OperationId, bool, OperationIdHash> writeConeMemo;
+            std::unordered_set<OperationId, OperationIdHash> writeConeVisiting;
             for (ValueId readValue : rowValues)
             {
                 const Value value = graph.getValue(readValue);
-                if (value.users().size() != 1 || !concatOpSet.contains(value.users().front().operation))
+                if (value.users().empty())
                 {
                     setRejectReason(reasonOut, "register read has non-concat users");
                     return {};
+                }
+                for (const ValueUser &user : value.users())
+                {
+                    if (concatOpSet.contains(user.operation))
+                    {
+                        continue;
+                    }
+                    if (!isContainedInWriteCone(graph,
+                                                user.operation,
+                                                writeOps,
+                                                writeConeMemo,
+                                                writeConeVisiting))
+                    {
+                        setRejectReason(reasonOut, "register read has non-concat users");
+                        return {};
+                    }
                 }
             }
 
@@ -1202,8 +1964,10 @@ namespace wolvrix::lib::transform
                         return {};
                     }
                     plan.consumers.push_back(ReadRewritePlan::Consumer{
-                        .opId = user.operation,
+                        .eraseOp = user.operation,
+                        .oldResult = sliceOp.results().front(),
                         .addr = sliceOp.operands()[1],
+                        .constIndex = -1,
                         .reverseAddr = false,
                         .rowOffset = 0});
                     continue;
@@ -1223,8 +1987,10 @@ namespace wolvrix::lib::transform
                         return {};
                     }
                     plan.consumers.push_back(ReadRewritePlan::Consumer{
-                        .opId = user.operation,
+                        .eraseOp = user.operation,
+                        .oldResult = sliceOp.results().front(),
                         .addr = indexInfo->addr,
+                        .constIndex = -1,
                         .reverseAddr = indexInfo->reverseAddr,
                         .rowOffset = indexInfo->rowOffset});
                     continue;
@@ -1239,8 +2005,16 @@ namespace wolvrix::lib::transform
             return plan;
         }
 
-        std::optional<std::pair<ValueId, ValueId>> parseMuxArms(const Graph &graph, ValueId value, ValueId cond)
+        std::optional<std::pair<FillGroupKey::DataRef, FillGroupKey::DataRef>>
+        parseMuxArms(const Graph &graph,
+                     ValueId value,
+                     ValueId cond,
+                     int64_t projectedSliceStart = -1,
+                     int32_t projectedWidth = -1,
+                     bool projectedSigned = false)
         {
+            const int32_t targetWidth = projectedWidth > 0 ? projectedWidth : graph.valueWidth(value);
+            const bool targetSigned = projectedWidth > 0 ? projectedSigned : graph.valueSigned(value);
             const OperationId defOpId = graph.valueDef(value);
             if (!defOpId.valid())
             {
@@ -1249,11 +2023,115 @@ namespace wolvrix::lib::transform
             const Operation defOp = graph.getOperation(defOpId);
             if (defOp.kind() != OperationKind::kMux || defOp.operands().size() != 3)
             {
+                if (defOp.kind() == OperationKind::kSliceStatic &&
+                    defOp.operands().size() == 1 &&
+                    getAttr<int64_t>(defOp, "sliceStart").has_value() &&
+                    getAttr<int64_t>(defOp, "sliceEnd").has_value())
+                {
+                    const int64_t sliceStart = getAttr<int64_t>(defOp, "sliceStart").value();
+                    const int64_t absoluteSliceStart =
+                        projectedSliceStart >= 0 ? projectedSliceStart + sliceStart : sliceStart;
+                    return parseMuxArms(graph,
+                                        defOp.operands()[0],
+                                        cond,
+                                        absoluteSliceStart,
+                                        targetWidth,
+                                        targetSigned);
+                }
+
+                if (defOp.kind() == OperationKind::kOr && defOp.operands().size() == 2)
+                {
+                    const int64_t sliceStart = projectedSliceStart >= 0 ? projectedSliceStart : 0;
+                    auto parseMaskedData = [&](ValueId masked, bool expectTrueMask) -> std::optional<FillGroupKey::DataRef> {
+                        const OperationId maskedDefId = graph.valueDef(masked);
+                        if (!maskedDefId.valid())
+                        {
+                            return std::nullopt;
+                        }
+                        const Operation maskedDef = graph.getOperation(maskedDefId);
+                        if (maskedDef.kind() != OperationKind::kAnd || maskedDef.operands().size() != 2)
+                        {
+                            return std::nullopt;
+                        }
+                        if (matchesProjectedCondMask(graph,
+                                                     maskedDef.operands()[1],
+                                                     sliceStart,
+                                                     targetWidth,
+                                                     cond,
+                                                     expectTrueMask))
+                        {
+                            return makeProjectedDataRef(graph,
+                                                        maskedDef.operands()[0],
+                                                        sliceStart,
+                                                        targetWidth,
+                                                        targetSigned);
+                        }
+                        if (matchesProjectedCondMask(graph,
+                                                     maskedDef.operands()[0],
+                                                     sliceStart,
+                                                     targetWidth,
+                                                     cond,
+                                                     expectTrueMask))
+                        {
+                            return makeProjectedDataRef(graph,
+                                                        maskedDef.operands()[1],
+                                                        sliceStart,
+                                                        targetWidth,
+                                                        targetSigned);
+                        }
+                        return std::nullopt;
+                    };
+
+                    auto trueData = parseMaskedData(defOp.operands()[0], true);
+                    auto falseData = parseMaskedData(defOp.operands()[1], false);
+                    if (trueData && falseData)
+                    {
+                        return std::pair<FillGroupKey::DataRef, FillGroupKey::DataRef>{*trueData, *falseData};
+                    }
+                    trueData = parseMaskedData(defOp.operands()[1], true);
+                    falseData = parseMaskedData(defOp.operands()[0], false);
+                    if (trueData && falseData)
+                    {
+                        return std::pair<FillGroupKey::DataRef, FillGroupKey::DataRef>{*trueData, *falseData};
+                    }
+                }
+
                 return std::nullopt;
             }
             if (defOp.operands()[0] == cond)
             {
-                return std::pair<ValueId, ValueId>{defOp.operands()[1], defOp.operands()[2]};
+                auto makeLeafDataRef = [&](ValueId arm) -> FillGroupKey::DataRef {
+                    if (projectedSliceStart >= 0)
+                    {
+                        if (projectedSliceStart == 0 && targetWidth == graph.valueWidth(arm))
+                        {
+                            return makeDataRefFromValue(graph, arm);
+                        }
+                        return makeDataRefFromSlice(graph, arm, targetWidth, projectedSliceStart, targetSigned);
+                    }
+                    return makeDataRefFromValue(graph, arm);
+                };
+                auto normalizeArm = [&](ValueId arm, bool trueWhenCond) -> FillGroupKey::DataRef {
+                    if (auto nested = parseMuxArms(graph, arm, cond, projectedSliceStart, targetWidth, targetSigned))
+                    {
+                        if (trueWhenCond &&
+                            !nested->second.literal.empty() &&
+                            isAllZeroLiteral(nested->second.literal, nested->second.width))
+                        {
+                            return nested->first;
+                        }
+                        if (!trueWhenCond &&
+                            !nested->first.literal.empty() &&
+                            isAllZeroLiteral(nested->first.literal, nested->first.width))
+                        {
+                            return nested->second;
+                        }
+                    }
+                    return makeLeafDataRef(arm);
+                };
+                return std::pair<FillGroupKey::DataRef, FillGroupKey::DataRef>{
+                    normalizeArm(defOp.operands()[1], true),
+                    normalizeArm(defOp.operands()[2], false)};
             }
             const OperationId condDefId = graph.valueDef(defOp.operands()[0]);
             if (condDefId.valid())
@@ -1263,7 +2141,38 @@ namespace wolvrix::lib::transform
                     condDef.operands().size() == 1 &&
                     condDef.operands()[0] == cond)
                 {
-                    return std::pair<ValueId, ValueId>{defOp.operands()[2], defOp.operands()[1]};
+                    auto makeLeafDataRef = [&](ValueId arm) -> FillGroupKey::DataRef {
+                        if (projectedSliceStart >= 0)
+                        {
+                            if (projectedSliceStart == 0 && targetWidth == graph.valueWidth(arm))
+                            {
+                                return makeDataRefFromValue(graph, arm);
+                            }
+                            return makeDataRefFromSlice(graph, arm, targetWidth, projectedSliceStart, targetSigned);
+                        }
+                        return makeDataRefFromValue(graph, arm);
+                    };
+                    auto normalizeArm = [&](ValueId arm, bool trueWhenCond) -> FillGroupKey::DataRef {
+                        if (auto nested = parseMuxArms(graph, arm, cond, projectedSliceStart, targetWidth, targetSigned))
+                        {
+                            if (trueWhenCond &&
+                                !nested->second.literal.empty() &&
+                                isAllZeroLiteral(nested->second.literal, nested->second.width))
+                            {
+                                return nested->first;
+                            }
+                            if (!trueWhenCond &&
+                                !nested->first.literal.empty() &&
+                                isAllZeroLiteral(nested->first.literal, nested->first.width))
+                            {
+                                return nested->second;
+                            }
+                        }
+                        return makeLeafDataRef(arm);
+                    };
+                    return std::pair<FillGroupKey::DataRef, FillGroupKey::DataRef>{
+                        normalizeArm(defOp.operands()[2], true),
+                        normalizeArm(defOp.operands()[1], false)};
                 }
             }
             return std::nullopt;
@@ -1273,13 +2182,304 @@ namespace wolvrix::lib::transform
         {
             ValueId cond;
             PointCondInfo info;
+            std::vector<ValueId> extraBaseTerms;
+            std::size_t clusterRows = 0;
         };
 
+        std::vector<ValueId> mergedPointBaseTerms(const PointCondBranch &branch)
+        {
+            std::vector<ValueId> merged = branch.info.baseTerms;
+            merged.insert(merged.end(), branch.extraBaseTerms.begin(), branch.extraBaseTerms.end());
+            canonicalizeValues(merged);
+            merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+            return merged;
+        }
+
+        bool matchesEquivalentPointCondMask(const Graph &graph,
+                                            ValueId maskValue,
+                                            int64_t sliceStart,
+                                            int32_t sliceWidth,
+                                            const PointCondBranch &branch,
+                                            bool expectTrue)
+        {
+            if (matchesProjectedCondMask(graph, maskValue, sliceStart, sliceWidth, branch.cond, expectTrue))
+            {
+                return true;
+            }
+            if (!expectTrue)
+            {
+                return false;
+            }
+
+            const OperationId defOpId = graph.valueDef(maskValue);
+            if (defOpId.valid())
+            {
+                const Operation defOp = graph.getOperation(defOpId);
+                if (defOp.kind() == OperationKind::kAssign && defOp.operands().size() == 1)
+                {
+                    return matchesEquivalentPointCondMask(graph,
+                                                          defOp.operands()[0],
+                                                          sliceStart,
+                                                          sliceWidth,
+                                                          branch,
+                                                          expectTrue);
+                }
+            }
+
+            if (graph.valueWidth(maskValue) == 1)
+            {
+                if (auto parsed = parsePointCond(graph, maskValue, branch.clusterRows))
+                {
+                    return *parsed == branch.info;
+                }
+            }
+
+            if (sliceWidth == 1)
+            {
+                auto projected = projectStaticSliceLeaf(graph, maskValue, sliceStart, sliceWidth);
+                if (!projected)
+                {
+                    return false;
+                }
+                if (auto parsed = parsePointCond(graph, *projected, branch.clusterRows))
+                {
+                    return *parsed == branch.info;
+                }
+            }
+            return false;
+        }
+
+        std::optional<FillGroupKey::DataRef> parseMaskedPointDataTerm(const Graph &graph,
+                                                                      ValueId term,
+                                                                      const PointCondBranch &branch,
+                                                                      int32_t width,
+                                                                      bool isSigned)
+        {
+            const OperationId defOpId = graph.valueDef(term);
+            if (!defOpId.valid())
+            {
+                return std::nullopt;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() == OperationKind::kAssign && defOp.operands().size() == 1)
+            {
+                return parseMaskedPointDataTerm(graph, defOp.operands()[0], branch, width, isSigned);
+            }
+            if (!isAndKind(defOp.kind()) || defOp.operands().size() != 2)
+            {
+                if (defOp.kind() == OperationKind::kMux && defOp.operands().size() == 3)
+                {
+                    auto tryMaskedMux = [&](ValueId condValue,
+                                            ValueId trueValue,
+                                            ValueId falseValue) -> std::optional<FillGroupKey::DataRef> {
+                        if (!matchesEquivalentPointCondMask(graph, condValue, 0, width, branch, true))
+                        {
+                            return std::nullopt;
+                        }
+                        const auto falseData = makeProjectedDataRef(graph, falseValue, 0, width, isSigned);
+                        if (falseData.literal.empty() || !isAllZeroLiteral(falseData.literal, falseData.width))
+                        {
+                            return std::nullopt;
+                        }
+                        return makeProjectedDataRef(graph, trueValue, 0, width, isSigned);
+                    };
+
+                    if (auto data = tryMaskedMux(defOp.operands()[0], defOp.operands()[1], defOp.operands()[2]))
+                    {
+                        return data;
+                    }
+                }
+                return std::nullopt;
+            }
+            if (matchesEquivalentPointCondMask(graph, defOp.operands()[0], 0, width, branch, true))
+            {
+                return makeProjectedDataRef(graph, defOp.operands()[1], 0, width, isSigned);
+            }
+            if (matchesEquivalentPointCondMask(graph, defOp.operands()[1], 0, width, branch, true))
+            {
+                return makeProjectedDataRef(graph, defOp.operands()[0], 0, width, isSigned);
+            }
+            return std::nullopt;
+        }
+
+        bool isSelfRegisterReadValue(const Graph &graph, ValueId value, std::string_view regSymbol)
+        {
+            if (!value.valid())
+            {
+                return false;
+            }
+            const OperationId defOpId = graph.valueDef(value);
+            if (!defOpId.valid())
+            {
+                return false;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            if (defOp.kind() == OperationKind::kAssign && defOp.operands().size() == 1)
+            {
+                return isSelfRegisterReadValue(graph, defOp.operands()[0], regSymbol);
+            }
+            if (defOp.kind() != OperationKind::kRegisterReadPort)
+            {
+                return false;
+            }
+            const auto readRegSymbol = getAttr<std::string>(defOp, "regSymbol");
+            return readRegSymbol && *readRegSymbol == regSymbol;
+        }
+
+        bool isSelfRegisterDataRef(const Graph &graph,
+                                   const FillGroupKey::DataRef &data,
+                                   std::string_view regSymbol)
+        {
+            if (!data.value.valid() || data.sliceStart >= 0)
+            {
+                return false;
+            }
+            return isSelfRegisterReadValue(graph, data.value, regSymbol);
+        }
+
+        bool samePointBranchDescriptor(const PointCondBranch &lhs, const PointCondBranch &rhs)
+        {
+            return lhs.info == rhs.info && lhs.extraBaseTerms == rhs.extraBaseTerms;
+        }
+
+        std::optional<std::vector<std::size_t>> parsePointBranchSubset(const Graph &graph,
+                                                                       ValueId cond,
+                                                                       std::span<const PointCondBranch> branches,
+                                                                       bool allowFullMatch = false)
+        {
+            if (branches.empty())
+            {
+                return std::nullopt;
+            }
+            const auto bundle = parsePointCondBundle(graph, cond, branches.front().clusterRows);
+            if (!bundle)
+            {
+                return std::nullopt;
+            }
+
+            std::vector<PointCondBranch> parsed;
+            parsed.reserve(bundle->leaves.size());
+            for (const auto &[leafCond, leafInfo] : bundle->leaves)
+            {
+                parsed.push_back(PointCondBranch{
+                    .cond = leafCond,
+                    .info = leafInfo,
+                    .extraBaseTerms = bundle->globalBaseTerms,
+                    .clusterRows = branches.front().clusterRows,
+                });
+            }
+
+            std::vector<std::size_t> matched;
+            std::vector<bool> used(branches.size(), false);
+            for (const PointCondBranch &want : parsed)
+            {
+                bool found = false;
+                for (std::size_t i = 0; i < branches.size(); ++i)
+                {
+                    if (used[i])
+                    {
+                        continue;
+                    }
+                    if (!samePointBranchDescriptor(want, branches[i]))
+                    {
+                        continue;
+                    }
+                    used[i] = true;
+                    matched.push_back(i);
+                    found = true;
+                    break;
+                }
+                if (!found)
+                {
+                    return std::nullopt;
+                }
+            }
+            if (matched.empty())
+            {
+                return std::nullopt;
+            }
+            if (!allowFullMatch && matched.size() == branches.size())
+            {
+                return std::nullopt;
+            }
+            std::sort(matched.begin(), matched.end());
+            return matched;
+        }
+
+        void appendBroadcastPointArms(std::span<const PointCondBranch> branches,
+                                      const FillGroupKey::DataRef &data,
+                                      std::vector<ParsedPointArm> &pointsOut)
+        {
+            for (const PointCondBranch &branch : branches)
+            {
+                pointsOut.push_back(ParsedPointArm{
+                    .baseTerms = mergedPointBaseTerms(branch),
+                    .addr = branch.info.addr,
+                    .constIndex = branch.info.constIndex,
+                    .data = data});
+            }
+        }
+
+        bool parsePointDataMaskedOrTree(const Graph &graph,
+                                        const FillGroupKey::DataRef &value,
+                                        std::span<const PointCondBranch> branches,
+                                        std::vector<ParsedPointArm> &pointsOut,
+                                        FillGroupKey::DataRef &defaultDataOut)
+        {
+            if (!value.value.valid() || branches.empty())
+            {
+                return false;
+            }
+
+            std::vector<ValueId> terms;
+            flattenOrTerms(graph, value.value, terms);
+            if (terms.size() != branches.size())
+            {
+                return false;
+            }
+
+            std::vector<bool> used(terms.size(), false);
+            std::vector<ParsedPointArm> parsedPoints;
+            parsedPoints.reserve(branches.size());
+            for (const PointCondBranch &branch : branches)
+            {
+                bool matched = false;
+                for (std::size_t i = 0; i < terms.size(); ++i)
+                {
+                    if (used[i])
+                    {
+                        continue;
+                    }
+                    const auto data = parseMaskedPointDataTerm(graph, terms[i], branch, value.width, value.isSigned);
+                    if (!data)
+                    {
+                        continue;
+                    }
+                    used[i] = true;
+                    parsedPoints.push_back(ParsedPointArm{
+                        .baseTerms = mergedPointBaseTerms(branch),
+                        .addr = branch.info.addr,
+                        .constIndex = branch.info.constIndex,
+                        .data = *data});
+                    matched = true;
+                    break;
+                }
+                if (!matched)
+                {
+                    return false;
+                }
+            }
+
+            pointsOut = std::move(parsedPoints);
+            defaultDataOut = FillGroupKey::DataRef{};
+            return true;
+        }
+
         bool parsePointDataTree(const Graph &graph,
-                                ValueId value,
+                                const FillGroupKey::DataRef &value,
                                 std::span<const PointCondBranch> branches,
                                 std::vector<ParsedPointArm> &pointsOut,
-                                ValueId &defaultDataOut,
+                                FillGroupKey::DataRef &defaultDataOut,
                                 bool allowImplicitLastPointArm)
         {
             if (branches.empty())
@@ -1288,20 +2488,112 @@ namespace wolvrix::lib::transform
                 return true;
             }
 
+            const OperationId valueDefId = value.value.valid() ? graph.valueDef(value.value) : OperationId::invalid();
+            const bool structurallySimpleValue =
+                !value.value.valid() ||
+                !valueDefId.valid() ||
+                ([&]() {
+                    const Operation defOp = graph.getOperation(valueDefId);
+                    return defOp.kind() != OperationKind::kMux &&
+                           defOp.kind() != OperationKind::kOr &&
+                           defOp.kind() != OperationKind::kLogicOr;
+                })();
+            if (branches.size() > 1 && structurallySimpleValue)
+            {
+                appendBroadcastPointArms(branches, value, pointsOut);
+                defaultDataOut = FillGroupKey::DataRef{};
+                return true;
+            }
+
             if (allowImplicitLastPointArm && branches.size() == 1)
             {
                 pointsOut.push_back(ParsedPointArm{
-                    .baseTerms = branches.front().info.baseTerms,
+                    .baseTerms = mergedPointBaseTerms(branches.front()),
                     .addr = branches.front().info.addr,
                     .constIndex = branches.front().info.constIndex,
                     .data = value});
-                defaultDataOut = ValueId::invalid();
+                defaultDataOut = FillGroupKey::DataRef{};
                 return true;
+            }
+
+            if (branches.size() > 1 &&
+                parsePointDataMaskedOrTree(graph, value, branches, pointsOut, defaultDataOut))
+            {
+                return true;
+            }
+
+            if (value.value.valid() && valueDefId.valid())
+            {
+                const Operation valueDef = graph.getOperation(valueDefId);
+                if (valueDef.kind() == OperationKind::kMux && valueDef.operands().size() == 3)
+                {
+                    if (const auto subset = parsePointBranchSubset(graph,
+                                                                   valueDef.operands()[0],
+                                                                   std::span<const PointCondBranch>(branches.data(),
+                                                                                                   branches.size()),
+                                                                   true))
+                    {
+                        std::vector<PointCondBranch> selected;
+                        std::vector<PointCondBranch> remaining;
+                        selected.reserve(subset->size());
+                        remaining.reserve(branches.size() - subset->size());
+                        std::size_t nextSelected = 0;
+                        for (std::size_t i = 0; i < branches.size(); ++i)
+                        {
+                            if (nextSelected < subset->size() && (*subset)[nextSelected] == i)
+                            {
+                                selected.push_back(branches[i]);
+                                ++nextSelected;
+                            }
+                            else
+                            {
+                                remaining.push_back(branches[i]);
+                            }
+                        }
+
+                        std::vector<ParsedPointArm> truePoints;
+                        std::vector<ParsedPointArm> falsePoints;
+                        FillGroupKey::DataRef trueDefault;
+                        FillGroupKey::DataRef falseDefault;
+                        if (parsePointDataTree(graph,
+                                               makeDataRefFromValue(graph, valueDef.operands()[1]),
+                                               std::span<const PointCondBranch>(selected.data(), selected.size()),
+                                               truePoints,
+                                               trueDefault,
+                                               true) &&
+                            parsePointDataTree(graph,
+                                               makeDataRefFromValue(graph, valueDef.operands()[2]),
+                                               std::span<const PointCondBranch>(remaining.data(), remaining.size()),
+                                               falsePoints,
+                                               falseDefault,
+                                               true) &&
+                            !trueDefault.value.valid() && trueDefault.literal.empty())
+                        {
+                            if (remaining.empty())
+                            {
+                                pointsOut = std::move(truePoints);
+                                defaultDataOut = falseDefault;
+                                return true;
+                            }
+                            if (!falseDefault.value.valid() && falseDefault.literal.empty())
+                            {
+                                pointsOut = std::move(truePoints);
+                                pointsOut.insert(pointsOut.end(), falsePoints.begin(), falsePoints.end());
+                                defaultDataOut = FillGroupKey::DataRef{};
+                                return true;
+                            }
+                        }
+                    }
+                }
             }
 
             for (std::size_t i = 0; i < branches.size(); ++i)
             {
-                const auto muxArms = parseMuxArms(graph, value, branches[i].cond);
+                if (!value.value.valid())
+                {
+                    continue;
+                }
+                const auto muxArms = parseMuxArms(graph, value.value, branches[i].cond);
                 if (!muxArms)
                 {
                     continue;
@@ -1318,7 +2610,7 @@ namespace wolvrix::lib::transform
                 }
 
                 std::vector<ParsedPointArm> tailPoints;
-                ValueId tailDefault = ValueId::invalid();
+                FillGroupKey::DataRef tailDefault;
                 if (!parsePointDataTree(graph,
                                         muxArms->second,
                                         std::span<const PointCondBranch>(remaining.data(), remaining.size()),
@@ -1330,12 +2622,73 @@ namespace wolvrix::lib::transform
                 }
 
                 pointsOut.push_back(ParsedPointArm{
-                    .baseTerms = branches[i].info.baseTerms,
+                    .baseTerms = mergedPointBaseTerms(branches[i]),
                     .addr = branches[i].info.addr,
                     .constIndex = branches[i].info.constIndex,
                     .data = muxArms->first});
                 pointsOut.insert(pointsOut.end(), tailPoints.begin(), tailPoints.end());
                 defaultDataOut = tailDefault;
+                return true;
+            }
+
+            return false;
+        }
+
+        bool parseFillDataTree(const Graph &graph,
+                               const FillGroupKey::DataRef &value,
+                               std::span<const ValueId> branches,
+                               std::vector<ParsedFillArm> &fillsOut,
+                               bool allowImplicitLastFillArm)
+        {
+            if (branches.empty())
+            {
+                return true;
+            }
+
+            if (allowImplicitLastFillArm && branches.size() == 1)
+            {
+                fillsOut.push_back(ParsedFillArm{
+                    .condBranches = {branches.front()},
+                    .data = value});
+                return true;
+            }
+
+            for (std::size_t i = 0; i < branches.size(); ++i)
+            {
+                if (!value.value.valid())
+                {
+                    continue;
+                }
+                const auto muxArms = parseMuxArms(graph, value.value, branches[i]);
+                if (!muxArms)
+                {
+                    continue;
+                }
+
+                std::vector<ValueId> remaining;
+                remaining.reserve(branches.size() - 1);
+                for (std::size_t j = 0; j < branches.size(); ++j)
+                {
+                    if (j != i)
+                    {
+                        remaining.push_back(branches[j]);
+                    }
+                }
+
+                std::vector<ParsedFillArm> tailFills;
+                if (!parseFillDataTree(graph,
+                                       muxArms->second,
+                                       std::span<const ValueId>(remaining.data(), remaining.size()),
+                                       tailFills,
+                                       allowImplicitLastFillArm))
+                {
+                    continue;
+                }
+
+                fillsOut.push_back(ParsedFillArm{
+                    .condBranches = {branches[i]},
+                    .data = muxArms->first});
+                fillsOut.insert(fillsOut.end(), tailFills.begin(), tailFills.end());
                 return true;
             }
 
@@ -1348,6 +2701,7 @@ namespace wolvrix::lib::transform
                                                             std::string *reasonOut)
         {
             const Operation op = graph.getOperation(opId);
+            const auto tracedRegSymbol = getAttr<std::string>(op, "regSymbol");
             if (op.kind() != OperationKind::kRegisterWritePort || op.operands().size() < 4)
             {
                 setRejectReason(reasonOut, "write op is not a register write port with mask and event operands");
@@ -1372,7 +2726,21 @@ namespace wolvrix::lib::transform
                     pointBranches.push_back(PointCondBranch{
                         .cond = condBranch,
                         .info = std::move(*parsed),
+                        .extraBaseTerms = {},
+                        .clusterRows = clusterRows,
                     });
+                }
+                else if (auto bundle = parsePointCondBundle(graph, condBranch, clusterRows))
+                {
+                    for (auto &[leafCond, leafInfo] : bundle->leaves)
+                    {
+                        pointBranches.push_back(PointCondBranch{
+                            .cond = leafCond,
+                            .info = std::move(leafInfo),
+                            .extraBaseTerms = bundle->globalBaseTerms,
+                            .clusterRows = clusterRows,
+                        });
+                    }
                 }
                 else
                 {
@@ -1383,9 +2751,15 @@ namespace wolvrix::lib::transform
             if (pointBranches.empty())
             {
                 canonicalizeValues(condBranches);
-                pattern.fill = ParsedFillArm{
+                pattern.fills.push_back(ParsedFillArm{
                     .condBranches = std::move(condBranches),
-                    .data = op.operands()[1]};
+                    .data = makeDataRefFromValue(graph, op.operands()[1])});
+                if (tracedRegSymbol && matchesTraceFilter(*tracedRegSymbol))
+                {
+                    std::cerr << "[scalar-memory-pack] write-pattern reg=" << *tracedRegSymbol
+                              << " points=0 fills=" << pattern.fills.size()
+                              << " mode=fill-only\n";
+                }
                 return pattern;
             }
 
@@ -1395,19 +2769,40 @@ namespace wolvrix::lib::transform
                     .baseTerms = std::move(pointBranches.front().info.baseTerms),
                     .addr = pointBranches.front().info.addr,
                     .constIndex = pointBranches.front().info.constIndex,
-                    .data = op.operands()[1]});
+                    .data = makeDataRefFromValue(graph, op.operands()[1])});
+                if (tracedRegSymbol && matchesTraceFilter(*tracedRegSymbol))
+                {
+                    std::cerr << "[scalar-memory-pack] write-pattern reg=" << *tracedRegSymbol
+                              << " points=1 fills=0 mode=single-point\n";
+                }
                 return pattern;
             }
 
             std::vector<ParsedPointArm> parsedPoints;
-            ValueId defaultData = ValueId::invalid();
+            FillGroupKey::DataRef defaultData;
             if (!parsePointDataTree(graph,
-                                    op.operands()[1],
+                                    makeDataRefFromValue(graph, op.operands()[1]),
                                     std::span<const PointCondBranch>(pointBranches.data(), pointBranches.size()),
                                     parsedPoints,
                                     defaultData,
                                     fillBranches.empty()))
             {
+                if (!fillBranches.empty())
+                {
+                    const OperationId dataDefId = graph.valueDef(op.operands()[1]);
+                    if (dataDefId.valid())
+                    {
+                        const Operation dataDef = graph.getOperation(dataDefId);
+                        if (dataDef.kind() == OperationKind::kMux &&
+                            dataDef.operands().size() == 3 &&
+                            std::find(fillBranches.begin(), fillBranches.end(), dataDef.operands()[0]) != fillBranches.end())
+                        {
+                            setRejectReason(reasonOut,
+                                            "mixed write top-level mux selects on a non-address member-local branch");
+                            return std::nullopt;
+                        }
+                    }
+                }
                 setRejectReason(reasonOut,
                                 fillBranches.empty()
                                     ? "multiple point-update branches do not encode nextValue as a mux tree over point conditions"
@@ -1418,12 +2813,70 @@ namespace wolvrix::lib::transform
             pattern.points = std::move(parsedPoints);
             if (!fillBranches.empty())
             {
-                canonicalizeValues(fillBranches);
-                pattern.fill = ParsedFillArm{
-                    .condBranches = std::move(fillBranches),
-                    .data = defaultData};
+                if (tracedRegSymbol && isSelfRegisterDataRef(graph, defaultData, *tracedRegSymbol))
+                {
+                    if (tracedRegSymbol && matchesTraceFilter(*tracedRegSymbol))
+                    {
+                        std::cerr << "[scalar-memory-pack] write-pattern reg=" << *tracedRegSymbol
+                                  << " dropping fill branches because default data is self-read\n";
+                    }
+                    return pattern;
+                }
+                std::vector<ParsedFillArm> parsedFills;
+                if (fillBranches.size() > 1 &&
+                    parseFillDataTree(graph,
+                                      defaultData,
+                                      std::span<const ValueId>(fillBranches.data(), fillBranches.size()),
+                                      parsedFills,
+                                      true))
+                {
+                    pattern.fills = std::move(parsedFills);
+                }
+                else
+                {
+                    canonicalizeValues(fillBranches);
+                    pattern.fills.push_back(ParsedFillArm{
+                        .condBranches = std::move(fillBranches),
+                        .data = defaultData});
+                }
+            }
+            if (tracedRegSymbol && matchesTraceFilter(*tracedRegSymbol))
+            {
+                std::cerr << "[scalar-memory-pack] write-pattern reg=" << *tracedRegSymbol
+                          << " points=" << pattern.points.size()
+                          << " fills=" << pattern.fills.size()
+                          << " mode=mixed\n";
             }
             return pattern;
+        }
+
+        ValueId materializeDataRef(Graph &graph,
+                                   const FillGroupKey::DataRef &data,
+                                   std::string_view note)
+        {
+            if (data.value.valid())
+            {
+                if (data.sliceStart >= 0)
+                {
+                    const SymbolId valueSym = graph.makeInternalValSym();
+                    const SymbolId opSym = graph.makeInternalOpSym();
+                    const ValueId out = graph.createValue(valueSym,
+                                                          data.width > 0 ? data.width : 1,
+                                                          data.isSigned,
+                                                          ValueType::Logic);
+                    const OperationId op = graph.createOperation(OperationKind::kSliceStatic, opSym);
+                    graph.addOperand(op, data.value);
+                    graph.addResult(op, out);
+                    graph.setAttr(op, "sliceStart", data.sliceStart);
+                    graph.setAttr(op, "sliceEnd", data.sliceStart + data.width - 1);
+                    const SrcLoc srcLoc = makeTransformSrcLoc("scalar-memory-pack", note);
+                    graph.setValueSrcLoc(out, srcLoc);
+                    graph.setOpSrcLoc(op, srcLoc);
+                    return out;
+                }
+                return data.value;
+            }
+            return createConstantValue(graph, data.width, data.isSigned, data.literal, note);
         }
 
         bool analyzeFillGroups(const Graph &graph,
@@ -1433,6 +2886,11 @@ namespace wolvrix::lib::transform
                                std::string *reasonOut)
         {
             std::unordered_map<FillGroupKey, std::vector<std::pair<std::string, OperationId>>, FillGroupKeyHash> groups;
+            std::unordered_map<FillFamilyKey,
+                               std::vector<std::pair<std::string, FillGroupKey::DataRef>>,
+                               FillFamilyKeyHash>
+                familyGroups;
+            bool sawAnyFillArm = false;
             for (const ClusterMember &member : candidate.members)
             {
                 const auto writeIt = refs.writePortsBySymbol.find(member.symbol);
@@ -1453,17 +2911,28 @@ namespace wolvrix::lib::transform
                                             ": " + writeReason);
                         return false;
                     }
-                    if (!parsed->fill)
+                    if (parsed->fills.empty())
                     {
                         continue;
                     }
-                    FillGroupKey key{
-                        .condBranches = parsed->fill->condBranches,
-                        .data = parsed->fill->data,
-                        .mask = parsed->mask,
-                        .eventValues = parsed->eventValues,
-                        .eventEdges = parsed->eventEdges};
-                    groups[key].push_back({member.symbol, opId});
+                    for (const ParsedFillArm &fill : parsed->fills)
+                    {
+                        sawAnyFillArm = true;
+                        FillGroupKey key{
+                            .condBranches = fill.condBranches,
+                            .data = fill.data,
+                            .mask = parsed->mask,
+                            .eventValues = parsed->eventValues,
+                            .eventEdges = parsed->eventEdges};
+                        groups[key].push_back({member.symbol, opId});
+
+                        FillFamilyKey familyKey{
+                            .condBranches = fill.condBranches,
+                            .mask = parsed->mask,
+                            .eventValues = parsed->eventValues,
+                            .eventEdges = parsed->eventEdges};
+                        familyGroups[familyKey].push_back({member.symbol, fill.data});
+                    }
                 }
             }
 
@@ -1500,6 +2969,48 @@ namespace wolvrix::lib::transform
             }
             if (groupsOut.empty())
             {
+                if (!sawAnyFillArm)
+                {
+                    return true;
+                }
+                for (const auto &[familyKey, items] : familyGroups)
+                {
+                    if (items.size() != candidate.members.size())
+                    {
+                        continue;
+                    }
+                    std::unordered_set<std::string> seenSymbols;
+                    bool complete = true;
+                    std::optional<FillGroupKey::DataRef> firstData;
+                    bool allSameData = true;
+                    for (const auto &[symbol, data] : items)
+                    {
+                        if (!seenSymbols.insert(symbol).second)
+                        {
+                            complete = false;
+                            break;
+                        }
+                        if (!firstData)
+                        {
+                            firstData = data;
+                        }
+                        else if (*firstData != data)
+                        {
+                            allSameData = false;
+                        }
+                    }
+                    if (!complete)
+                    {
+                        continue;
+                    }
+                    if (!allSameData)
+                    {
+                        setRejectReason(reasonOut,
+                                        "cluster has row-varying bulk branch not representable as kMemoryFillPort");
+                        return false;
+                    }
+                    (void)familyKey;
+                }
                 setRejectReason(reasonOut, "no complete fill group covers the full cluster");
             }
             return true;
@@ -1574,7 +3085,7 @@ namespace wolvrix::lib::transform
                 {
                     const auto memberIndexIt = memberIndexBySymbol.find(info.memberSymbol);
                     if (memberIndexIt == memberIndexBySymbol.end() ||
-                        memberIndexIt->second != info.constIndex ||
+                        memberIndexIt->second + candidate.indexBase != info.constIndex ||
                         !seenSymbols.insert(info.memberSymbol).second)
                     {
                         complete = false;
@@ -1595,10 +3106,9 @@ namespace wolvrix::lib::transform
             return true;
         }
 
-        std::optional<CandidateCluster> analyzeConcatCandidate(const Graph &graph,
-                                                               OperationId concatOpId,
-                                                               const ReadWriteRefs &refs,
-                                                               std::string *reasonOut)
+        std::optional<FlatConcatInfo> analyzeConcatReadShape(const Graph &graph,
+                                                             OperationId concatOpId,
+                                                             std::string *reasonOut)
         {
             const Operation concatOp = graph.getOperation(concatOpId);
             if (concatOp.kind() != OperationKind::kConcat || concatOp.results().size() != 1)
@@ -1616,11 +3126,14 @@ namespace wolvrix::lib::transform
                 return std::nullopt;
             }
 
-            CandidateCluster candidate;
-            candidate.key.prefix = std::string(concatOp.symbolText());
-            candidate.key.suffix.clear();
+            FlatConcatInfo readShape;
+            readShape.concatOpId = concatOpId;
+            readShape.flattenedLeaves = flattenedLeaves;
+            readShape.concatOps = concatOps;
             std::unordered_set<std::string> seenSymbols;
-            candidate.members.reserve(flattenedLeaves.size());
+            readShape.members.reserve(flattenedLeaves.size());
+            int32_t clusterWidth = 0;
+            bool clusterSigned = false;
             for (auto it = flattenedLeaves.rbegin(); it != flattenedLeaves.rend(); ++it)
             {
                 const ValueId readValue = *it;
@@ -1661,30 +3174,75 @@ namespace wolvrix::lib::transform
                     setRejectReason(reasonOut, "register width is not positive");
                     return std::nullopt;
                 }
-                if (candidate.members.empty())
+                if (readShape.members.empty())
                 {
-                    candidate.key.width = width;
-                    candidate.key.isSigned = isSigned;
+                    clusterWidth = width;
+                    clusterSigned = isSigned;
                 }
-                else if (candidate.key.width != width || candidate.key.isSigned != isSigned)
+                else if (clusterWidth != width || clusterSigned != isSigned)
                 {
                     setRejectReason(reasonOut, "register cluster width/sign does not match across leaves");
                     return std::nullopt;
                 }
-                candidate.members.push_back(ClusterMember{
+                readShape.members.push_back(ClusterMember{
                     .symbol = *regSymbol,
                     .regOp = regOpId,
                     .readOp = readOpId,
                     .readResult = readValue,
-                    .index = static_cast<int64_t>(candidate.members.size())});
+                    .index = static_cast<int64_t>(readShape.members.size())});
+            }
+            return readShape;
+        }
+
+        int32_t addressWidthForRows(std::size_t rowCount)
+        {
+            int32_t width = 1;
+            while ((uint64_t{1} << width) < std::max<std::size_t>(rowCount, 1))
+            {
+                ++width;
+            }
+            return width;
+        }
+
+        std::optional<CandidateCluster> analyzeNamedSegmentCandidate(const Graph &graph,
+                                                                     const NamedSegment &segment,
+                                                                     const FlatConcatInfo &readShape,
+                                                                     const ReadWriteRefs &refs,
+                                                                     std::string *reasonOut)
+        {
+            if (segment.members.size() < 4)
+            {
+                setRejectReason(reasonOut, "named segment has fewer than 4 members");
+                return std::nullopt;
+            }
+            if (segment.members.size() != readShape.members.size())
+            {
+                setRejectReason(reasonOut, "named segment size does not match concat-driven read sequence");
+                return std::nullopt;
+            }
+            if (makeMemberSequenceKey(segment.members) != makeMemberSequenceKey(readShape.members))
+            {
+                setRejectReason(reasonOut, "named segment does not match concat-driven read sequence");
+                return std::nullopt;
             }
 
-            candidate.readPlan = analyzeReadPlan(graph, candidate, concatOpId, flattenedLeaves, concatOps, reasonOut);
+            CandidateCluster candidate{
+                .key = segment.key,
+                .indexBase = segment.indexBase,
+                .members = readShape.members,
+            };
+            candidate.readPlan =
+                analyzeReadPlan(graph,
+                                candidate,
+                                refs,
+                                readShape.concatOpId,
+                                readShape.flattenedLeaves,
+                                readShape.concatOps,
+                                reasonOut);
             if (!candidate.readPlan.concatOp.valid())
             {
                 return std::nullopt;
             }
-
             if (!analyzeFillGroups(graph, candidate, refs, candidate.fillGroups, reasonOut))
             {
                 return std::nullopt;
@@ -1778,9 +3336,16 @@ namespace wolvrix::lib::transform
 
             for (const ReadRewritePlan::Consumer &consumer : candidate.readPlan.consumers)
             {
-                const Operation sliceOp = graph.getOperation(consumer.opId);
-                const ValueId oldResult = sliceOp.results().front();
                 ValueId addr = consumer.addr;
+                if (consumer.constIndex >= 0)
+                {
+                    const int32_t addrWidth = addressWidthForRows(candidate.members.size());
+                    addr = createConstantValue(graph,
+                                               addrWidth,
+                                               false,
+                                               std::to_string(addrWidth) + "'d" + std::to_string(consumer.constIndex),
+                                               "direct_memory_read_index");
+                }
                 if (consumer.reverseAddr)
                 {
                     addr = createReverseIndex(graph, addr, candidate.members.size());
@@ -1800,17 +3365,23 @@ namespace wolvrix::lib::transform
                 const SrcLoc srcLoc = makeTransformSrcLoc("scalar-memory-pack", "dynamic_memory_read");
                 graph.setOpSrcLoc(readOp, srcLoc);
                 graph.setValueSrcLoc(newResult, srcLoc);
-                replacePortBinding(graph, oldResult, newResult);
-                graph.eraseOp(consumer.opId, std::array<ValueId, 1>{newResult});
+                replacePortBinding(graph, consumer.oldResult, newResult);
+                graph.eraseOp(consumer.eraseOp, std::array<ValueId, 1>{newResult});
             }
 
             for (OperationId concatOpId : candidate.readPlan.concatOps)
             {
                 graph.eraseOp(concatOpId);
             }
-            for (const ClusterMember &member : candidate.members)
+            if (!candidate.readPlan.concatOps.empty())
             {
-                graph.eraseOp(member.readOp);
+                for (const ClusterMember &member : candidate.members)
+                {
+                    if (member.readOp.valid())
+                    {
+                        graph.eraseOp(member.readOp);
+                    }
+                }
             }
 
             for (const auto &[key, opIds] : candidate.pointWriteGroups)
@@ -1819,8 +3390,12 @@ namespace wolvrix::lib::transform
                 graph.setAttr(writeOp, "memSymbol", memoryName);
                 graph.setAttr(writeOp, "eventEdge", key.eventEdges);
                 graph.addOperand(writeOp, createLogicTree(graph, key.baseTerms, OperationKind::kLogicAnd, "point_write_cond", true));
-                graph.addOperand(writeOp, key.addr);
-                graph.addOperand(writeOp, key.data);
+                graph.addOperand(writeOp,
+                                 createAdjustedAddress(graph,
+                                                       key.addr,
+                                                       -candidate.indexBase,
+                                                       "point_write_index_base"));
+                graph.addOperand(writeOp, materializeDataRef(graph, key.data, "point_write_data"));
                 graph.addOperand(writeOp, key.mask);
                 for (ValueId eventValue : key.eventValues)
                 {
@@ -1835,7 +3410,7 @@ namespace wolvrix::lib::transform
                 graph.setAttr(fillOp, "memSymbol", memoryName);
                 graph.setAttr(fillOp, "eventEdge", key.eventEdges);
                 graph.addOperand(fillOp, createLogicTree(graph, key.condBranches, OperationKind::kLogicOr, "fill_cond", false));
-                graph.addOperand(fillOp, key.data);
+                graph.addOperand(fillOp, materializeDataRef(graph, key.data, "fill_data"));
                 for (ValueId eventValue : key.eventValues)
                 {
                     graph.addOperand(fillOp, eventValue);
@@ -1844,6 +3419,7 @@ namespace wolvrix::lib::transform
             }
 
             std::unordered_set<OperationId, OperationIdHash> erasedWrites;
+            std::vector<ValueId> pruneSeeds;
             for (const auto &[key, opIds] : candidate.pointWriteGroups)
             {
                 (void)key;
@@ -1862,7 +3438,13 @@ namespace wolvrix::lib::transform
             }
             for (OperationId oldWrite : erasedWrites)
             {
+                const Operation oldWriteOp = graph.getOperation(oldWrite);
+                pruneSeeds.insert(pruneSeeds.end(), oldWriteOp.operands().begin(), oldWriteOp.operands().end());
                 graph.eraseOp(oldWrite);
+            }
+            for (ValueId seed : pruneSeeds)
+            {
+                pruneDeadValueDef(graph, seed);
             }
             for (const ClusterMember &member : candidate.members)
             {
@@ -1878,8 +3460,8 @@ namespace wolvrix::lib::transform
     {
     }
 
-    PassResult ScalarMemoryPackPass::run()
-    {
+        PassResult ScalarMemoryPackPass::run()
+        {
         PassResult result;
         std::size_t graphCount = 0;
         std::size_t candidateClusterCount = 0;
@@ -1894,56 +3476,29 @@ namespace wolvrix::lib::transform
             Graph &graph = *entry.second;
             const ReadWriteRefs refs = collectReadWriteRefs(graph);
             std::unordered_set<OperationId, OperationIdHash> claimedRegs;
-            std::vector<OperationId> concatOps;
-
+            std::unordered_map<std::string, std::vector<FlatConcatInfo>> readShapesBySequence;
             for (const OperationId opId : graph.operations())
             {
-                if (graph.getOperation(opId).kind() == OperationKind::kConcat)
+                const Operation op = graph.getOperation(opId);
+                if (op.kind() != OperationKind::kConcat)
                 {
-                    concatOps.push_back(opId);
+                    continue;
                 }
+
+                std::string readShapeReason;
+                auto readShape = analyzeConcatReadShape(graph, opId, &readShapeReason);
+                if (!readShape)
+                {
+                    continue;
+                }
+                readShapesBySequence[makeMemberSequenceKey(readShape->members)].push_back(std::move(*readShape));
             }
 
-            for (const OperationId opId : concatOps)
+            const std::vector<NamedSegment> segments = collectNamedSegments(graph, refs);
+            for (const NamedSegment &segment : segments)
             {
-                try
-                {
-                    (void)graph.getOperation(opId);
-                }
-                catch (const std::runtime_error &)
-                {
-                    continue;
-                }
-                std::string rejectReason;
-                auto candidate = analyzeConcatCandidate(graph, opId, refs, &rejectReason);
-                if (!candidate)
-                {
-                    const std::string rawReason =
-                        rejectReason.empty() ? std::string("unknown") : std::move(rejectReason);
-                    const std::string reason = normalizeRejectReason(rawReason);
-                    RejectAggregate &aggregate = rejectAggregates[reason];
-                    ++aggregate.rejectCount;
-                    aggregate.memberCount += estimateFlattenedConcatLeafCount(graph, opId);
-                    addRejectExample(aggregate.examples,
-                                     std::string(graph.getOperation(opId).symbolText()) + " => " + rawReason);
-                    if (matchesTraceFilter(graph, opId))
-                    {
-                        logInfo("scalar-memory-pack trace: graph=" + std::string(graph.symbol()) +
-                                " concat=" + std::string(graph.getOperation(opId).symbolText()) +
-                                " reject=" + rawReason);
-                    }
-                    continue;
-                }
-                if (matchesTraceFilter(graph, opId))
-                {
-                    logInfo("scalar-memory-pack trace: graph=" + std::string(graph.symbol()) +
-                            " concat=" + std::string(graph.getOperation(opId).symbolText()) +
-                            " accept members=" + std::to_string(candidate->members.size()) +
-                            " fill_groups=" + std::to_string(candidate->fillGroups.size()) +
-                            " point_groups=" + std::to_string(candidate->pointWriteGroups.size()));
-                }
                 bool overlap = false;
-                for (const ClusterMember &member : candidate->members)
+                for (const ClusterMember &member : segment.members)
                 {
                     if (claimedRegs.contains(member.regOp))
                     {
@@ -1955,16 +3510,54 @@ namespace wolvrix::lib::transform
                 {
                     continue;
                 }
-                for (const ClusterMember &member : candidate->members)
+
+                const std::string sequenceKey = makeMemberSequenceKey(segment.members);
+                const auto readShapeIt = readShapesBySequence.find(sequenceKey);
+                if (readShapeIt == readShapesBySequence.end())
+                {
+                    const std::string reason = "no matching concat-driven packed read sequence";
+                    RejectAggregate &aggregate = rejectAggregates[reason];
+                    ++aggregate.rejectCount;
+                    aggregate.memberCount += segment.members.size();
+                    addRejectExample(aggregate.examples, segment.members.front().symbol + " ...");
+                    continue;
+                }
+
+                std::optional<CandidateCluster> accepted;
+                std::string lastRejectReason;
+                for (const FlatConcatInfo &readShape : readShapeIt->second)
+                {
+                    std::string rejectReason;
+                    auto candidate = analyzeNamedSegmentCandidate(graph, segment, readShape, refs, &rejectReason);
+                    if (candidate)
+                    {
+                        accepted = std::move(candidate);
+                        break;
+                    }
+                    lastRejectReason = rejectReason;
+                }
+                if (!accepted)
+                {
+                    const std::string rawReason =
+                        lastRejectReason.empty() ? std::string("unknown") : std::move(lastRejectReason);
+                    const std::string reason = normalizeRejectReason(rawReason);
+                    RejectAggregate &aggregate = rejectAggregates[reason];
+                    ++aggregate.rejectCount;
+                    aggregate.memberCount += segment.members.size();
+                    addRejectExample(aggregate.examples, segment.members.front().symbol + " => " + rawReason);
+                    continue;
+                }
+
+                for (const ClusterMember &member : accepted->members)
                 {
                     claimedRegs.insert(member.regOp);
                 }
                 ++candidateClusterCount;
-                candidateMemberCount += candidate->members.size();
-                rewriteCandidate(graph, *candidate);
+                candidateMemberCount += accepted->members.size();
+                rewriteCandidate(graph, *accepted);
                 result.changed = true;
                 ++rewrittenClusterCount;
-                rewrittenMemberCount += candidate->members.size();
+                rewrittenMemberCount += accepted->members.size();
             }
         }
 
@@ -1973,7 +3566,7 @@ namespace wolvrix::lib::transform
                 " candidate_members=" + std::to_string(candidateMemberCount) +
                 " rewritten_clusters=" + std::to_string(rewrittenClusterCount) +
                 " rewritten_members=" + std::to_string(rewrittenMemberCount) +
-                " mode=dynamic_read_write_plus_fill");
+                " mode=named_segment_plus_concat_driven_dynamic_read_write_plus_fill");
         if (!rejectAggregates.empty())
         {
             std::size_t totalRejects = 0;
