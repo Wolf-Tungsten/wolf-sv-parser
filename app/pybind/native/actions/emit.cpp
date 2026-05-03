@@ -160,7 +160,7 @@ namespace wolvrix::app::pybind
                                        "waveform",
                                        "perf",
                                        nullptr};
-        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OOOOOOss", const_cast<char **>(kwlist),
+                        if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oss|OOOOOOss", const_cast<char **>(kwlist),
                                          &sessionObj,
                                          &designKey,
                                          &output,

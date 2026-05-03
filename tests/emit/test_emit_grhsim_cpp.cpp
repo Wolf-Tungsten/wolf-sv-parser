@@ -1716,8 +1716,9 @@ int main()
         return fail("Missing simulator class declaration");
     }
     if (header.find("kBatchCount = ") == std::string::npos ||
-        header.find("struct BatchEvalStats") == std::string::npos ||
-        header.find("BatchEvalStats eval_batch_0();") == std::string::npos)
+        header.find("void eval_compute_batch_0();") == std::string::npos ||
+        header.find("void eval_commit_batch_") == std::string::npos ||
+        header.find("struct BatchEvalStats") != std::string::npos)
     {
         return fail("Missing split batch declarations");
     }
@@ -1844,8 +1845,8 @@ int main()
         return fail("Missing emitted masked memory write helper usage");
     }
     if (eval.find("while (pending_eval_round)") == std::string::npos ||
-        eval.find("kComputeActiveWordBatchOffsets") == std::string::npos ||
-        eval.find("kCommitActiveWordBatchOffsets") == std::string::npos ||
+        eval.find("Run compute-phase batches using direct batch guards") == std::string::npos ||
+        eval.find("commitBatchExecCount") == std::string::npos ||
         eval.find("pending_eval_round = (grhsim_count_active_supernodes(supernode_active_curr_) != 0u);") == std::string::npos)
     {
         return fail("Missing compute/commit fixed-point eval loop");
@@ -1907,19 +1908,18 @@ int main()
     {
         return fail("Missing supernode activity runtime helpers");
     }
-    if (eval.find("kBatchEvalFns") == std::string::npos ||
-        eval.find("using BatchEvalFn = BatchEvalStats") == std::string::npos ||
-        eval.find("kComputeActiveWordBatchOffsets") == std::string::npos ||
-        eval.find("kComputeActiveWordBatchIndices") == std::string::npos ||
-        eval.find("kCommitActiveWordBatchOffsets") == std::string::npos ||
-        eval.find("kCommitActiveWordBatchIndices") == std::string::npos ||
-        eval.find("for (std::size_t activeWordIndex = 0; activeWordIndex < kActiveFlagWordCount; ++activeWordIndex)") == std::string::npos ||
-        eval.find("const BatchEvalStats batchStats = (this->*kBatchEvalFns[batchIndex])();") == std::string::npos ||
-        sched.find("BatchEvalStats GrhSIM_top::eval_batch_0()") == std::string::npos ||
-        sched.find("stats.checkedFlagWords") == std::string::npos ||
+    if (eval.find("kBatchEvalFns") != std::string::npos ||
+        eval.find("kComputeActiveWordBatchOffsets") != std::string::npos ||
+        eval.find("kCommitActiveWordBatchOffsets") != std::string::npos ||
+        eval.find("(this->*kBatchEvalFns[batchIndex])()") != std::string::npos ||
+        eval.find("Direct-dispatch eval") == std::string::npos ||
+        eval.find("this->eval_compute_batch_") == std::string::npos ||
+        eval.find("this->eval_commit_batch_") == std::string::npos ||
+        sched.find("void GrhSIM_top::eval_compute_batch_0()") == std::string::npos ||
+        sched.find("BatchEvalStats") != std::string::npos ||
         sched.find("supernode_active_curr_[") == std::string::npos)
     {
-        return fail("Missing multi-batch eval dispatch");
+        return fail("Missing direct multi-batch eval dispatch");
     }
     if (sched.find("wordchunk_") != std::string::npos)
     {
@@ -2962,8 +2962,8 @@ int main()
             return fail("gated-clock exact event logic should not emit redundant parentheses");
         }
         if (gatedEvalText.find("while (pending_eval_round)") == std::string::npos ||
-            gatedEvalText.find("kComputeActiveWordBatchOffsets") == std::string::npos ||
-            gatedEvalText.find("kCommitActiveWordBatchOffsets") == std::string::npos ||
+            gatedEvalText.find("Run compute-phase batches using direct batch guards") == std::string::npos ||
+            gatedEvalText.find("commitBatchExecCount") == std::string::npos ||
             gatedEvalText.find("pending_eval_round = (grhsim_count_active_supernodes(supernode_active_curr_) != 0u);") == std::string::npos)
         {
             return fail("gated-clock eval should iterate until compute/commit reaches a fixed point");
