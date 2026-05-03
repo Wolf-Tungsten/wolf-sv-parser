@@ -1742,6 +1742,16 @@ int main()
     {
         return fail("Missing random seed setter declaration");
     }
+    if (header.find("#define WOLVRIX_GRHSIM_PERF 0") == std::string::npos)
+    {
+        return fail("default grhsim emit should define perf feature macro as disabled");
+    }
+    if (header.find("struct PerfCounters") != std::string::npos ||
+        header.find("PerfCounters perf_counters() const") != std::string::npos ||
+        header.find("void reset_perf_counters()") != std::string::npos)
+    {
+        return fail("default grhsim emit should not generate perf counter APIs");
+    }
     if (header.find("inline static constexpr const char *value_") == std::string::npos ||
         header.find("= \"q=%0d\";") == std::string::npos)
     {
@@ -1814,6 +1824,14 @@ int main()
     {
         return fail("schedule emit should not contain inline lambda word helpers");
     }
+    if (eval.find("++perf_counters_.") != std::string::npos)
+    {
+        return fail("default grhsim eval should not emit perf counter updates");
+    }
+    if (eval.find("if (((supernode_active_curr_[") != std::string::npos)
+    {
+        return fail("eval should call batches directly without top-level batch guards");
+    }
     if (sched.find("grhsim_clog2_u64") == std::string::npos ||
         sched.find("slice_array_op") == std::string::npos ||
         sched.find("wildcard_eq_op") == std::string::npos)
@@ -1845,9 +1863,10 @@ int main()
         return fail("Missing emitted masked memory write helper usage");
     }
     if (eval.find("while (pending_eval_round)") == std::string::npos ||
-        eval.find("Run compute-phase batches using direct batch guards") == std::string::npos ||
-        eval.find("commitBatchExecCount") == std::string::npos ||
-        eval.find("pending_eval_round = (grhsim_count_active_supernodes(supernode_active_curr_) != 0u);") == std::string::npos)
+        eval.find("Run compute-phase batches in direct schedule order") == std::string::npos ||
+        eval.find("this->eval_compute_batch_0();") == std::string::npos ||
+        eval.find("this->eval_commit_batch_") == std::string::npos ||
+        eval.find("pending_eval_round = commit_activated_readers_;") == std::string::npos)
     {
         return fail("Missing compute/commit fixed-point eval loop");
     }
@@ -2962,9 +2981,10 @@ int main()
             return fail("gated-clock exact event logic should not emit redundant parentheses");
         }
         if (gatedEvalText.find("while (pending_eval_round)") == std::string::npos ||
-            gatedEvalText.find("Run compute-phase batches using direct batch guards") == std::string::npos ||
-            gatedEvalText.find("commitBatchExecCount") == std::string::npos ||
-            gatedEvalText.find("pending_eval_round = (grhsim_count_active_supernodes(supernode_active_curr_) != 0u);") == std::string::npos)
+            gatedEvalText.find("Run compute-phase batches in direct schedule order") == std::string::npos ||
+            gatedEvalText.find("this->eval_compute_batch_0();") == std::string::npos ||
+            gatedEvalText.find("this->eval_commit_batch_") == std::string::npos ||
+            gatedEvalText.find("pending_eval_round = commit_activated_readers_;") == std::string::npos)
         {
             return fail("gated-clock eval should iterate until compute/commit reaches a fixed point");
         }
@@ -3527,7 +3547,8 @@ int main()
         const std::string perfHeader = readFile(perfDir / "grhsim_top.hpp");
         const std::string perfState = readFile(perfDir / "grhsim_top_state.cpp");
         const std::string perfEval = readFile(perfDir / "grhsim_top_eval.cpp");
-        if (perfHeader.find("struct PerfCounters") == std::string::npos ||
+        if (perfHeader.find("#define WOLVRIX_GRHSIM_PERF 1") == std::string::npos ||
+            perfHeader.find("struct PerfCounters") == std::string::npos ||
             perfHeader.find("PerfCounters perf_counters() const") == std::string::npos ||
             perfHeader.find("void reset_perf_counters()") == std::string::npos ||
             perfHeader.find("PerfCounters perf_counters_{};") == std::string::npos ||
@@ -3536,7 +3557,8 @@ int main()
             perfEval.find("trace_this_eval") == std::string::npos ||
             perfEval.find("++perf_counters_.computeBatchExecCount;") == std::string::npos ||
             perfEval.find("++perf_counters_.commitBatchExecCount;") == std::string::npos ||
-            perfEval.find("#include <chrono>") == std::string::npos)
+            perfEval.find("#include <chrono>") == std::string::npos ||
+            perfEval.find("if (((supernode_active_curr_[") != std::string::npos)
         {
             return fail("perf-enabled emit should include perf counters and eval tracing");
         }

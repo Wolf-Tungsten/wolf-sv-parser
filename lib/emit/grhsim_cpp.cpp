@@ -1760,25 +1760,25 @@ namespace wolvrix::lib::emit
             return clearMask;
         }
 
-        std::string scheduleBatchDispatchGuardExpr(const EmitModel &model, const ScheduleBatch &batch)
+        void emitPerfCounterIncrement(std::ostream &stream,
+                                      const EmitModel &model,
+                                      std::string_view indent,
+                                      std::string_view field)
         {
-            std::string expr;
-            for (const auto &word : batch.words)
+            if (!model.emitPerf)
             {
-                const std::uint8_t dispatchMask = scheduleBatchWordDispatchMask(model, word);
-                if (dispatchMask == UINT8_C(0))
-                {
-                    continue;
-                }
-                if (!expr.empty())
-                {
-                    expr += " || ";
-                }
-                expr += "((supernode_active_curr_[" + std::to_string(word.activeFlagWordIndex) +
-                        "u] & UINT8_C(" + std::to_string(static_cast<unsigned>(dispatchMask)) +
-                        ")) != UINT8_C(0))";
+                return;
             }
-            return expr.empty() ? "false" : expr;
+            stream << indent << "++perf_counters_." << field << ";\n";
+        }
+
+        void emitPerfCounterReset(std::ostream &stream, const EmitModel &model, std::string_view indent)
+        {
+            if (!model.emitPerf)
+            {
+                return;
+            }
+            stream << indent << "perf_counters_ = PerfCounters{};\n";
         }
 
         std::optional<std::string> staticConstStringExpr(const Graph &graph, ValueId valueId)
@@ -8800,7 +8800,7 @@ namespace wolvrix::lib::emit
                     stream << innerIndent << "    }\n";
                     stream << innerIndent << "}\n";
                     stream << innerIndent << "if (any_row_changed) {\n";
-                    stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                    emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                     emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
                 }
@@ -8825,7 +8825,7 @@ namespace wolvrix::lib::emit
                             stream << "grhsim_assign_words(" << rowRef << ", "
                                    << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
                                    << state.width << ")) {\n";
-                            stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                            emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                             emitReaderActivations(innerIndent + "    ");
                             stream << innerIndent << "}\n";
                         }
@@ -8842,7 +8842,7 @@ namespace wolvrix::lib::emit
                             }
                             stream << rowRef << " != next_value) {\n";
                             stream << innerIndent << "    " << rowRef << " = next_value;\n";
-                            stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                            emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                             emitReaderActivations(innerIndent + "    ");
                             stream << innerIndent << "}\n";
                         }
@@ -8860,7 +8860,7 @@ namespace wolvrix::lib::emit
                                    << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
                                    << wordsExprForValue(graph, model, operands[3], state.width, context) << ", "
                                    << state.width << ")) {\n";
-                            stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                            emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                             emitReaderActivations(innerIndent + "    ");
                             stream << innerIndent << "}\n";
                         }
@@ -8882,7 +8882,7 @@ namespace wolvrix::lib::emit
                             }
                             stream << rowRef << " != merged) {\n";
                             stream << innerIndent << "    " << rowRef << " = merged;\n";
-                            stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                            emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                             emitReaderActivations(innerIndent + "    ");
                             stream << innerIndent << "}\n";
                         }
@@ -8900,7 +8900,7 @@ namespace wolvrix::lib::emit
                            << state.width << ");\n";
                     stream << innerIndent << "if (grhsim_assign_words(" << resolvedStateRefExpr(state, context)
                            << ", next_value, " << state.width << ")) {\n";
-                    stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                    emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                     emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
                 }
@@ -8914,7 +8914,7 @@ namespace wolvrix::lib::emit
                            << "));\n";
                     stream << innerIndent << "if (" << resolvedStateRefExpr(state, context) << " != next_value) {\n";
                     stream << innerIndent << "    " << resolvedStateRefExpr(state, context) << " = next_value;\n";
-                    stream << innerIndent << "    ++perf_counters_.touchedWriteCount;\n";
+                    emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                     emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
                 }
@@ -13283,6 +13283,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "#include <string>\n";
             *stream << "#include <vector>\n\n";
             *stream << "#include \"" << runtimePath.filename().string() << "\"\n\n";
+            *stream << "#define WOLVRIX_GRHSIM_PERF " << (model.emitPerf ? "1" : "0") << "\n\n";
             *stream << "class " << className << " {\n";
             *stream << "public:\n";
             *stream << "    static constexpr std::size_t kSupernodeCount = " << schedule.supernodeToOps.size() << ";\n";
@@ -13299,18 +13300,21 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "    void init();\n";
             *stream << "    void set_random_seed(std::uint64_t seed);\n";
             *stream << "    [[nodiscard]] bool had_register_write_conflict() const;\n";
-            *stream << "    struct PerfCounters {\n";
-            *stream << "        std::uint64_t evalCount = UINT64_C(0);\n";
-            *stream << "        std::uint64_t round1Count = UINT64_C(0);\n";
-            *stream << "        std::uint64_t round2Count = UINT64_C(0);\n";
-            *stream << "        std::uint64_t totalRoundCount = UINT64_C(0);\n";
-            *stream << "        std::uint64_t computeBatchExecCount = UINT64_C(0);\n";
-            *stream << "        std::uint64_t commitBatchExecCount = UINT64_C(0);\n";
-            *stream << "        std::uint64_t touchedStateShadowCount = UINT64_C(0);\n";
-            *stream << "        std::uint64_t touchedWriteCount = UINT64_C(0);\n";
-            *stream << "    };\n";
-            *stream << "    [[nodiscard]] PerfCounters perf_counters() const;\n";
-            *stream << "    void reset_perf_counters();\n";
+            if (model.emitPerf)
+            {
+                *stream << "    struct PerfCounters {\n";
+                *stream << "        std::uint64_t evalCount = UINT64_C(0);\n";
+                *stream << "        std::uint64_t round1Count = UINT64_C(0);\n";
+                *stream << "        std::uint64_t round2Count = UINT64_C(0);\n";
+                *stream << "        std::uint64_t totalRoundCount = UINT64_C(0);\n";
+                *stream << "        std::uint64_t computeBatchExecCount = UINT64_C(0);\n";
+                *stream << "        std::uint64_t commitBatchExecCount = UINT64_C(0);\n";
+                *stream << "        std::uint64_t touchedStateShadowCount = UINT64_C(0);\n";
+                *stream << "        std::uint64_t touchedWriteCount = UINT64_C(0);\n";
+                *stream << "    };\n";
+                *stream << "    [[nodiscard]] PerfCounters perf_counters() const;\n";
+                *stream << "    void reset_perf_counters();\n";
+            }
             if (model.emitWaveform)
             {
                 *stream << "    void configure_waveform(bool enabled, std::string path = {});\n";
@@ -13612,7 +13616,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    std::uint64_t eval_invocation_count_ = UINT64_C(0);\n";
             }
-            *stream << "    PerfCounters perf_counters_{};\n";
+            if (model.emitPerf)
+            {
+                *stream << "    PerfCounters perf_counters_{};\n";
+            }
             *stream << "    bool register_write_conflict_ = false;\n";
             *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
             *stream << "    std::uint64_t random_state_ = UINT64_C(0);\n";
@@ -14161,12 +14168,15 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             *stream << "bool " << className << "::had_register_write_conflict() const\n{\n";
             *stream << "    return register_write_conflict_;\n";
             *stream << "}\n\n";
-            *stream << className << "::PerfCounters " << className << "::perf_counters() const\n{\n";
-            *stream << "    return perf_counters_;\n";
-            *stream << "}\n\n";
-            *stream << "void " << className << "::reset_perf_counters()\n{\n";
-            *stream << "    perf_counters_ = PerfCounters{};\n";
-            *stream << "}\n\n";
+            if (model.emitPerf)
+            {
+                *stream << className << "::PerfCounters " << className << "::perf_counters() const\n{\n";
+                *stream << "    return perf_counters_;\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::reset_perf_counters()\n{\n";
+                *stream << "    perf_counters_ = PerfCounters{};\n";
+                *stream << "}\n\n";
+            }
             const bool useCommitBoolRange = modelUsesCommitScalarStateWriteKind(model, ValueSlotScalarKind::kBool);
             const bool useCommitU8Range = modelUsesCommitScalarStateWriteKind(model, ValueSlotScalarKind::kU8);
             const bool useCommitU16Range = modelUsesCommitScalarStateWriteKind(model, ValueSlotScalarKind::kU16);
@@ -14546,7 +14556,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                             << ";\n";
                     *stream << "                if (stateData != nextValue) {\n";
                 *stream << "                    stateData = nextValue;\n";
-                    *stream << "                    ++perf_counters_.touchedStateShadowCount;\n";
+                    emitPerfCounterIncrement(*stream, model, "                    ", "touchedStateShadowCount");
                     *stream << "                    anyStateChanged = true;\n";
                     *stream << "                }\n";
                     *stream << "            }\n";
@@ -14568,7 +14578,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                        : static_cast<std::uint8_t>((stateData & static_cast<std::uint8_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
                     *stream << "                        stateData = merged;\n";
-                    *stream << "                        ++perf_counters_.touchedStateShadowCount;\n";
+                    emitPerfCounterIncrement(*stream, model, "                        ", "touchedStateShadowCount");
                     *stream << "                        anyStateChanged = true;\n";
                     *stream << "                    }\n";
                     *stream << "                }\n";
@@ -14591,7 +14601,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                        : static_cast<std::uint16_t>((stateData & static_cast<std::uint16_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
                     *stream << "                        stateData = merged;\n";
-                    *stream << "                        ++perf_counters_.touchedStateShadowCount;\n";
+                    emitPerfCounterIncrement(*stream, model, "                        ", "touchedStateShadowCount");
                     *stream << "                        anyStateChanged = true;\n";
                     *stream << "                    }\n";
                     *stream << "                }\n";
@@ -14614,7 +14624,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                        : static_cast<std::uint32_t>((stateData & static_cast<std::uint32_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
                     *stream << "                        stateData = merged;\n";
-                    *stream << "                        ++perf_counters_.touchedStateShadowCount;\n";
+                    emitPerfCounterIncrement(*stream, model, "                        ", "touchedStateShadowCount");
                     *stream << "                        anyStateChanged = true;\n";
                     *stream << "                    }\n";
                     *stream << "                }\n";
@@ -14637,7 +14647,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "                        : static_cast<std::uint64_t>((stateData & static_cast<std::uint64_t>(~mask)) | (nextValue & mask));\n";
                     *stream << "                    if (stateData != merged) {\n";
                     *stream << "                        stateData = merged;\n";
-                    *stream << "                        ++perf_counters_.touchedStateShadowCount;\n";
+                    emitPerfCounterIncrement(*stream, model, "                        ", "touchedStateShadowCount");
                     *stream << "                        anyStateChanged = true;\n";
                     *stream << "                    }\n";
                     *stream << "                }\n";
@@ -14697,7 +14707,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        "
                         << stateLogicScalarIndexedRefExpr(ValueSlotScalarKind::kBool, "stateDataIndex")
                         << " = nextValue;\n";
-                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
+                emitPerfCounterIncrement(*stream, model, "        ", "touchedStateShadowCount");
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -14748,7 +14758,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        stateData = merged;\n";
-                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
+                emitPerfCounterIncrement(*stream, model, "        ", "touchedStateShadowCount");
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -14799,7 +14809,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        stateData = merged;\n";
-                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
+                emitPerfCounterIncrement(*stream, model, "        ", "touchedStateShadowCount");
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -14850,7 +14860,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        stateData = merged;\n";
-                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
+                emitPerfCounterIncrement(*stream, model, "        ", "touchedStateShadowCount");
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -14901,7 +14911,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            continue;\n";
                 *stream << "        }\n";
                 *stream << "        stateData = merged;\n";
-                *stream << "        ++perf_counters_.touchedStateShadowCount;\n";
+                emitPerfCounterIncrement(*stream, model, "        ", "touchedStateShadowCount");
                 *stream << "        anyStateChanged = true;\n";
                 *stream << "    }\n";
                 *stream << "    if (!anyStateChanged) {\n";
@@ -15660,7 +15670,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     *stream << "    touched_state_shadow_flags_.fill(0);\n";
                     *stream << "    touched_state_shadow_count_ = 0;\n";
                 }
-                *stream << "    perf_counters_ = PerfCounters{};\n";
+                emitPerfCounterReset(*stream, model, "    ");
                 *stream << "    first_eval_ = true;\n";
                 *stream << "    register_write_conflict_ = false;\n";
                 break;
@@ -15711,7 +15721,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 const auto &shadow = model.stateShadows[shadowIndex];
                 *stream << "    case " << shadow.emitIndex << "u:\n";
                 *stream << "        if (" << stateShadowTouchedRef(shadow) << ") {\n";
-                *stream << "            ++perf_counters_.touchedStateShadowCount;\n";
+                emitPerfCounterIncrement(*stream, model, "            ", "touchedStateShadowCount");
                 emitCommitStateShadowBody(*stream, shadow, "            ");
                 *stream << "        }\n";
                 *stream << "        break;\n";
@@ -15751,7 +15761,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 const auto &write = model.writes[writeIndex];
                 *stream << "    case " << write.shadowIndex << "u:\n";
                 *stream << "        if (" << memoryWriteTouchedRef(write) << ") {\n";
-                *stream << "            ++perf_counters_.touchedWriteCount;\n";
+                emitPerfCounterIncrement(*stream, model, "            ", "touchedWriteCount");
                 emitCommitWriteBody(*stream, write, "            ");
                 *stream << "        }\n";
                 *stream << "        break;\n";
@@ -15788,60 +15798,49 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             *stream << "\n";
             *stream << "void " << className << "::eval()\n{\n";
-            *stream << "    // Direct-dispatch eval: emit static batch guards and direct compute/commit batch calls.\n";
+            *stream << "    // Direct-dispatch eval: call compute/commit batches in schedule order.\n";
             const auto emitDirectPhaseDispatch =
                 [&](const std::vector<ScheduleBatch> &phaseBatches,
                     std::string_view phaseName,
                     std::string_view perfCounterField,
-                    bool accumulateBatchUs,
-                    bool emitPerfPath)
+                    bool accumulateBatchUs)
             {
                 for (const auto &batch : phaseBatches)
                 {
-                    const std::string guardExpr = scheduleBatchDispatchGuardExpr(model, batch);
-                    if (emitPerfPath)
+                    if (model.emitPerf)
                     {
-                        *stream << "        ++round_checked_batches;\n";
-                        *stream << "        if (" << guardExpr << ") {\n";
-                        *stream << "            const auto batch_begin_time = trace_this_eval\n";
-                        *stream << "                ? std::chrono::steady_clock::now()\n";
-                        *stream << "                : std::chrono::steady_clock::time_point{};\n";
-                        *stream << "            this->" << scheduleBatchMethodName(batch) << "();\n";
-                        *stream << "            if (trace_this_eval) {\n";
-                        *stream << "                const auto batch_elapsed_us = static_cast<std::uint64_t>(\n";
-                        *stream << "                    std::chrono::duration_cast<std::chrono::microseconds>(\n";
-                        *stream << "                        std::chrono::steady_clock::now() - batch_begin_time)\n";
-                        *stream << "                        .count());\n";
+                        *stream << "        const auto batch_begin_time = trace_this_eval\n";
+                        *stream << "            ? std::chrono::steady_clock::now()\n";
+                        *stream << "            : std::chrono::steady_clock::time_point{};\n";
+                    }
+                    *stream << "        this->" << scheduleBatchMethodName(batch) << "();\n";
+                    if (model.emitPerf)
+                    {
+                        *stream << "        if (trace_this_eval) {\n";
+                        *stream << "            const auto batch_elapsed_us = static_cast<std::uint64_t>(\n";
+                        *stream << "                std::chrono::duration_cast<std::chrono::microseconds>(\n";
+                        *stream << "                    std::chrono::steady_clock::now() - batch_begin_time)\n";
+                        *stream << "                    .count());\n";
                         if (accumulateBatchUs)
                         {
-                            *stream << "                round_batch_us += batch_elapsed_us;\n";
+                            *stream << "            round_batch_us += batch_elapsed_us;\n";
                         }
-                        *stream << "                std::fprintf(stderr,\n";
-                        *stream << "                             \"[grhsim] eval batch #%llu.%llu phase=" << phaseName
+                        *stream << "            std::fprintf(stderr,\n";
+                        *stream << "                         \"[grhsim] eval batch #%llu.%llu phase=" << phaseName
                                 << " batch=%zu elapsed_us=%llu\\n\",\n";
-                        *stream << "                             static_cast<unsigned long long>(eval_id),\n";
-                        *stream << "                             static_cast<unsigned long long>(fixed_point_round_count),\n";
-                        *stream << "                             static_cast<std::size_t>(" << batch.index << "u),\n";
-                        *stream << "                             static_cast<unsigned long long>(batch_elapsed_us));\n";
-                        *stream << "            }\n";
-                        *stream << "            ++round_executed_batches;\n";
-                        *stream << "            ++perf_counters_." << perfCounterField << ";\n";
-                        *stream << "        } else {\n";
-                        *stream << "            ++round_skipped_batches;\n";
+                        *stream << "                         static_cast<unsigned long long>(eval_id),\n";
+                        *stream << "                         static_cast<unsigned long long>(fixed_point_round_count),\n";
+                        *stream << "                         static_cast<std::size_t>(" << batch.index << "u),\n";
+                        *stream << "                         static_cast<unsigned long long>(batch_elapsed_us));\n";
                         *stream << "        }\n";
-                    }
-                    else
-                    {
-                        *stream << "        if (" << guardExpr << ") {\n";
-                        *stream << "            this->" << scheduleBatchMethodName(batch) << "();\n";
-                        *stream << "            ++perf_counters_." << perfCounterField << ";\n";
-                        *stream << "        }\n";
+                        *stream << "        ++round_executed_batches;\n";
+                        emitPerfCounterIncrement(*stream, model, "        ", perfCounterField);
                     }
                 }
             };
             *stream << "    // Seed this eval from first-eval full activation and changed external inputs.\n";
             *stream << "    const bool initial_eval = first_eval_;\n";
-            *stream << "    ++perf_counters_.evalCount;\n";
+            emitPerfCounterIncrement(*stream, model, "    ", "evalCount");
             if (model.emitPerf || model.emitWaveform)
             {
                 *stream << "    const std::uint64_t eval_id = ++eval_invocation_count_;\n";
@@ -15909,8 +15908,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                                  ((eval_id % trace_eval_interval_) == 0);\n";
                 *stream << "    const auto trace_eval_begin_time =\n";
                 *stream << "        trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
-                *stream << "    std::size_t total_checked_batches = 0;\n";
-                *stream << "    std::size_t total_skipped_batches = 0;\n";
                 *stream << "    std::size_t total_executed_batches = 0;\n";
                 *stream << "    std::size_t peak_active_supernodes = trace_this_eval ? grhsim_count_active_supernodes(supernode_active_curr_) : 0;\n";
                 *stream << "    std::size_t peak_active_words = trace_this_eval ? grhsim_count_nonzero_active_words(supernode_active_curr_) : 0;\n";
@@ -15931,11 +15928,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    }\n";
                 *stream << "    while (pending_eval_round) {\n";
                 *stream << "        ++fixed_point_round_count;\n";
-                *stream << "        ++perf_counters_.totalRoundCount;\n";
+                emitPerfCounterIncrement(*stream, model, "        ", "totalRoundCount");
                 *stream << "        if (fixed_point_round_count == UINT64_C(1)) {\n";
-                *stream << "            ++perf_counters_.round1Count;\n";
+                emitPerfCounterIncrement(*stream, model, "            ", "round1Count");
                 *stream << "        } else if (fixed_point_round_count == UINT64_C(2)) {\n";
-                *stream << "            ++perf_counters_.round2Count;\n";
+                emitPerfCounterIncrement(*stream, model, "            ", "round2Count");
                 *stream << "        }\n";
                 *stream << "        pending_eval_round = false;\n";
                 *stream << "        const auto round_begin_time =\n";
@@ -15944,8 +15941,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            trace_this_eval ? grhsim_count_active_supernodes(supernode_active_curr_) : 0;\n";
                 *stream << "        const std::size_t round_active_words_in =\n";
                 *stream << "            trace_this_eval ? grhsim_count_nonzero_active_words(supernode_active_curr_) : 0;\n";
-                *stream << "        std::size_t round_checked_batches = 0;\n";
-                *stream << "        std::size_t round_skipped_batches = 0;\n";
                 *stream << "        std::size_t round_executed_batches = 0;\n";
                 *stream << "        std::size_t round_touched_state_shadows = 0;\n";
                 *stream << "        std::size_t round_touched_writes = 0;\n";
@@ -15962,14 +15957,14 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        round_touched_writes = 0;\n";
                 *stream << "        const auto round_touched_state_shadow_base = perf_counters_.touchedStateShadowCount;\n";
                 *stream << "        const auto round_touched_write_base = perf_counters_.touchedWriteCount;\n";
-                *stream << "        // Run compute-phase batches using direct batch guards.\n";
-                emitDirectPhaseDispatch(computeScheduleBatches, "compute", "computeBatchExecCount", true, true);
+                *stream << "        // Run compute-phase batches in direct schedule order.\n";
+                emitDirectPhaseDispatch(computeScheduleBatches, "compute", "computeBatchExecCount", true);
                 *stream << "        // Run sink supernodes after compute has reached the current round boundary.\n";
                 *stream << "        const auto commit_begin_time =\n";
                 *stream << "            trace_this_eval ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};\n";
                 *stream << "        commit_activated_readers_ = false;\n";
-                *stream << "        // Run commit-phase batches using direct batch guards.\n";
-                emitDirectPhaseDispatch(commitScheduleBatches, "commit", "commitBatchExecCount", false, true);
+                *stream << "        // Run commit-phase batches in direct schedule order.\n";
+                emitDirectPhaseDispatch(commitScheduleBatches, "commit", "commitBatchExecCount", false);
                 *stream << "        if (trace_this_eval) {\n";
                 *stream << "            round_commit_us += static_cast<std::uint64_t>(\n";
                 *stream << "                std::chrono::duration_cast<std::chrono::microseconds>(\n";
@@ -15995,8 +15990,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        round_touched_writes = static_cast<std::size_t>(\n";
                 *stream << "            perf_counters_.touchedWriteCount - round_touched_write_base);\n";
                 *stream << "        if (trace_this_eval) {\n";
-                *stream << "            total_checked_batches += round_checked_batches;\n";
-                *stream << "            total_skipped_batches += round_skipped_batches;\n";
                 *stream << "            total_executed_batches += round_executed_batches;\n";
                 *stream << "            total_touched_state_shadows += round_touched_state_shadows;\n";
                 *stream << "            total_touched_writes += round_touched_writes;\n";
@@ -16018,14 +16011,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                peak_active_words = round_active_words_out;\n";
                 *stream << "            }\n";
                 *stream << "            std::fprintf(stderr,\n";
-                *stream << "                         \"[grhsim] eval round #%llu.%llu active_in=%zu active_words_in=%zu checked_batches=%zu executed_batches=%zu skipped_batches=%zu touched_shadows=%zu touched_writes=%zu commit_activated=%d batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu active_out=%zu active_words_out=%zu\\n\",\n";
+                *stream << "                         \"[grhsim] eval round #%llu.%llu active_in=%zu active_words_in=%zu executed_batches=%zu touched_shadows=%zu touched_writes=%zu commit_activated=%d batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu active_out=%zu active_words_out=%zu\\n\",\n";
                 *stream << "                         static_cast<unsigned long long>(eval_id),\n";
                 *stream << "                         static_cast<unsigned long long>(fixed_point_round_count),\n";
                 *stream << "                         round_active_in,\n";
                 *stream << "                         round_active_words_in,\n";
-                *stream << "                         round_checked_batches,\n";
                 *stream << "                         round_executed_batches,\n";
-                *stream << "                         round_skipped_batches,\n";
                 *stream << "                         round_touched_state_shadows,\n";
                 *stream << "                         round_touched_writes,\n";
                 *stream << "                         pending_eval_round ? 1 : 0,\n";
@@ -16044,14 +16035,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "                std::chrono::steady_clock::now() - trace_eval_begin_time)\n";
                 *stream << "                .count());\n";
                 *stream << "        std::fprintf(stderr,\n";
-                *stream << "                     \"[grhsim] eval end   #%llu rounds=%llu peak_active_supernodes=%zu peak_active_words=%zu checked_batches=%zu executed_batches=%zu skipped_batches=%zu touched_shadows=%zu touched_writes=%zu commit_activated_rounds=%zu batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu write_conflict=%d\\n\",\n";
+                *stream << "                     \"[grhsim] eval end   #%llu rounds=%llu peak_active_supernodes=%zu peak_active_words=%zu executed_batches=%zu touched_shadows=%zu touched_writes=%zu commit_activated_rounds=%zu batch_us=%llu commit_us=%llu clear_evt_us=%llu total_us=%llu write_conflict=%d\\n\",\n";
                 *stream << "                     static_cast<unsigned long long>(eval_id),\n";
                 *stream << "                     static_cast<unsigned long long>(fixed_point_round_count),\n";
                 *stream << "                     peak_active_supernodes,\n";
                 *stream << "                     peak_active_words,\n";
-                *stream << "                     total_checked_batches,\n";
                 *stream << "                     total_executed_batches,\n";
-                *stream << "                     total_skipped_batches,\n";
                 *stream << "                     total_touched_state_shadows,\n";
                 *stream << "                     total_touched_writes,\n";
                 *stream << "                     total_commit_activated_rounds,\n";
@@ -16067,18 +16056,12 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << "    while (pending_eval_round) {\n";
                 *stream << "        ++fixed_point_round_count;\n";
-                *stream << "        ++perf_counters_.totalRoundCount;\n";
-                *stream << "        if (fixed_point_round_count == UINT64_C(1)) {\n";
-                *stream << "            ++perf_counters_.round1Count;\n";
-                *stream << "        } else if (fixed_point_round_count == UINT64_C(2)) {\n";
-                *stream << "            ++perf_counters_.round2Count;\n";
-                *stream << "        }\n";
                 *stream << "        pending_eval_round = false;\n";
-                *stream << "        // Run compute-phase batches using direct batch guards.\n";
-                emitDirectPhaseDispatch(computeScheduleBatches, "compute", "computeBatchExecCount", true, false);
+                *stream << "        // Run compute-phase batches in direct schedule order.\n";
+                emitDirectPhaseDispatch(computeScheduleBatches, "compute", "computeBatchExecCount", true);
                 *stream << "        commit_activated_readers_ = false;\n";
-                *stream << "        // Then commit sink supernodes using direct batch guards.\n";
-                emitDirectPhaseDispatch(commitScheduleBatches, "commit", "commitBatchExecCount", false, false);
+                *stream << "        // Then commit sink supernodes in direct schedule order.\n";
+                emitDirectPhaseDispatch(commitScheduleBatches, "commit", "commitBatchExecCount", false);
                 *stream << "        pending_eval_round = commit_activated_readers_;\n";
                 if (!model.allEventValues.empty())
                 {
