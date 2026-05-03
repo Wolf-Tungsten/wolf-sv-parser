@@ -14,9 +14,7 @@
 #include "transform/memory_init_check.hpp"
 #include "transform/memory_read_retime.hpp"
 #include "transform/multidriven_guard.hpp"
-#include "transform/record_slot_repack.hpp"
 #include "transform/repcut.hpp"
-#include "transform/scalar_memory_pack.hpp"
 #include "transform/simplify.hpp"
 #include "transform/slice_index_const.hpp"
 #include "transform/strip_debug.hpp"
@@ -426,8 +424,6 @@ namespace wolvrix::lib::transform
             "memory-init-check",
             "mem-to-reg",
             "merge-reg",
-            "record-slot-repack",
-            "scalar-memory-pack",
             "simplify",
             "stats",
             "strip-debug",
@@ -1590,15 +1586,6 @@ namespace wolvrix::lib::transform
             }
             return std::make_unique<MemToRegPass>(options);
         }
-        if (normalized == "scalar-memory-pack")
-        {
-            if (!args.empty())
-            {
-                error = "scalar-memory-pack does not accept arguments";
-                return nullptr;
-            }
-            return std::make_unique<ScalarMemoryPackPass>();
-        }
         if (normalized == "merge-reg")
         {
             MergeRegOptions options;
@@ -1648,46 +1635,11 @@ namespace wolvrix::lib::transform
                         return nullptr;
                     }
                 }
-                else if (arg == "-enable-bundle-shift-pipeline-to-wide-register" ||
-                         arg.starts_with("-enable-bundle-shift-pipeline-to-wide-register="))
-                {
-                    if (!parseNamedBool("-enable-bundle-shift-pipeline-to-wide-register",
-                                        options.enableBundleShiftPipelineToWideRegister))
-                    {
-                        return nullptr;
-                    }
-                }
                 else if (arg == "-enable-indexed-bundle-entry-to-wide-register" ||
                          arg.starts_with("-enable-indexed-bundle-entry-to-wide-register="))
                 {
                     if (!parseNamedBool("-enable-indexed-bundle-entry-to-wide-register",
                                         options.enableIndexedBundleEntryToWideRegister))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-enable-onehot-indexed-bank-to-wide-register" ||
-                         arg.starts_with("-enable-onehot-indexed-bank-to-wide-register="))
-                {
-                    if (!parseNamedBool("-enable-onehot-indexed-bank-to-wide-register",
-                                        options.enableOneHotIndexedBankToWideRegister))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-enable-bitset-to-wide-register" ||
-                         arg.starts_with("-enable-bitset-to-wide-register="))
-                {
-                    if (!parseNamedBool("-enable-bitset-to-wide-register", options.enableBitsetToWideRegister))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-enable-shift-chain-to-wide-register" ||
-                         arg.starts_with("-enable-shift-chain-to-wide-register="))
-                {
-                    if (!parseNamedBool("-enable-shift-chain-to-wide-register",
-                                        options.enableShiftChainToWideRegister))
                     {
                         return nullptr;
                     }
@@ -1699,15 +1651,6 @@ namespace wolvrix::lib::transform
                 }
             }
             return std::make_unique<MergeRegPass>(options);
-        }
-        if (normalized == "record-slot-repack")
-        {
-            if (!args.empty())
-            {
-                error = "record-slot-repack does not accept arguments";
-                return nullptr;
-            }
-            return std::make_unique<RecordSlotRepackPass>();
         }
         if (normalized == "memory-read-retime")
         {

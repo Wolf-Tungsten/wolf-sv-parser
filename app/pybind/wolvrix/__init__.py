@@ -520,11 +520,7 @@ def _compile_merge_reg_kwargs(named: dict[str, Any]) -> list[str]:
     out: list[str] = []
     options = [
         ("enable_scalar_to_memory", "-enable-scalar-to-memory"),
-        ("enable_bundle_shift_pipeline_to_wide_register", "-enable-bundle-shift-pipeline-to-wide-register"),
         ("enable_indexed_bundle_entry_to_wide_register", "-enable-indexed-bundle-entry-to-wide-register"),
-        ("enable_onehot_indexed_bank_to_wide_register", "-enable-onehot-indexed-bank-to-wide-register"),
-        ("enable_bitset_to_wide_register", "-enable-bitset-to-wide-register"),
-        ("enable_shift_chain_to_wide_register", "-enable-shift-chain-to-wide-register"),
     ]
     for key, arg in options:
         value = _pop_named(local, key, None)

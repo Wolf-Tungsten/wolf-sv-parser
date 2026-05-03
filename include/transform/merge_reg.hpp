@@ -9,11 +9,7 @@ namespace wolvrix::lib::transform
     struct MergeRegOptions
     {
         bool enableScalarToMemory = true;
-        bool enableBundleShiftPipelineToWideRegister = true;
         bool enableIndexedBundleEntryToWideRegister = true;
-        bool enableOneHotIndexedBankToWideRegister = true;
-        bool enableBitsetToWideRegister = true;
-        bool enableShiftChainToWideRegister = true;
     };
 
     class MergeRegPass : public Pass

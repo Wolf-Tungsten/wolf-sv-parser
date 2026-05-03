@@ -129,8 +129,6 @@ set(WOLVRIX_LIB_SOURCES
     lib/transform/blackbox_guard.cpp
     lib/transform/comb_lane_pack.cpp
     lib/transform/merge_reg.cpp
-    lib/transform/record_slot_repack.cpp
-    lib/transform/scalar_memory_pack.cpp
     lib/transform/comb_loop_elim.cpp
     lib/transform/hier_flatten.cpp
     lib/transform/instance_inline.cpp
@@ -615,30 +613,6 @@ target_link_libraries(transform-memory-read-retime
 )
 
 register_test_exe(transform-memory-read-retime)
-
-# transform: scalar-memory-pack
-add_executable(transform-scalar-memory-pack
-    tests/transform/test_scalar_memory_pack.cpp
-)
-
-target_link_libraries(transform-scalar-memory-pack
-    PRIVATE
-        wolvrix-lib
-)
-
-register_test_exe(transform-scalar-memory-pack)
-
-# transform: record-slot-repack
-add_executable(transform-record-slot-repack
-    tests/transform/test_record_slot_repack.cpp
-)
-
-target_link_libraries(transform-record-slot-repack
-    PRIVATE
-        wolvrix-lib
-)
-
-register_test_exe(transform-record-slot-repack)
 
 # transform: merge-reg
 add_executable(transform-merge-reg
