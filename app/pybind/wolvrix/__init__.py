@@ -390,6 +390,8 @@ def _compile_run_pass(name: str, args: list[str], named: dict[str, Any]) -> tupl
         compiled.extend(_compile_comb_loop_elim_kwargs(named))
     elif canonical_name == "mem-to-reg":
         compiled.extend(_compile_mem_to_reg_kwargs(named))
+    elif canonical_name == "merge-reg":
+        compiled.extend(_compile_merge_reg_kwargs(named))
     elif canonical_name == "simplify":
         compiled.extend(_compile_simplify_kwargs(named))
     elif canonical_name == "stats":
@@ -510,6 +512,25 @@ def _compile_mem_to_reg_kwargs(named: dict[str, Any]) -> list[str]:
     elif strict_init is False:
         out.append("-no-strict-init")
     _ensure_no_extra_named("mem-to-reg", local)
+    return out
+
+
+def _compile_merge_reg_kwargs(named: dict[str, Any]) -> list[str]:
+    local = dict(named)
+    out: list[str] = []
+    options = [
+        ("enable_scalar_to_memory", "-enable-scalar-to-memory"),
+        ("enable_bundle_shift_pipeline_to_wide_register", "-enable-bundle-shift-pipeline-to-wide-register"),
+        ("enable_indexed_bundle_entry_to_wide_register", "-enable-indexed-bundle-entry-to-wide-register"),
+        ("enable_onehot_indexed_bank_to_wide_register", "-enable-onehot-indexed-bank-to-wide-register"),
+        ("enable_bitset_to_wide_register", "-enable-bitset-to-wide-register"),
+        ("enable_shift_chain_to_wide_register", "-enable-shift-chain-to-wide-register"),
+    ]
+    for key, arg in options:
+        value = _pop_named(local, key, None)
+        if value is not None:
+            out.extend([arg, "true" if value else "false"])
+    _ensure_no_extra_named("merge-reg", local)
     return out
 
 

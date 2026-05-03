@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -218,6 +219,7 @@ namespace wolvrix::lib::transform
             ValueId mask;
             std::vector<ValueId> eventValues;
             std::vector<std::string> eventEdges;
+            int64_t writeOrder = 0;
 
             bool operator==(const FillGroupKey &) const = default;
         };
@@ -251,6 +253,7 @@ namespace wolvrix::lib::transform
                 {
                     hashCombine(seed, edge);
                 }
+                hashCombine(seed, key.writeOrder);
                 return seed;
             }
         };
@@ -295,6 +298,7 @@ namespace wolvrix::lib::transform
             ValueId mask;
             std::vector<ValueId> eventValues;
             std::vector<std::string> eventEdges;
+            int64_t writeOrder = 0;
 
             bool operator==(const PointWriteKey &) const = default;
         };
@@ -329,6 +333,7 @@ namespace wolvrix::lib::transform
                 {
                     hashCombine(seed, edge);
                 }
+                hashCombine(seed, key.writeOrder);
                 return seed;
             }
         };
@@ -345,6 +350,7 @@ namespace wolvrix::lib::transform
         {
             std::vector<ValueId> condBranches;
             FillGroupKey::DataRef data;
+            int64_t writeOrder = 0;
         };
 
         struct ParsedPointArm
@@ -353,6 +359,7 @@ namespace wolvrix::lib::transform
             ValueId addr;
             int64_t constIndex = -1;
             FillGroupKey::DataRef data;
+            int64_t writeOrder = 0;
         };
 
         struct ParsedWritePattern
@@ -365,6 +372,24 @@ namespace wolvrix::lib::transform
             std::vector<ParsedPointArm> points;
         };
 
+        constexpr int64_t kWriteOrderStride = 1000000;
+
+        void assignWriteOrders(ParsedWritePattern &pattern)
+        {
+            int64_t localOrder = 0;
+
+            for (auto it = pattern.fills.rbegin(); it != pattern.fills.rend(); ++it)
+            {
+                it->writeOrder = localOrder;
+                ++localOrder;
+            }
+            for (auto it = pattern.points.rbegin(); it != pattern.points.rend(); ++it)
+            {
+                it->writeOrder = localOrder;
+                ++localOrder;
+            }
+        }
+
         struct CandidateCluster
         {
             ClusterKey key;
@@ -373,6 +398,19 @@ namespace wolvrix::lib::transform
             ReadRewritePlan readPlan;
             std::vector<std::pair<FillGroupKey, std::vector<OperationId>>> fillGroups;
             std::vector<std::pair<PointWriteKey, std::vector<OperationId>>> pointWriteGroups;
+        };
+
+        struct OrderedWriteGroupRef
+        {
+            enum class Kind
+            {
+                Point,
+                Fill,
+            };
+
+            Kind kind = Kind::Point;
+            std::size_t index = 0;
+            int64_t order = 0;
         };
 
         struct FlatConcatInfo
@@ -1485,6 +1523,92 @@ namespace wolvrix::lib::transform
             {
                 return false;
             }
+        }
+
+        bool valueDependsOnAnyRoot(const Graph &graph,
+                                   ValueId value,
+                                   const std::unordered_set<ValueId, ValueIdHash> &roots,
+                                   std::unordered_set<ValueId, ValueIdHash> &visiting)
+        {
+            if (!value.valid())
+            {
+                return false;
+            }
+            if (roots.contains(value))
+            {
+                return true;
+            }
+            if (!visiting.insert(value).second)
+            {
+                return false;
+            }
+
+            const OperationId defOpId = graph.valueDef(value);
+            if (!defOpId.valid())
+            {
+                visiting.erase(value);
+                return false;
+            }
+            const Operation defOp = graph.getOperation(defOpId);
+            for (ValueId operand : defOp.operands())
+            {
+                if (valueDependsOnAnyRoot(graph, operand, roots, visiting))
+                {
+                    visiting.erase(value);
+                    return true;
+                }
+            }
+
+            visiting.erase(value);
+            return false;
+        }
+
+        bool dataRefDependsOnAnyRoot(const Graph &graph,
+                                     const FillGroupKey::DataRef &data,
+                                     const std::unordered_set<ValueId, ValueIdHash> &roots)
+        {
+            std::unordered_set<ValueId, ValueIdHash> visiting;
+            return data.value.valid() && valueDependsOnAnyRoot(graph, data.value, roots, visiting);
+        }
+
+        std::unordered_set<ValueId, ValueIdHash> collectPackedReadRoots(const Graph &graph,
+                                                                        const CandidateCluster &candidate)
+        {
+            std::unordered_set<ValueId, ValueIdHash> roots;
+            for (const ClusterMember &member : candidate.members)
+            {
+                if (member.readResult.valid())
+                {
+                    roots.insert(member.readResult);
+                }
+            }
+            if (candidate.readPlan.concatResult.valid())
+            {
+                roots.insert(candidate.readPlan.concatResult);
+            }
+            for (OperationId concatOpId : candidate.readPlan.concatOps)
+            {
+                const Operation concatOp = graph.getOperation(concatOpId);
+                for (ValueId result : concatOp.results())
+                {
+                    roots.insert(result);
+                }
+            }
+            return roots;
+        }
+
+        bool pointWriteDataDependsOnPackedReads(const Graph &graph, const CandidateCluster &candidate)
+        {
+            const auto roots = collectPackedReadRoots(graph, candidate);
+            for (const auto &[key, opIds] : candidate.pointWriteGroups)
+            {
+                (void)opIds;
+                if (dataRefDependsOnAnyRoot(graph, key.data, roots))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         std::string makeUniqueMemoryName(const Graph &graph, const ClusterKey &key)
@@ -2922,6 +3046,7 @@ namespace wolvrix::lib::transform
                 pattern.fills.push_back(ParsedFillArm{
                     .condBranches = std::move(condBranches),
                     .data = makeDataRefFromValue(graph, op.operands()[1])});
+                assignWriteOrders(pattern);
                 if (tracedRegSymbol && matchesTraceFilter(*tracedRegSymbol))
                 {
                     std::cerr << "[scalar-memory-pack] write-pattern reg=" << *tracedRegSymbol
@@ -2938,6 +3063,7 @@ namespace wolvrix::lib::transform
                     .addr = pointBranches.front().info.addr,
                     .constIndex = pointBranches.front().info.constIndex,
                     .data = makeDataRefFromValue(graph, op.operands()[1])});
+                assignWriteOrders(pattern);
                 if (tracedRegSymbol && matchesTraceFilter(*tracedRegSymbol))
                 {
                     std::cerr << "[scalar-memory-pack] write-pattern reg=" << *tracedRegSymbol
@@ -2988,6 +3114,7 @@ namespace wolvrix::lib::transform
                         std::cerr << "[scalar-memory-pack] write-pattern reg=" << *tracedRegSymbol
                                   << " dropping fill branches because default data is self-read\n";
                     }
+                    assignWriteOrders(pattern);
                     return pattern;
                 }
                 std::vector<ParsedFillArm> parsedFills;
@@ -3008,6 +3135,7 @@ namespace wolvrix::lib::transform
                         .data = defaultData});
                 }
             }
+            assignWriteOrders(pattern);
             if (tracedRegSymbol && matchesTraceFilter(*tracedRegSymbol))
             {
                 std::cerr << "[scalar-memory-pack] write-pattern reg=" << *tracedRegSymbol
@@ -3091,7 +3219,8 @@ namespace wolvrix::lib::transform
                             .data = fill.data,
                             .mask = parsed->mask,
                             .eventValues = parsed->eventValues,
-                            .eventEdges = parsed->eventEdges};
+                            .eventEdges = parsed->eventEdges,
+                            .writeOrder = fill.writeOrder};
                         groups[key].push_back({member.symbol, opId});
 
                         FillFamilyKey familyKey{
@@ -3229,7 +3358,8 @@ namespace wolvrix::lib::transform
                             .data = point.data,
                             .mask = parsed->mask,
                             .eventValues = parsed->eventValues,
-                            .eventEdges = parsed->eventEdges};
+                            .eventEdges = parsed->eventEdges,
+                            .writeOrder = point.writeOrder};
                         groups[key].push_back(PointWriteInfo{
                             .key = key,
                             .constIndex = point.constIndex,
@@ -3272,6 +3402,50 @@ namespace wolvrix::lib::transform
                 setRejectReason(reasonOut, "no complete point-write group covers the full cluster");
             }
             return true;
+        }
+
+        int64_t earliestOpOrder(std::span<const OperationId> opIds)
+        {
+            int64_t order = std::numeric_limits<int64_t>::max();
+            for (OperationId opId : opIds)
+            {
+                order = std::min(order, static_cast<int64_t>(opId.index));
+            }
+            return order;
+        }
+
+        std::vector<OrderedWriteGroupRef> buildOrderedWriteGroups(const CandidateCluster &candidate)
+        {
+            std::vector<OrderedWriteGroupRef> groups;
+            groups.reserve(candidate.pointWriteGroups.size() + candidate.fillGroups.size());
+
+            for (std::size_t i = 0; i < candidate.pointWriteGroups.size(); ++i)
+            {
+                const auto &[key, opIds] = candidate.pointWriteGroups[i];
+                groups.push_back(OrderedWriteGroupRef{
+                    .kind = OrderedWriteGroupRef::Kind::Point,
+                    .index = i,
+                    .order = earliestOpOrder(std::span<const OperationId>(opIds.data(), opIds.size())) * kWriteOrderStride +
+                             key.writeOrder});
+            }
+            for (std::size_t i = 0; i < candidate.fillGroups.size(); ++i)
+            {
+                const auto &[key, opIds] = candidate.fillGroups[i];
+                groups.push_back(OrderedWriteGroupRef{
+                    .kind = OrderedWriteGroupRef::Kind::Fill,
+                    .index = i,
+                    .order = earliestOpOrder(std::span<const OperationId>(opIds.data(), opIds.size())) * kWriteOrderStride +
+                             key.writeOrder});
+            }
+
+            std::sort(groups.begin(), groups.end(), [](const OrderedWriteGroupRef &lhs, const OrderedWriteGroupRef &rhs) {
+                if (lhs.order != rhs.order)
+                {
+                    return lhs.order < rhs.order;
+                }
+                return static_cast<int>(lhs.kind) < static_cast<int>(rhs.kind);
+            });
+            return groups;
         }
 
         std::optional<FlatConcatInfo> analyzeConcatReadShape(const Graph &graph,
@@ -3417,6 +3591,16 @@ namespace wolvrix::lib::transform
             }
             if (!analyzePointWriteGroups(graph, candidate, refs, candidate.pointWriteGroups, reasonOut))
             {
+                return std::nullopt;
+            }
+            if (candidate.pointWriteGroups.size() > 1)
+            {
+                setRejectReason(reasonOut, "multiple dynamic point-write groups require ordered same-memory commits");
+                return std::nullopt;
+            }
+            if (!candidate.pointWriteGroups.empty() && pointWriteDataDependsOnPackedReads(graph, candidate))
+            {
+                setRejectReason(reasonOut, "dynamic point-write data depends on packed register reads");
                 return std::nullopt;
             }
             if (candidate.fillGroups.empty() && candidate.pointWriteGroups.empty())
@@ -3571,28 +3755,36 @@ namespace wolvrix::lib::transform
                 }
             }
 
-            for (const auto &[key, opIds] : candidate.pointWriteGroups)
+            const auto orderedWriteGroups = buildOrderedWriteGroups(candidate);
+            for (const OrderedWriteGroupRef &group : orderedWriteGroups)
             {
-                const OperationId writeOp = graph.createOperation(OperationKind::kMemoryWritePort, graph.makeInternalOpSym());
-                graph.setAttr(writeOp, "memSymbol", memoryName);
-                graph.setAttr(writeOp, "eventEdge", key.eventEdges);
-                graph.addOperand(writeOp, createLogicTree(graph, key.baseTerms, OperationKind::kLogicAnd, "point_write_cond", true));
-                graph.addOperand(writeOp,
-                                 createAdjustedAddress(graph,
-                                                       key.addr,
-                                                       -candidate.indexBase,
-                                                       "point_write_index_base"));
-                graph.addOperand(writeOp, materializeDataRef(graph, key.data, "point_write_data"));
-                graph.addOperand(writeOp, key.mask);
-                for (ValueId eventValue : key.eventValues)
+                if (group.kind == OrderedWriteGroupRef::Kind::Point)
                 {
-                    graph.addOperand(writeOp, eventValue);
+                    const auto &[key, opIds] = candidate.pointWriteGroups[group.index];
+                    (void)opIds;
+                    const OperationId writeOp =
+                        graph.createOperation(OperationKind::kMemoryWritePort, graph.makeInternalOpSym());
+                    graph.setAttr(writeOp, "memSymbol", memoryName);
+                    graph.setAttr(writeOp, "eventEdge", key.eventEdges);
+                    graph.addOperand(writeOp,
+                                     createLogicTree(graph, key.baseTerms, OperationKind::kLogicAnd, "point_write_cond", true));
+                    graph.addOperand(writeOp,
+                                     createAdjustedAddress(graph,
+                                                           key.addr,
+                                                           -candidate.indexBase,
+                                                           "point_write_index_base"));
+                    graph.addOperand(writeOp, materializeDataRef(graph, key.data, "point_write_data"));
+                    graph.addOperand(writeOp, key.mask);
+                    for (ValueId eventValue : key.eventValues)
+                    {
+                        graph.addOperand(writeOp, eventValue);
+                    }
+                    graph.setOpSrcLoc(writeOp, makeTransformSrcLoc("scalar-memory-pack", "dynamic_memory_write"));
+                    continue;
                 }
-                graph.setOpSrcLoc(writeOp, makeTransformSrcLoc("scalar-memory-pack", "dynamic_memory_write"));
-            }
 
-            for (const auto &[key, opIds] : candidate.fillGroups)
-            {
+                const auto &[key, opIds] = candidate.fillGroups[group.index];
+                (void)opIds;
                 const OperationId fillOp = graph.createOperation(OperationKind::kMemoryFillPort, graph.makeInternalOpSym());
                 graph.setAttr(fillOp, "memSymbol", memoryName);
                 graph.setAttr(fillOp, "eventEdge", key.eventEdges);

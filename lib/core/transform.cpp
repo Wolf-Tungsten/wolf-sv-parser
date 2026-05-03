@@ -1601,12 +1601,104 @@ namespace wolvrix::lib::transform
         }
         if (normalized == "merge-reg")
         {
-            if (!args.empty())
+            MergeRegOptions options;
+            for (std::size_t i = 0; i < args.size(); ++i)
             {
-                error = "merge-reg does not accept arguments";
-                return nullptr;
+                const std::string_view arg = args[i];
+                auto parseBoolValue = [&](std::string_view optionName, std::string_view text, bool &out) -> bool {
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        out = true;
+                        return true;
+                    }
+                    if (text == "false" || text == "0" || text == "off")
+                    {
+                        out = false;
+                        return true;
+                    }
+                    error = std::string("invalid ") + std::string(optionName) + " value";
+                    return false;
+                };
+                auto parseBoolArg = [&](std::string_view optionName, bool &out) -> bool {
+                    if (i + 1 >= args.size())
+                    {
+                        error = std::string(optionName) + " expects a value";
+                        return false;
+                    }
+                    return parseBoolValue(optionName, args[++i], out);
+                };
+                auto parseNamedBool = [&](std::string_view optionName, bool &out) -> bool {
+                    if (arg == optionName)
+                    {
+                        return parseBoolArg(optionName, out);
+                    }
+                    const std::string optionPrefix = std::string(optionName) + "=";
+                    if (arg.starts_with(optionPrefix))
+                    {
+                        return parseBoolValue(optionName, arg.substr(optionPrefix.size()), out);
+                    }
+                    return true;
+                };
+
+                if (arg == "-enable-scalar-to-memory" ||
+                    arg.starts_with("-enable-scalar-to-memory="))
+                {
+                    if (!parseNamedBool("-enable-scalar-to-memory", options.enableScalarToMemory))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-bundle-shift-pipeline-to-wide-register" ||
+                         arg.starts_with("-enable-bundle-shift-pipeline-to-wide-register="))
+                {
+                    if (!parseNamedBool("-enable-bundle-shift-pipeline-to-wide-register",
+                                        options.enableBundleShiftPipelineToWideRegister))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-indexed-bundle-entry-to-wide-register" ||
+                         arg.starts_with("-enable-indexed-bundle-entry-to-wide-register="))
+                {
+                    if (!parseNamedBool("-enable-indexed-bundle-entry-to-wide-register",
+                                        options.enableIndexedBundleEntryToWideRegister))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-onehot-indexed-bank-to-wide-register" ||
+                         arg.starts_with("-enable-onehot-indexed-bank-to-wide-register="))
+                {
+                    if (!parseNamedBool("-enable-onehot-indexed-bank-to-wide-register",
+                                        options.enableOneHotIndexedBankToWideRegister))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-bitset-to-wide-register" ||
+                         arg.starts_with("-enable-bitset-to-wide-register="))
+                {
+                    if (!parseNamedBool("-enable-bitset-to-wide-register", options.enableBitsetToWideRegister))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-shift-chain-to-wide-register" ||
+                         arg.starts_with("-enable-shift-chain-to-wide-register="))
+                {
+                    if (!parseNamedBool("-enable-shift-chain-to-wide-register",
+                                        options.enableShiftChainToWideRegister))
+                    {
+                        return nullptr;
+                    }
+                }
+                else
+                {
+                    error = "unknown merge-reg option";
+                    return nullptr;
+                }
             }
-            return std::make_unique<MergeRegPass>();
+            return std::make_unique<MergeRegPass>(options);
         }
         if (normalized == "record-slot-repack")
         {

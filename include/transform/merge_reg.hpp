@@ -6,12 +6,26 @@
 namespace wolvrix::lib::transform
 {
 
+    struct MergeRegOptions
+    {
+        bool enableScalarToMemory = true;
+        bool enableBundleShiftPipelineToWideRegister = true;
+        bool enableIndexedBundleEntryToWideRegister = true;
+        bool enableOneHotIndexedBankToWideRegister = true;
+        bool enableBitsetToWideRegister = true;
+        bool enableShiftChainToWideRegister = true;
+    };
+
     class MergeRegPass : public Pass
     {
     public:
         MergeRegPass();
+        explicit MergeRegPass(MergeRegOptions options);
 
         PassResult run() override;
+
+    private:
+        MergeRegOptions options_;
     };
 
 } // namespace wolvrix::lib::transform

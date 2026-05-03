@@ -2,6 +2,8 @@
 #include "core/transform.hpp"
 #include "transform/merge_reg.hpp"
 
+#include <array>
+#include <algorithm>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -13,6 +15,10 @@ using namespace wolvrix::lib::transform;
 namespace
 {
     int runMergeReg(Design &design, bool expectChanged, std::string_view label = "");
+    int runMergeRegWithOptions(Design &design,
+                               MergeRegOptions options,
+                               bool expectChanged,
+                               std::string_view label = "");
 
     int fail(const std::string &message)
     {
@@ -210,6 +216,103 @@ namespace
             graph.addOperand(write, q);
             graph.addOperand(write, one);
             graph.addOperand(write, clk);
+        }
+
+        return design;
+    }
+
+    Design buildScalarMemoryPackDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+
+        const ValueId clk = makeLogicValue(graph, "clk", 1);
+        const ValueId wrEn = makeLogicValue(graph, "wr_en", 1);
+        const ValueId fillEn = makeLogicValue(graph, "fill_en", 1);
+        const ValueId idx = makeLogicValue(graph, "idx", 2);
+        const ValueId data = makeLogicValue(graph, "data", 8);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("wr_en", wrEn);
+        graph.bindInputPort("fill_en", fillEn);
+        graph.bindInputPort("idx", idx);
+        graph.bindInputPort("data", data);
+
+        const ValueId mask = addConstant(graph, "mask_op", "mask", 8, "8'hff");
+        const std::array<ValueId, 4> indices{
+            addConstant(graph, "c0_op", "c0", 2, "2'd0"),
+            addConstant(graph, "c1_op", "c1", 2, "2'd1"),
+            addConstant(graph, "c2_op", "c2", 2, "2'd2"),
+            addConstant(graph, "c3_op", "c3", 2, "2'd3"),
+        };
+
+        std::vector<ValueId> reads;
+        std::vector<std::string> names;
+        for (int i = 0; i < 4; ++i)
+        {
+            const std::string regName = "arr_" + std::to_string(i) + "_value";
+            names.push_back(regName);
+            const OperationId reg = graph.createOperation(OperationKind::kRegister, graph.internSymbol(regName));
+            graph.setAttr(reg, "width", static_cast<int64_t>(8));
+            graph.setAttr(reg, "isSigned", false);
+            graph.setAttr(reg, "initValue", std::string("8'h00"));
+
+            const ValueId q = makeLogicValue(graph, "arr_q_" + std::to_string(i), 8);
+            const OperationId read = graph.createOperation(OperationKind::kRegisterReadPort,
+                                                           graph.internSymbol("arr_read_" + std::to_string(i)));
+            graph.setAttr(read, "regSymbol", regName);
+            graph.addResult(read, q);
+            reads.push_back(q);
+        }
+
+        const ValueId packed = makeLogicValue(graph, "packed", 32);
+        const OperationId concat = graph.createOperation(OperationKind::kConcat, graph.internSymbol("packed_concat"));
+        graph.addOperand(concat, reads[3]);
+        graph.addOperand(concat, reads[2]);
+        graph.addOperand(concat, reads[1]);
+        graph.addOperand(concat, reads[0]);
+        graph.addResult(concat, packed);
+
+        const ValueId out = makeLogicValue(graph, "out", 8);
+        const OperationId slice = graph.createOperation(OperationKind::kSliceArray, graph.internSymbol("packed_idx"));
+        graph.addOperand(slice, packed);
+        graph.addOperand(slice, idx);
+        graph.addResult(slice, out);
+        graph.setAttr(slice, "sliceWidth", static_cast<int64_t>(8));
+        graph.bindOutputPort("out", out);
+
+        for (int i = 0; i < 4; ++i)
+        {
+            const std::string suffix = std::to_string(i);
+            const ValueId hit = addOp(graph,
+                                      OperationKind::kEq,
+                                      "eq_op_" + suffix,
+                                      "eq_" + suffix,
+                                      1,
+                                      std::array<ValueId, 2>{idx, indices[static_cast<std::size_t>(i)]});
+            const ValueId pointCond = addOp(graph,
+                                            OperationKind::kAnd,
+                                            "point_and_op_" + suffix,
+                                            "point_cond_" + suffix,
+                                            1,
+                                            std::array<ValueId, 2>{wrEn, hit});
+
+            const OperationId pointWrite = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                                 graph.internSymbol("point_write_" + suffix));
+            graph.setAttr(pointWrite, "regSymbol", names[static_cast<std::size_t>(i)]);
+            graph.setAttr(pointWrite, "eventEdge", std::vector<std::string>{"posedge"});
+            graph.addOperand(pointWrite, pointCond);
+            graph.addOperand(pointWrite, data);
+            graph.addOperand(pointWrite, mask);
+            graph.addOperand(pointWrite, clk);
+
+            const OperationId fillWrite = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                                graph.internSymbol("fill_write_" + suffix));
+            graph.setAttr(fillWrite, "regSymbol", names[static_cast<std::size_t>(i)]);
+            graph.setAttr(fillWrite, "eventEdge", std::vector<std::string>{"posedge"});
+            graph.addOperand(fillWrite, fillEn);
+            graph.addOperand(fillWrite, data);
+            graph.addOperand(fillWrite, mask);
+            graph.addOperand(fillWrite, clk);
         }
 
         return design;
@@ -975,8 +1078,16 @@ namespace
 
     int runMergeReg(Design &design, bool expectChanged, std::string_view label)
     {
+        return runMergeRegWithOptions(design, MergeRegOptions{}, expectChanged, label);
+    }
+
+    int runMergeRegWithOptions(Design &design,
+                               MergeRegOptions options,
+                               bool expectChanged,
+                               std::string_view label)
+    {
         PassManager manager;
-        manager.addPass(std::make_unique<MergeRegPass>());
+        manager.addPass(std::make_unique<MergeRegPass>(options));
         PassDiagnostics diags;
         const PassManagerResult result = manager.run(design, diags);
         if (!result.success || diags.hasError())
@@ -1004,6 +1115,46 @@ namespace
 
 int main()
 {
+    try
+    {
+        Design design = buildScalarMemoryPackDesign();
+        if (const int status = runMergeReg(design, true, "scalar-to-memory"); status != 0)
+        {
+            return status;
+        }
+        Graph *graph = design.findGraph("top");
+        if (graph == nullptr)
+        {
+            return fail("scalar-to-memory: missing graph");
+        }
+        if (countOps(*graph, OperationKind::kMemory) != 1 ||
+            countOps(*graph, OperationKind::kMemoryReadPort) != 1 ||
+            countOps(*graph, OperationKind::kMemoryWritePort) != 1 ||
+            countOps(*graph, OperationKind::kMemoryFillPort) != 1)
+        {
+            return fail("scalar-to-memory should become one memory/read/write/fill");
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("scalar-to-memory case threw: ") + ex.what());
+    }
+
+    try
+    {
+        Design design = buildScalarMemoryPackDesign();
+        MergeRegOptions options;
+        options.enableScalarToMemory = false;
+        if (const int status = runMergeRegWithOptions(design, options, false, "scalar-to-memory disabled"); status != 0)
+        {
+            return status;
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("scalar-to-memory disabled case threw: ") + ex.what());
+    }
+
     try
     {
         Design design = buildShiftChainDesign();
@@ -1067,6 +1218,21 @@ int main()
 
     try
     {
+        Design design = buildShiftChainDesign();
+        MergeRegOptions options;
+        options.enableShiftChainToWideRegister = false;
+        if (const int status = runMergeRegWithOptions(design, options, false, "shift chain disabled"); status != 0)
+        {
+            return status;
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("shift-chain disabled case threw: ") + ex.what());
+    }
+
+    try
+    {
         Design design = buildSelfHoldDesign();
         if (const int status = runMergeReg(design, false, "self hold"); status != 0)
         {
@@ -1104,6 +1270,21 @@ int main()
 
     try
     {
+        Design design = buildBitsetDesign();
+        MergeRegOptions options;
+        options.enableBitsetToWideRegister = false;
+        if (const int status = runMergeRegWithOptions(design, options, false, "bitset disabled"); status != 0)
+        {
+            return status;
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("bitset disabled case threw: ") + ex.what());
+    }
+
+    try
+    {
         Design design = buildBitsetDesign(true);
         if (const int status = checkBitsetRewrite(design, "bitset reset mux"); status != 0)
         {
@@ -1126,6 +1307,21 @@ int main()
     catch (const std::exception &ex)
     {
         return fail(std::string("indexed bank case threw: ") + ex.what());
+    }
+
+    try
+    {
+        Design design = buildIndexedBankDesign();
+        MergeRegOptions options;
+        options.enableOneHotIndexedBankToWideRegister = false;
+        if (const int status = runMergeRegWithOptions(design, options, false, "indexed bank disabled"); status != 0)
+        {
+            return status;
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("indexed bank disabled case threw: ") + ex.what());
     }
 
     try
@@ -1156,6 +1352,21 @@ int main()
 
     try
     {
+        Design design = buildBundlePipelineDesign();
+        MergeRegOptions options;
+        options.enableBundleShiftPipelineToWideRegister = false;
+        if (const int status = runMergeRegWithOptions(design, options, false, "bundle pipeline disabled"); status != 0)
+        {
+            return status;
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("bundle pipeline disabled case threw: ") + ex.what());
+    }
+
+    try
+    {
         Design design = buildPackedMuxBundlePipelineDesign();
         if (const int status = checkPackedMuxBundlePipelineRewrite(design); status != 0)
         {
@@ -1178,6 +1389,21 @@ int main()
     catch (const std::exception &ex)
     {
         return fail(std::string("indexed bundle entry case threw: ") + ex.what());
+    }
+
+    try
+    {
+        Design design = buildIndexedBundleEntryDesign();
+        MergeRegOptions options;
+        options.enableIndexedBundleEntryToWideRegister = false;
+        if (const int status = runMergeRegWithOptions(design, options, false, "indexed bundle entry disabled"); status != 0)
+        {
+            return status;
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        return fail(std::string("indexed bundle entry disabled case threw: ") + ex.what());
     }
 
     try

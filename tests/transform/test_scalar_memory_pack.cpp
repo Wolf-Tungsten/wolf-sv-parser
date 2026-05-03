@@ -1335,6 +1335,97 @@ namespace
         return design;
     }
 
+    Design buildSelfDependentPointWriteDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+
+        const ValueId clk = makeLogicValue(graph, "clk", 1);
+        const ValueId wrEn = makeLogicValue(graph, "wr_en", 1);
+        const ValueId idx = makeLogicValue(graph, "idx", 2);
+        const ValueId delta = makeLogicValue(graph, "delta", 8);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("wr_en", wrEn);
+        graph.bindInputPort("idx", idx);
+        graph.bindInputPort("delta", delta);
+
+        const ValueId mask = addConstant(graph, "selfdep_mask_op", "selfdep_mask", 8, "8'hff");
+        const std::array<ValueId, 4> indices{
+            addConstant(graph, "selfdep_c0_op", "selfdep_c0", 2, "2'd0"),
+            addConstant(graph, "selfdep_c1_op", "selfdep_c1", 2, "2'd1"),
+            addConstant(graph, "selfdep_c2_op", "selfdep_c2", 2, "2'd2"),
+            addConstant(graph, "selfdep_c3_op", "selfdep_c3", 2, "2'd3")};
+
+        std::vector<ValueId> readValues;
+        readValues.reserve(4);
+        for (int i = 0; i < 4; ++i)
+        {
+            const std::string regName = "selfdep_" + std::to_string(i) + "_value";
+            const OperationId reg = graph.createOperation(OperationKind::kRegister, graph.internSymbol(regName));
+            graph.setAttr(reg, "width", static_cast<int64_t>(8));
+            graph.setAttr(reg, "isSigned", false);
+
+            const ValueId q = makeLogicValue(graph, "selfdep_q_" + std::to_string(i), 8);
+            const OperationId read = graph.createOperation(OperationKind::kRegisterReadPort,
+                                                           graph.internSymbol("selfdep_read_" + std::to_string(i)));
+            graph.setAttr(read, "regSymbol", regName);
+            graph.addResult(read, q);
+            readValues.push_back(q);
+        }
+
+        const ValueId packed = makeLogicValue(graph, "selfdep_packed", 32);
+        const OperationId concat = graph.createOperation(OperationKind::kConcat, graph.internSymbol("selfdep_concat"));
+        graph.addOperand(concat, readValues[3]);
+        graph.addOperand(concat, readValues[2]);
+        graph.addOperand(concat, readValues[1]);
+        graph.addOperand(concat, readValues[0]);
+        graph.addResult(concat, packed);
+
+        const ValueId out = makeLogicValue(graph, "out", 8);
+        const OperationId slice = graph.createOperation(OperationKind::kSliceArray, graph.internSymbol("selfdep_slice"));
+        graph.addOperand(slice, packed);
+        graph.addOperand(slice, idx);
+        graph.addResult(slice, out);
+        graph.setAttr(slice, "sliceWidth", static_cast<int64_t>(8));
+        graph.bindOutputPort("out", out);
+
+        for (int i = 0; i < 4; ++i)
+        {
+            const std::string suffix = std::to_string(i);
+            const ValueId hit = makeLogicValue(graph, "selfdep_hit_" + suffix, 1);
+            const OperationId eq = graph.createOperation(OperationKind::kEq, graph.internSymbol("selfdep_eq_" + suffix));
+            graph.addOperand(eq, idx);
+            graph.addOperand(eq, indices[static_cast<std::size_t>(i)]);
+            graph.addResult(eq, hit);
+
+            const ValueId pointCond = makeLogicValue(graph, "selfdep_point_" + suffix, 1);
+            const OperationId andOp = graph.createOperation(OperationKind::kAnd,
+                                                            graph.internSymbol("selfdep_point_and_" + suffix));
+            graph.addOperand(andOp, wrEn);
+            graph.addOperand(andOp, hit);
+            graph.addResult(andOp, pointCond);
+
+            const ValueId nextData = makeLogicValue(graph, "selfdep_next_" + suffix, 8);
+            const OperationId xorOp = graph.createOperation(OperationKind::kXor,
+                                                            graph.internSymbol("selfdep_xor_" + suffix));
+            graph.addOperand(xorOp, readValues[static_cast<std::size_t>(i)]);
+            graph.addOperand(xorOp, delta);
+            graph.addResult(xorOp, nextData);
+
+            const std::string regName = "selfdep_" + suffix + "_value";
+            const OperationId write = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                            graph.internSymbol("selfdep_write_" + suffix));
+            graph.setAttr(write, "regSymbol", regName);
+            graph.setAttr(write, "eventEdge", std::vector<std::string>{"posedge"});
+            graph.addOperand(write, pointCond);
+            graph.addOperand(write, nextData);
+            graph.addOperand(write, mask);
+            graph.addOperand(write, clk);
+        }
+
+        return design;
+    }
+
     Design buildTriplePointWriteDesign()
     {
         Design design;
@@ -2800,57 +2891,17 @@ int main()
         {
             return fail("scalar-memory-pack pass should succeed on multiple-point writes");
         }
-        if (!result.changed)
+        if (result.changed)
         {
-            return fail("scalar-memory-pack should rewrite the multiple-point cluster");
+            return fail("scalar-memory-pack should keep multiple dynamic point-write clusters scalar");
         }
 
-        if (countOps(*graph, OperationKind::kRegister) != 0 ||
-            countOps(*graph, OperationKind::kRegisterReadPort) != 0 ||
-            countOps(*graph, OperationKind::kRegisterWritePort) != 0 ||
-            countOps(*graph, OperationKind::kConcat) != 0 ||
-            countOps(*graph, OperationKind::kSliceArray) != 0)
-        {
-            return fail("multiple-point packed cluster should remove scalar storage/read/write nodes");
-        }
-
-        if (countOps(*graph, OperationKind::kMemory) != 1 ||
-            countOps(*graph, OperationKind::kMemoryReadPort) != 1 ||
-            countOps(*graph, OperationKind::kMemoryWritePort) != 2 ||
+        if (countOps(*graph, OperationKind::kMemory) != 0 ||
+            countOps(*graph, OperationKind::kMemoryReadPort) != 0 ||
+            countOps(*graph, OperationKind::kMemoryWritePort) != 0 ||
             countOps(*graph, OperationKind::kMemoryFillPort) != 0)
         {
-            return fail("multiple-point packed cluster should become one memory with two write ports");
-        }
-
-        std::size_t writesFromA = 0;
-        std::size_t writesFromB = 0;
-        for (const OperationId opId : graph->operations())
-        {
-            const Operation op = graph->getOperation(opId);
-            if (op.kind() != OperationKind::kMemoryWritePort)
-            {
-                continue;
-            }
-            if (op.operands().size() != 5)
-            {
-                return fail("multiple-point memory write should preserve cond/addr/data/mask/clock operands");
-            }
-            if (op.operands()[0] == graph->inputPortValue("wr_en_a") &&
-                op.operands()[1] == graph->inputPortValue("idx_a") &&
-                op.operands()[2] == graph->inputPortValue("data_a"))
-            {
-                ++writesFromA;
-            }
-            if (op.operands()[0] == graph->inputPortValue("wr_en_b") &&
-                op.operands()[1] == graph->inputPortValue("idx_b") &&
-                op.operands()[2] == graph->inputPortValue("data_b"))
-            {
-                ++writesFromB;
-            }
-        }
-        if (writesFromA != 1 || writesFromB != 1)
-        {
-            return fail("multiple-point memory writes should recover both point-update families");
+            return fail("multiple-point unsafe cluster should not create memory ops: " + opCountSummary(*graph));
         }
     }
 
@@ -2909,6 +2960,36 @@ int main()
     }
 
     {
+        Design design = buildSelfDependentPointWriteDesign();
+        Graph *graph = design.findGraph("top");
+        if (graph == nullptr)
+        {
+            return fail("missing graph");
+        }
+
+        PassManager manager;
+        manager.addPass(std::make_unique<ScalarMemoryPackPass>());
+        PassDiagnostics diags;
+        const PassManagerResult result = manager.run(design, diags);
+        if (!result.success || diags.hasError())
+        {
+            return fail("scalar-memory-pack pass should succeed on self-dependent point writes");
+        }
+        if (result.changed)
+        {
+            return fail("scalar-memory-pack should keep self-dependent point-write clusters scalar");
+        }
+
+        if (countOps(*graph, OperationKind::kMemory) != 0 ||
+            countOps(*graph, OperationKind::kMemoryReadPort) != 0 ||
+            countOps(*graph, OperationKind::kMemoryWritePort) != 0 ||
+            countOps(*graph, OperationKind::kMemoryFillPort) != 0)
+        {
+            return fail("self-dependent point-write cluster should not create memory ops: " + opCountSummary(*graph));
+        }
+    }
+
+    {
         Design design = buildTriplePointWriteDesign();
         Graph *graph = design.findGraph("top");
         if (graph == nullptr)
@@ -2924,17 +3005,17 @@ int main()
         {
             return fail("scalar-memory-pack pass should succeed on triple-point writes");
         }
-        if (!result.changed)
+        if (result.changed)
         {
-            return fail("scalar-memory-pack should rewrite the triple-point cluster");
+            return fail("scalar-memory-pack should keep triple dynamic point-write clusters scalar");
         }
 
-        if (countOps(*graph, OperationKind::kMemory) != 1 ||
-            countOps(*graph, OperationKind::kMemoryReadPort) != 1 ||
-            countOps(*graph, OperationKind::kMemoryWritePort) != 3 ||
+        if (countOps(*graph, OperationKind::kMemory) != 0 ||
+            countOps(*graph, OperationKind::kMemoryReadPort) != 0 ||
+            countOps(*graph, OperationKind::kMemoryWritePort) != 0 ||
             countOps(*graph, OperationKind::kMemoryFillPort) != 0)
         {
-            return fail("triple-point packed cluster should become one memory with three write ports");
+            return fail("triple-point unsafe cluster should not create memory ops: " + opCountSummary(*graph));
         }
     }
 
@@ -2954,17 +3035,17 @@ int main()
         {
             return fail("scalar-memory-pack pass should succeed on lowered triple-point writes");
         }
-        if (!result.changed)
+        if (result.changed)
         {
-            return fail("scalar-memory-pack should rewrite the lowered triple-point cluster");
+            return fail("scalar-memory-pack should keep lowered triple dynamic point-write clusters scalar");
         }
 
-        if (countOps(*graph, OperationKind::kMemory) != 1 ||
-            countOps(*graph, OperationKind::kMemoryReadPort) != 1 ||
-            countOps(*graph, OperationKind::kMemoryWritePort) != 3 ||
+        if (countOps(*graph, OperationKind::kMemory) != 0 ||
+            countOps(*graph, OperationKind::kMemoryReadPort) != 0 ||
+            countOps(*graph, OperationKind::kMemoryWritePort) != 0 ||
             countOps(*graph, OperationKind::kMemoryFillPort) != 0)
         {
-            return fail("lowered triple-point packed cluster should become one memory with three write ports");
+            return fail("lowered triple-point unsafe cluster should not create memory ops: " + opCountSummary(*graph));
         }
     }
 
@@ -2984,17 +3065,17 @@ int main()
         {
             return fail("scalar-memory-pack pass should succeed on duplicated point-mask writes");
         }
-        if (!result.changed)
+        if (result.changed)
         {
-            return fail("scalar-memory-pack should rewrite the duplicated point-mask cluster");
+            return fail("scalar-memory-pack should keep duplicated point-mask clusters scalar");
         }
 
-        if (countOps(*graph, OperationKind::kMemory) != 1 ||
-            countOps(*graph, OperationKind::kMemoryReadPort) != 1 ||
-            countOps(*graph, OperationKind::kMemoryWritePort) != 2 ||
+        if (countOps(*graph, OperationKind::kMemory) != 0 ||
+            countOps(*graph, OperationKind::kMemoryReadPort) != 0 ||
+            countOps(*graph, OperationKind::kMemoryWritePort) != 0 ||
             countOps(*graph, OperationKind::kMemoryFillPort) != 0)
         {
-            return fail("duplicated point-mask packed cluster should become one memory with two write ports");
+            return fail("duplicated point-mask unsafe cluster should not create memory ops: " + opCountSummary(*graph));
         }
     }
 
@@ -3014,17 +3095,17 @@ int main()
         {
             return fail("scalar-memory-pack pass should succeed on duplicated point-mux writes");
         }
-        if (!result.changed)
+        if (result.changed)
         {
-            return fail("scalar-memory-pack should rewrite the duplicated point-mux cluster");
+            return fail("scalar-memory-pack should keep duplicated point-mux clusters scalar");
         }
 
-        if (countOps(*graph, OperationKind::kMemory) != 1 ||
-            countOps(*graph, OperationKind::kMemoryReadPort) != 1 ||
-            countOps(*graph, OperationKind::kMemoryWritePort) != 2 ||
+        if (countOps(*graph, OperationKind::kMemory) != 0 ||
+            countOps(*graph, OperationKind::kMemoryReadPort) != 0 ||
+            countOps(*graph, OperationKind::kMemoryWritePort) != 0 ||
             countOps(*graph, OperationKind::kMemoryFillPort) != 0)
         {
-            return fail("duplicated point-mux packed cluster should become one memory with two write ports");
+            return fail("duplicated point-mux unsafe cluster should not create memory ops: " + opCountSummary(*graph));
         }
     }
 
@@ -3035,8 +3116,10 @@ int main()
             return status;
         }
         Graph *graph = design.findGraph("top");
-        const Operation writeOp = graph->getOperation(findSingleOp(*graph, OperationKind::kMemoryWritePort));
-        const Operation fillOp = graph->getOperation(findSingleOp(*graph, OperationKind::kMemoryFillPort));
+        const OperationId writeOpId = findSingleOp(*graph, OperationKind::kMemoryWritePort);
+        const OperationId fillOpId = findSingleOp(*graph, OperationKind::kMemoryFillPort);
+        const Operation writeOp = graph->getOperation(writeOpId);
+        const Operation fillOp = graph->getOperation(fillOpId);
         if (writeOp.operands().size() != 5 || writeOp.operands()[2] != graph->inputPortValue("point_data"))
         {
             return fail("lowered mixed-write point update should recover point_data");
@@ -3044,6 +3127,10 @@ int main()
         if (fillOp.operands().size() != 3 || fillOp.operands()[1] != graph->inputPortValue("fill_data"))
         {
             return fail("lowered mixed-write fill should recover fill_data");
+        }
+        if (fillOpId.index >= writeOpId.index)
+        {
+            return fail("lowered mixed-write should emit fill before higher-priority point write");
         }
     }
 
@@ -3054,8 +3141,10 @@ int main()
             return status;
         }
         Graph *graph = design.findGraph("top");
-        const Operation writeOp = graph->getOperation(findSingleOp(*graph, OperationKind::kMemoryWritePort));
-        const Operation fillOp = graph->getOperation(findSingleOp(*graph, OperationKind::kMemoryFillPort));
+        const OperationId writeOpId = findSingleOp(*graph, OperationKind::kMemoryWritePort);
+        const OperationId fillOpId = findSingleOp(*graph, OperationKind::kMemoryFillPort);
+        const Operation writeOp = graph->getOperation(writeOpId);
+        const Operation fillOp = graph->getOperation(fillOpId);
         if (writeOp.operands().size() != 5 || writeOp.operands()[2] != graph->inputPortValue("point_data"))
         {
             return fail("packed-wide lowered mixed-write point update should recover point_data");
@@ -3063,6 +3152,10 @@ int main()
         if (fillOp.operands().size() != 3 || fillOp.operands()[1] != graph->inputPortValue("fill_data"))
         {
             return fail("packed-wide lowered mixed-write fill should recover fill_data");
+        }
+        if (fillOpId.index >= writeOpId.index)
+        {
+            return fail("packed-wide lowered mixed-write should emit fill before higher-priority point write");
         }
     }
 

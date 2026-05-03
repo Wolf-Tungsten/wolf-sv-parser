@@ -12,6 +12,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 using namespace wolvrix::lib::grh;
@@ -3114,28 +3115,39 @@ namespace wolvrix::lib::transform
     } // namespace
 
     MergeRegPass::MergeRegPass()
+        : MergeRegPass(MergeRegOptions{})
+    {
+    }
+
+    MergeRegPass::MergeRegPass(MergeRegOptions options)
         : Pass("merge-reg",
                "merge-reg",
-               "Merge compatible scalar register clusters into wider register or memory shapes")
+               "Merge compatible scalar register clusters into wider register or memory shapes"),
+          options_(std::move(options))
     {
     }
 
     PassResult MergeRegPass::run()
     {
         PassResult result;
-        PassManagerOptions scalarOptions;
-        scalarOptions.verbosity = verbosity();
-        scalarOptions.logLevel = LogLevel::Info;
-        scalarOptions.keepDeclaredSymbols = keepDeclaredSymbols();
-        PassManager scalarManager(scalarOptions);
-        scalarManager.addPass(std::make_unique<ScalarMemoryPackPass>());
-        const PassManagerResult scalarResult = scalarManager.run(design(), diags());
-        if (!scalarResult.success)
+        bool scalarToMemoryChanged = false;
+        if (options_.enableScalarToMemory)
         {
-            result.failed = true;
-            return result;
+            PassManagerOptions scalarOptions;
+            scalarOptions.verbosity = verbosity();
+            scalarOptions.logLevel = LogLevel::Info;
+            scalarOptions.keepDeclaredSymbols = keepDeclaredSymbols();
+            PassManager scalarManager(scalarOptions);
+            scalarManager.addPass(std::make_unique<ScalarMemoryPackPass>());
+            const PassManagerResult scalarResult = scalarManager.run(design(), diags());
+            if (!scalarResult.success)
+            {
+                result.failed = true;
+                return result;
+            }
+            scalarToMemoryChanged = scalarResult.changed;
+            result.changed = result.changed || scalarResult.changed;
         }
-        result.changed = result.changed || scalarResult.changed;
 
         std::size_t graphCount = 0;
         std::size_t candidateClusters = 0;
@@ -3146,45 +3158,89 @@ namespace wolvrix::lib::transform
         std::size_t indexedBundleEntryMembers = 0;
         std::size_t rewrittenClusters = 0;
         std::size_t rewrittenMembers = 0;
+        std::vector<std::string> enabledStrategies;
+        if (options_.enableScalarToMemory)
+        {
+            enabledStrategies.push_back("scalar-to-memory");
+        }
+        if (options_.enableBundleShiftPipelineToWideRegister)
+        {
+            enabledStrategies.push_back("bundle-shift-pipeline-to-wide-register");
+        }
+        if (options_.enableIndexedBundleEntryToWideRegister)
+        {
+            enabledStrategies.push_back("indexed-bundle-entry-to-wide-register");
+        }
+        if (options_.enableOneHotIndexedBankToWideRegister)
+        {
+            enabledStrategies.push_back("onehot-indexed-bank-to-wide-register");
+        }
+        if (options_.enableBitsetToWideRegister)
+        {
+            enabledStrategies.push_back("bitset-to-wide-register");
+        }
+        if (options_.enableShiftChainToWideRegister)
+        {
+            enabledStrategies.push_back("shift-chain-to-wide-register");
+        }
+        std::string strategiesText;
+        for (const std::string &strategy : enabledStrategies)
+        {
+            if (!strategiesText.empty())
+            {
+                strategiesText.push_back(',');
+            }
+            strategiesText += strategy;
+        }
+        if (strategiesText.empty())
+        {
+            strategiesText = "none";
+        }
 
         for (const auto &entry : design().graphs())
         {
             ++graphCount;
             Graph &graph = *entry.second;
             const auto regs = collectRegisters(graph);
-            const auto bundleClusters = collectBundlePipelineClusters(regs);
-            bundlePipelineClusters += bundleClusters.size();
-            for (const BundlePipelineCluster &cluster : bundleClusters)
+            if (options_.enableBundleShiftPipelineToWideRegister)
             {
-                std::size_t memberCount = 0;
-                for (const BundlePipelineField &field : cluster.fields)
+                const auto bundleClusters = collectBundlePipelineClusters(regs);
+                bundlePipelineClusters += bundleClusters.size();
+                for (const BundlePipelineCluster &cluster : bundleClusters)
                 {
-                    memberCount += field.stages.size();
+                    std::size_t memberCount = 0;
+                    for (const BundlePipelineField &field : cluster.fields)
+                    {
+                        memberCount += field.stages.size();
+                    }
+                    bundlePipelineMembers += memberCount;
+                    if (!rewriteBundleShiftPipeline(graph, cluster))
+                    {
+                        continue;
+                    }
+                    result.changed = true;
+                    ++rewrittenClusters;
+                    rewrittenMembers += memberCount;
                 }
-                bundlePipelineMembers += memberCount;
-                if (!rewriteBundleShiftPipeline(graph, cluster))
-                {
-                    continue;
-                }
-                result.changed = true;
-                ++rewrittenClusters;
-                rewrittenMembers += memberCount;
             }
 
             const auto postBundleRegs = collectRegisters(graph);
-            const auto bundleEntryClusters = collectIndexedBundleEntryClusters(postBundleRegs);
-            indexedBundleEntryClusters += bundleEntryClusters.size();
-            for (const BundleEntryCluster &cluster : bundleEntryClusters)
+            if (options_.enableIndexedBundleEntryToWideRegister)
             {
-                indexedBundleEntryMembers += cluster.members.size();
-                const auto [clusterCount, memberCount] = rewriteIndexedBundleEntry(graph, cluster);
-                if (clusterCount == 0)
+                const auto bundleEntryClusters = collectIndexedBundleEntryClusters(postBundleRegs);
+                indexedBundleEntryClusters += bundleEntryClusters.size();
+                for (const BundleEntryCluster &cluster : bundleEntryClusters)
                 {
-                    continue;
+                    indexedBundleEntryMembers += cluster.members.size();
+                    const auto [clusterCount, memberCount] = rewriteIndexedBundleEntry(graph, cluster);
+                    if (clusterCount == 0)
+                    {
+                        continue;
+                    }
+                    result.changed = true;
+                    rewrittenClusters += clusterCount;
+                    rewrittenMembers += memberCount;
                 }
-                result.changed = true;
-                rewrittenClusters += clusterCount;
-                rewrittenMembers += memberCount;
             }
 
             const auto postBundleEntryRegs = collectRegisters(graph);
@@ -3193,21 +3249,21 @@ namespace wolvrix::lib::transform
             for (const auto &cluster : clusters)
             {
                 candidateMembers += cluster.size();
-                if (rewriteOneHotIndexedBank(graph, cluster))
+                if (options_.enableOneHotIndexedBankToWideRegister && rewriteOneHotIndexedBank(graph, cluster))
                 {
                     result.changed = true;
                     ++rewrittenClusters;
                     rewrittenMembers += cluster.size();
                     continue;
                 }
-                if (rewriteBitset(graph, cluster))
+                if (options_.enableBitsetToWideRegister && rewriteBitset(graph, cluster))
                 {
                     result.changed = true;
                     ++rewrittenClusters;
                     rewrittenMembers += cluster.size();
                     continue;
                 }
-                if (!rewriteShiftChain(graph, cluster))
+                if (!options_.enableShiftChainToWideRegister || !rewriteShiftChain(graph, cluster))
                 {
                     continue;
                 }
@@ -3226,8 +3282,8 @@ namespace wolvrix::lib::transform
                 " indexed_bundle_entry_members=" + std::to_string(indexedBundleEntryMembers) +
                 " rewritten_clusters=" + std::to_string(rewrittenClusters) +
                 " rewritten_members=" + std::to_string(rewrittenMembers) +
-                " scalar_to_memory_changed=" + std::string(scalarResult.changed ? "true" : "false") +
-                " strategies=scalar-to-memory,bundle-shift-pipeline-to-wide-register,indexed-bundle-entry-to-wide-register,onehot-indexed-bank-to-wide-register,bitset-to-wide-register,shift-chain-to-wide-register");
+                " scalar_to_memory_changed=" + std::string(scalarToMemoryChanged ? "true" : "false") +
+                " strategies=" + strategiesText);
         return result;
     }
 
