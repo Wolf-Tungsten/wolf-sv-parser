@@ -1672,7 +1672,6 @@ namespace wolvrix::lib::emit
             std::vector<std::string> inputFieldDecls;
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> valueScalarSlotCounts{};
             std::map<std::size_t, std::size_t> valueWideSlotCountsByWords;
-            std::size_t valueLogicStorageBytes = 0;
             std::size_t valueRealSlotCount = 0;
             std::size_t valueStringSlotCount = 0;
             std::size_t eventEdgeSlotCount = 0;
@@ -1807,6 +1806,9 @@ namespace wolvrix::lib::emit
 
         ValueSlotScalarKind valueScalarSlotKindForWidth(int32_t width);
         std::string scalarLogicSlotCppType(ValueSlotScalarKind kind);
+        std::string scalarLogicSlotFieldName(std::string_view prefix, ValueSlotScalarKind kind);
+        std::string wideLogicSlotFieldName(std::string_view prefix, std::size_t wordCount);
+        std::string fixedArrayType(std::string_view elemType, std::size_t count);
         std::size_t valueScalarSlotByteSize(ValueSlotScalarKind kind);
         std::size_t valuePackedScalarSlotByteSize(ValueSlotScalarKind kind);
         std::size_t valuePackedScalarSlotAlignment(ValueSlotScalarKind kind);
@@ -1823,6 +1825,8 @@ namespace wolvrix::lib::emit
         std::string packedWideStorageDirectRefExpr(std::string_view storageExpr,
                                                    std::size_t wordCount,
                                                    std::string_view offsetExpr);
+        std::string valueScalarSlotRefExpr(ValueSlotScalarKind kind, std::string_view slotIndexExpr);
+        std::string valueWideSlotRefExpr(std::size_t wordCount, std::string_view slotIndexExpr);
         std::string valueScalarStorageRefExpr(ValueSlotScalarKind kind, std::string_view offsetExpr);
         std::string valueWideStorageRefExpr(std::size_t wordCount, std::string_view offsetExpr);
         std::string stateScalarStorageRefExpr(ValueSlotScalarKind kind, std::string_view offsetExpr);
@@ -2059,7 +2063,7 @@ namespace wolvrix::lib::emit
             model.stateLogicScalarSlotCounts = {};
             model.stateLogicWideSlotCountsByWords.clear();
 
-            std::size_t logicStorageOffset = 0;
+            std::size_t stateLogicStorageOffset = 0;
             for (const OrderedLogicStorageEntry &entry : orderedEntries)
             {
                 if (entry.kind == OrderedLogicStorageEntry::Kind::kState)
@@ -2071,18 +2075,18 @@ namespace wolvrix::lib::emit
                     }
                     if (isWideLogicWidth(state.width))
                     {
-                        logicStorageOffset = alignTo(logicStorageOffset, alignof(std::uint64_t));
-                        state.slotIndex = logicStorageOffset;
+                        stateLogicStorageOffset = alignTo(stateLogicStorageOffset, alignof(std::uint64_t));
+                        state.slotIndex = stateLogicStorageOffset;
                         model.stateLogicWideSlotCountsByWords[state.wordCount]++;
-                        logicStorageOffset += state.wordCount * sizeof(std::uint64_t);
+                        stateLogicStorageOffset += state.wordCount * sizeof(std::uint64_t);
                     }
                     else
                     {
-                        logicStorageOffset =
-                            alignTo(logicStorageOffset, valuePackedScalarSlotAlignment(state.scalarKind));
-                        state.slotIndex = logicStorageOffset;
+                        stateLogicStorageOffset =
+                            alignTo(stateLogicStorageOffset, valuePackedScalarSlotAlignment(state.scalarKind));
+                        state.slotIndex = stateLogicStorageOffset;
                         model.stateLogicScalarSlotCounts[static_cast<std::size_t>(state.scalarKind)]++;
-                        logicStorageOffset += valuePackedScalarSlotByteSize(state.scalarKind);
+                        stateLogicStorageOffset += valuePackedScalarSlotByteSize(state.scalarKind);
                     }
                     continue;
                 }
@@ -2095,26 +2099,21 @@ namespace wolvrix::lib::emit
                 if (isWideLogicValue(graph, valueId))
                 {
                     const std::size_t wordCount = logicWordCount(graph.valueWidth(valueId));
-                    logicStorageOffset = alignTo(logicStorageOffset, alignof(std::uint64_t));
-                    const std::size_t slotIndex = logicStorageOffset;
+                    const std::size_t slotIndex = model.valueWideSlotCountsByWords[wordCount]++;
                     model.valueWideSlotByValue.emplace(valueId,
                                                        ValueWideSlotRef{.wordCount = wordCount, .slotIndex = slotIndex});
-                    model.valueWideSlotCountsByWords[wordCount]++;
                     model.valueFieldByValue.emplace(valueId,
-                                                    valueWideStorageRefExpr(wordCount, std::to_string(slotIndex)));
-                    logicStorageOffset += wordCount * sizeof(std::uint64_t);
+                                                    valueWideSlotRefExpr(wordCount, std::to_string(slotIndex)));
                 }
                 else
                 {
                     const ValueSlotScalarKind slotKind = valueScalarSlotKindForWidth(graph.valueWidth(valueId));
-                    logicStorageOffset = alignTo(logicStorageOffset, valuePackedScalarSlotAlignment(slotKind));
-                    const std::size_t slotIndex = logicStorageOffset;
+                    const std::size_t kindIndex = static_cast<std::size_t>(slotKind);
+                    const std::size_t slotIndex = model.valueScalarSlotCounts[kindIndex]++;
                     model.valueScalarSlotByValue.emplace(valueId,
                                                          ValueScalarSlotRef{.kind = slotKind, .slotIndex = slotIndex});
-                    model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
                     model.valueFieldByValue.emplace(valueId,
-                                                    valueScalarStorageRefExpr(slotKind, std::to_string(slotIndex)));
-                    logicStorageOffset += valuePackedScalarSlotByteSize(slotKind);
+                                                    valueScalarSlotRefExpr(slotKind, std::to_string(slotIndex)));
                 }
             }
 
@@ -2156,14 +2155,29 @@ namespace wolvrix::lib::emit
                 }
             }
 
-            model.stateLogicStorageBytes = logicStorageOffset;
-            model.valueLogicStorageBytes = logicStorageOffset;
-            if (model.valueLogicStorageBytes != 0)
+            model.stateLogicStorageBytes = stateLogicStorageOffset;
+            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
             {
-                model.valueFieldDecls.push_back("    static constexpr std::size_t kValueLogicStorageBytes = " +
-                                                std::to_string(model.valueLogicStorageBytes) + ";");
-                model.valueFieldDecls.push_back(
-                    "    alignas(std::uint64_t) std::array<std::byte, kValueLogicStorageBytes> value_logic_storage_{};");
+                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                const std::size_t slotCount = model.valueScalarSlotCounts[kindIndex];
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                model.valueFieldDecls.push_back("    std::array<" + scalarLogicSlotCppType(kind) + ", " +
+                                                std::to_string(slotCount) + "> " +
+                                                scalarLogicSlotFieldName("value_", kind) + "{};");
+            }
+            for (const auto &[wordCount, slotCount] : model.valueWideSlotCountsByWords)
+            {
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                model.valueFieldDecls.push_back("    std::array<" +
+                                                fixedArrayType("std::uint64_t", wordCount) + ", " +
+                                                std::to_string(slotCount) + "> " +
+                                                wideLogicSlotFieldName("value_", wordCount) + "{};");
             }
             if (model.valueRealSlotCount != 0)
             {
@@ -2195,7 +2209,6 @@ namespace wolvrix::lib::emit
             model.valueRealSlotCount = 0;
             model.valueStringSlotCount = 0;
 
-            std::size_t logicStorageOffset = model.stateLogicStorageBytes;
             for (ValueId valueId : orderedValues)
             {
                 if (!model.materializedValues.contains(valueId))
@@ -2234,43 +2247,50 @@ namespace wolvrix::lib::emit
                     if (isWideLogicValue(graph, valueId))
                     {
                         const std::size_t wordCount = logicWordCount(graph.valueWidth(valueId));
-                        logicStorageOffset = alignTo(logicStorageOffset, alignof(std::uint64_t));
-                        const std::size_t slotIndex = logicStorageOffset;
+                        const std::size_t slotIndex = model.valueWideSlotCountsByWords[wordCount]++;
                         model.valueWideSlotByValue.emplace(
                             valueId,
                             ValueWideSlotRef{.wordCount = wordCount, .slotIndex = slotIndex});
-                        model.valueWideSlotCountsByWords[wordCount]++;
                         model.valueFieldByValue.emplace(valueId,
-                                                        valueWideStorageRefExpr(wordCount, std::to_string(slotIndex)));
-                        logicStorageOffset += wordCount * sizeof(std::uint64_t);
+                                                        valueWideSlotRefExpr(wordCount, std::to_string(slotIndex)));
                     }
                     else
                     {
                         const ValueSlotScalarKind slotKind = valueScalarSlotKindForWidth(graph.valueWidth(valueId));
-                        logicStorageOffset =
-                            alignTo(logicStorageOffset, valuePackedScalarSlotAlignment(slotKind));
-                        const std::size_t slotIndex = logicStorageOffset;
+                        const std::size_t kindIndex = static_cast<std::size_t>(slotKind);
+                        const std::size_t slotIndex = model.valueScalarSlotCounts[kindIndex]++;
                         model.valueScalarSlotByValue.emplace(
                             valueId,
                             ValueScalarSlotRef{.kind = slotKind, .slotIndex = slotIndex});
-                        model.valueScalarSlotCounts[static_cast<std::size_t>(slotKind)]++;
                         model.valueFieldByValue.emplace(valueId,
-                                                        valueScalarStorageRefExpr(slotKind,
-                                                                                  std::to_string(slotIndex)));
-                        logicStorageOffset += valuePackedScalarSlotByteSize(slotKind);
+                                                        valueScalarSlotRefExpr(slotKind, std::to_string(slotIndex)));
                     }
                     break;
                 }
                 }
             }
-            model.valueLogicStorageBytes = logicStorageOffset;
-
-            if (model.valueLogicStorageBytes != 0)
+            for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
             {
-                model.valueFieldDecls.push_back("    static constexpr std::size_t kValueLogicStorageBytes = " +
-                                                std::to_string(model.valueLogicStorageBytes) + ";");
-                model.valueFieldDecls.push_back(
-                    "    alignas(std::uint64_t) std::array<std::byte, kValueLogicStorageBytes> value_logic_storage_{};");
+                const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                const std::size_t slotCount = model.valueScalarSlotCounts[kindIndex];
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                model.valueFieldDecls.push_back("    std::array<" + scalarLogicSlotCppType(kind) + ", " +
+                                                std::to_string(slotCount) + "> " +
+                                                scalarLogicSlotFieldName("value_", kind) + "{};");
+            }
+            for (const auto &[wordCount, slotCount] : model.valueWideSlotCountsByWords)
+            {
+                if (slotCount == 0)
+                {
+                    continue;
+                }
+                model.valueFieldDecls.push_back("    std::array<" +
+                                                fixedArrayType("std::uint64_t", wordCount) + ", " +
+                                                std::to_string(slotCount) + "> " +
+                                                wideLogicSlotFieldName("value_", wordCount) + "{};");
             }
             if (model.valueRealSlotCount != 0)
             {
@@ -2712,24 +2732,34 @@ namespace wolvrix::lib::emit
                    std::string(storageExpr) + ", " + std::string(offsetExpr) + ")";
         }
 
+        std::string valueScalarSlotRefExpr(ValueSlotScalarKind kind, std::string_view slotIndexExpr)
+        {
+            return scalarLogicSlotFieldName("value_", kind) + "[" + std::string(slotIndexExpr) + "]";
+        }
+
+        std::string valueWideSlotRefExpr(std::size_t wordCount, std::string_view slotIndexExpr)
+        {
+            return wideLogicSlotFieldName("value_", wordCount) + "[" + std::string(slotIndexExpr) + "]";
+        }
+
         std::string valueScalarStorageRefExpr(ValueSlotScalarKind kind, std::string_view offsetExpr)
         {
-            return packedScalarStorageRefExpr("value_logic_storage_", kind, offsetExpr);
+            return valueScalarSlotRefExpr(kind, offsetExpr);
         }
 
         std::string valueWideStorageRefExpr(std::size_t wordCount, std::string_view offsetExpr)
         {
-            return packedWideStorageRefExpr("value_logic_storage_", wordCount, offsetExpr);
+            return valueWideSlotRefExpr(wordCount, offsetExpr);
         }
 
         std::string stateScalarStorageRefExpr(ValueSlotScalarKind kind, std::string_view offsetExpr)
         {
-            return packedScalarStorageRefExpr("value_logic_storage_", kind, offsetExpr);
+            return packedScalarStorageRefExpr("state_logic_storage_", kind, offsetExpr);
         }
 
         std::string stateWideStorageRefExpr(std::size_t wordCount, std::string_view offsetExpr)
         {
-            return packedWideStorageRefExpr("value_logic_storage_", wordCount, offsetExpr);
+            return packedWideStorageRefExpr("state_logic_storage_", wordCount, offsetExpr);
         }
 
         std::string logicSlotRefExpr(std::string_view scalarPrefix,
@@ -3044,10 +3074,10 @@ namespace wolvrix::lib::emit
                     scalarIt != model.valueScalarSlotByValue.end())
                 {
                     aliases.push_back(SupernodeStorageRefAliasDecl{
-                        .aliasName = "grhsim_value_slot_" + std::to_string(scalarIt->second.slotIndex),
-                        .initExpr = packedScalarStorageDirectRefExpr("value_logic_storage_",
-                                                                     scalarIt->second.kind,
-                                                                     std::to_string(scalarIt->second.slotIndex)),
+                        .aliasName = "grhsim_value_" + std::to_string(value.index) + "_" +
+                                     std::to_string(value.generation) + "_slot",
+                        .initExpr = valueScalarSlotRefExpr(scalarIt->second.kind,
+                                                           std::to_string(scalarIt->second.slotIndex)),
                         .value = value,
                         .stateSymbol = {},
                         .firstTouchOrder = touch.firstTouchOrder,
@@ -3058,10 +3088,10 @@ namespace wolvrix::lib::emit
                     wideIt != model.valueWideSlotByValue.end())
                 {
                     aliases.push_back(SupernodeStorageRefAliasDecl{
-                        .aliasName = "grhsim_value_slot_" + std::to_string(wideIt->second.slotIndex),
-                        .initExpr = packedWideStorageDirectRefExpr("value_logic_storage_",
-                                                                   wideIt->second.wordCount,
-                                                                   std::to_string(wideIt->second.slotIndex)),
+                        .aliasName = "grhsim_value_" + std::to_string(value.index) + "_" +
+                                     std::to_string(value.generation) + "_slot",
+                        .initExpr = valueWideSlotRefExpr(wideIt->second.wordCount,
+                                                         std::to_string(wideIt->second.slotIndex)),
                         .value = value,
                         .stateSymbol = {},
                         .firstTouchOrder = touch.firstTouchOrder,
@@ -10525,7 +10555,15 @@ namespace wolvrix::lib::emit
         {
             addFixedInitChunk(InitChunkSpec::Kind::kPublicOutputs);
         }
-        if (model.valueLogicStorageBytes != 0)
+        const bool hasValueLogicSlots =
+            std::any_of(model.valueScalarSlotCounts.begin(),
+                        model.valueScalarSlotCounts.end(),
+                        [](std::size_t count) { return count != 0; }) ||
+            std::any_of(model.valueWideSlotCountsByWords.begin(),
+                        model.valueWideSlotCountsByWords.end(),
+                        [](const auto &entry) { return entry.second != 0; });
+
+        if (hasValueLogicSlots)
         {
             addFixedInitChunk(InitChunkSpec::Kind::kValueLogicStorage);
         }
@@ -10777,6 +10815,7 @@ namespace wolvrix::lib::emit
                 *stream << "#include <iomanip>\n";
                 *stream << "#include <initializer_list>\n";
                 *stream << "#include <iostream>\n";
+                *stream << "#include <span>\n";
                 *stream << "#include <sstream>\n";
                 *stream << "#include <string_view>\n";
                 *stream << "#include <unordered_map>\n";
@@ -11060,13 +11099,22 @@ namespace wolvrix::lib::emit
             *stream << "    return lhs == rhs;\n";
             *stream << "}\n\n";
             *stream << "template <std::size_t N>\n";
-            *stream << "inline bool grhsim_assign_words(std::array<std::uint64_t, N> &dst, std::array<std::uint64_t, N> src, std::size_t width)\n{\n";
-            *stream << "    grhsim_trunc_words(src, width);\n";
-            *stream << "    if (dst == src) {\n";
-            *stream << "        return false;\n";
+            *stream << "inline bool grhsim_assign_words(std::array<std::uint64_t, N> &dst,\n";
+            *stream << "                               const std::array<std::uint64_t, N> &src,\n";
+            *stream << "                               std::size_t width)\n{\n";
+            *stream << "    bool changed = false;\n";
+            *stream << "    const std::size_t liveWords = (width + 63u) / 64u;\n";
+            *stream << "    for (std::size_t i = 0; i < liveWords && i < N; ++i) {\n";
+            *stream << "        const std::size_t wordWidth = (i + 1u == liveWords) ? (width - i * 64u) : 64u;\n";
+            *stream << "        const std::uint64_t next = grhsim_trunc_u64(src[i], wordWidth);\n";
+            *stream << "        changed = changed || (dst[i] != next);\n";
+            *stream << "        dst[i] = next;\n";
             *stream << "    }\n";
-            *stream << "    dst = src;\n";
-            *stream << "    return true;\n";
+            *stream << "    for (std::size_t i = liveWords; i < N; ++i) {\n";
+            *stream << "        changed = changed || (dst[i] != 0);\n";
+            *stream << "        dst[i] = 0;\n";
+            *stream << "    }\n";
+            *stream << "    return changed;\n";
             *stream << "}\n\n";
             *stream << "template <typename T, std::size_t N>\n";
             *stream << "inline T &grhsim_value_storage_ref(std::array<std::byte, N> &storage, std::size_t offset)\n{\n";
@@ -13154,7 +13202,7 @@ inline std::string grhsim_task_format_one(const grhsim_task_arg &arg,
     return grhsim_task_apply_width(std::move(text), width, leftJustify, zeroPad);
 }
 
-inline std::string grhsim_format_task_message(const std::vector<grhsim_task_arg> &items)
+inline std::string grhsim_format_task_message(std::span<const grhsim_task_arg> items)
 {
     if (items.empty()) {
         return {};
@@ -13245,7 +13293,7 @@ inline std::string grhsim_format_task_message(const std::vector<grhsim_task_arg>
 
 inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_arg> args)
 {
-    return grhsim_format_task_message(std::vector<grhsim_task_arg>(args.begin(), args.end()));
+    return grhsim_format_task_message(std::span<const grhsim_task_arg>(args.begin(), args.size()));
 }
 )CPP";
             }
@@ -13683,6 +13731,13 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             if (!model.valueFieldDecls.empty())
             {
                 *stream << '\n';
+            }
+            if (model.stateLogicStorageBytes != 0)
+            {
+                *stream << "    static constexpr std::size_t kStateLogicStorageBytes = "
+                        << model.stateLogicStorageBytes << ";\n";
+                *stream << "    alignas(std::uint64_t) std::array<std::byte, kStateLogicStorageBytes> "
+                        << "state_logic_storage_{};\n\n";
             }
             for (const auto &decl : model.stateFieldDecls)
             {
@@ -15214,7 +15269,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "}\n\n";
                 *stream << "void " << className << "::execute_system_task(std::string_view name,\n";
                 *stream << "                               std::initializer_list<grhsim_task_arg> args)\n{\n";
-                *stream << "    const std::vector<grhsim_task_arg> items(args.begin(), args.end());\n";
+                *stream << "    const std::span<const grhsim_task_arg> items(args.begin(), args.size());\n";
                 *stream << "    if (name == \"display\" || name == \"write\" || name == \"strobe\") {\n";
                 *stream << "        emit_system_task_text(false,\n";
                 *stream << "                              0,\n";
@@ -15229,7 +15284,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            return;\n";
                 *stream << "        }\n";
                 *stream << "        const std::uint64_t handle = grhsim_task_arg_u64(items.front());\n";
-                *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + 1, items.end());\n";
+                *stream << "        const auto msgArgs = items.subspan(1);\n";
                 *stream << "        emit_system_task_text(true,\n";
                 *stream << "                              handle,\n";
                 *stream << "                              false,\n";
@@ -15307,7 +15362,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            exitCode = static_cast<int>(grhsim_task_arg_u64(items.front()));\n";
                 *stream << "            msgStart = 1;\n";
                 *stream << "        }\n";
-                *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + msgStart, items.end());\n";
+                *stream << "        const auto msgArgs = items.subspan(msgStart);\n";
                 *stream << "        fatal_requested_ = true;\n";
                 *stream << "        system_exit_code_ = exitCode;\n";
                 *stream << "        emit_system_task_text(false,\n";
@@ -15332,7 +15387,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "            stop_requested_ = true;\n";
                 *stream << "        }\n";
                 *stream << "        system_exit_code_ = exitCode;\n";
-                *stream << "        const std::vector<grhsim_task_arg> msgArgs(items.begin() + msgStart, items.end());\n";
+                *stream << "        const auto msgArgs = items.subspan(msgStart);\n";
                 *stream << "        if (!msgArgs.empty()) {\n";
                 *stream << "            emit_system_task_text(false,\n";
                 *stream << "                                  0,\n";
@@ -15517,8 +15572,28 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 }
                 break;
             case InitChunkSpec::Kind::kValueLogicStorage:
-                *stream << "    // Reset packed combinational logic value storage.\n";
-                *stream << "    std::fill(value_logic_storage_.begin(), value_logic_storage_.end(), std::byte{});\n";
+                *stream << "    // Reset typed combinational logic value storage.\n";
+                for (std::size_t kindIndex = 0; kindIndex < static_cast<std::size_t>(ValueSlotScalarKind::kCount); ++kindIndex)
+                {
+                    const auto kind = static_cast<ValueSlotScalarKind>(kindIndex);
+                    if (model.valueScalarSlotCounts[kindIndex] == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    std::fill(" << scalarLogicSlotFieldName("value_", kind) << ".begin(), "
+                            << scalarLogicSlotFieldName("value_", kind) << ".end(), "
+                            << scalarLogicSlotCppType(kind) << "{});\n";
+                }
+                for (const auto &[wordCount, slotCount] : model.valueWideSlotCountsByWords)
+                {
+                    if (slotCount == 0)
+                    {
+                        continue;
+                    }
+                    *stream << "    std::fill(" << wideLogicSlotFieldName("value_", wordCount) << ".begin(), "
+                            << wideLogicSlotFieldName("value_", wordCount) << ".end(), "
+                            << fixedArrayType("std::uint64_t", wordCount) << "{});\n";
+                }
                 break;
             case InitChunkSpec::Kind::kValues:
                 *stream << "    // Initialize non-logic combinational value storage.\n";
@@ -15548,7 +15623,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    random_state_ = random_seed_;\n";
                 break;
             case InitChunkSpec::Kind::kStateStorage:
-                *stream << "    // Allocate persistent state pools.\n";
+                *stream << "    // Reset packed persistent state storage.\n";
+                if (model.stateLogicStorageBytes != 0)
+                {
+                    *stream << "    std::fill(state_logic_storage_.begin(), state_logic_storage_.end(), std::byte{});\n";
+                }
                 break;
             case InitChunkSpec::Kind::kStates:
                 if (!chunk.stateSymbols.empty())

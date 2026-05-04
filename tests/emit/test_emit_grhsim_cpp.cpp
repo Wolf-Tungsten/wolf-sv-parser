@@ -1896,11 +1896,13 @@ int main()
     {
         return fail("Direct-commit emit should not keep shadow/write scratch storage");
     }
-    if (header.find("value_logic_storage_") == std::string::npos ||
-        header.find("static constexpr std::size_t kValueLogicStorageBytes = ") == std::string::npos ||
-        header.find("state_logic_storage_") != std::string::npos)
+    if (header.find("value_u8_slots_") == std::string::npos ||
+        header.find("value_words_2_slots_") == std::string::npos ||
+        header.find("value_logic_storage_") != std::string::npos ||
+        header.find("static constexpr std::size_t kStateLogicStorageBytes = ") == std::string::npos ||
+        header.find("state_logic_storage_") == std::string::npos)
     {
-        return fail("Shared packed logic storage layout is missing");
+        return fail("Typed value storage or packed state storage layout is missing");
     }
     if (header.find("value_bool_slot_ptrs_") != std::string::npos ||
         header.find("state_logic_u8_slot_ptrs_") != std::string::npos ||
@@ -2706,10 +2708,10 @@ int main()
         }
         const std::string wideConcatFastSched = readFiles(wideConcatFastSchedFiles);
         if (wideConcatFastSched.find("wide_concat_fast_mid") == std::string::npos ||
-            wideConcatFastSched.find("grhsim_value_storage_ref<std::array<std::uint64_t, 2>>(value_logic_storage_, ") ==
+            wideConcatFastSched.find("value_words_2_slots_[") ==
                 std::string::npos ||
             wideConcatFastSched.find("= std::array<std::uint64_t, 2>{};") == std::string::npos ||
-            wideConcatFastSched.find("grhsim_value_storage_ref<std::array<std::uint64_t, 2>>(value_logic_storage_, ") == std::string::npos ||
+            wideConcatFastSched.find("value_words_2_slots_[") == std::string::npos ||
             wideConcatFastSched.find(")[") == std::string::npos)
         {
             return fail("wide-concat-fast should emit direct concat buffer statements");
