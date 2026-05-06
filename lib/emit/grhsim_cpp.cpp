@@ -42,6 +42,8 @@ namespace wolvrix::lib::emit
         using wolvrix::lib::grh::ValueIdHash;
         using wolvrix::lib::grh::ValueType;
         using wolvrix::lib::transform::ActivityScheduleStateReadSupernodes;
+        using wolvrix::lib::transform::ActivityScheduleSupernodeKind;
+        using wolvrix::lib::transform::ActivityScheduleSupernodeKinds;
         using wolvrix::lib::transform::ActivityScheduleSupernodeToOps;
         using wolvrix::lib::transform::ActivityScheduleTopoOrder;
         using wolvrix::lib::transform::ActivityScheduleValueFanout;
@@ -1406,6 +1408,7 @@ namespace wolvrix::lib::emit
             const ActivityScheduleValueFanout &valueFanout;
             const ActivityScheduleTopoOrder &topoOrder;
             const ActivityScheduleStateReadSupernodes &stateReadSupernodes;
+            const ActivityScheduleSupernodeKinds *supernodeKinds = nullptr;
         };
 
         bool isCommitPhaseOp(const Operation &op)
@@ -1415,6 +1418,7 @@ namespace wolvrix::lib::emit
             case OperationKind::kRegisterWritePort:
             case OperationKind::kLatchWritePort:
             case OperationKind::kMemoryWritePort:
+            case OperationKind::kMemoryFillPort:
                 return true;
             default:
                 return false;
@@ -4527,16 +4531,26 @@ namespace wolvrix::lib::emit
                 }
                 bool hasCommitOp = false;
                 bool hasComputeOp = false;
-                for (OperationId opId : schedule.supernodeToOps[supernodeId])
+                if (schedule.supernodeKinds != nullptr &&
+                    supernodeId < schedule.supernodeKinds->size())
                 {
-                    const Operation op = graph.getOperation(opId);
-                    if (isCommitPhaseOp(op))
+                    hasCommitOp =
+                        (*schedule.supernodeKinds)[supernodeId] == ActivityScheduleSupernodeKind::Commit;
+                    hasComputeOp = !hasCommitOp;
+                }
+                else
+                {
+                    for (OperationId opId : schedule.supernodeToOps[supernodeId])
                     {
-                        hasCommitOp = true;
-                    }
-                    else
-                    {
-                        hasComputeOp = true;
+                        const Operation op = graph.getOperation(opId);
+                        if (isCommitPhaseOp(op))
+                        {
+                            hasCommitOp = true;
+                        }
+                        else
+                        {
+                            hasComputeOp = true;
+                        }
                     }
                 }
                 model.supernodeHasComputePart[supernodeId] = hasComputeOp ? 1U : 0U;
@@ -6629,49 +6643,103 @@ namespace wolvrix::lib::emit
                    joinStrings(items, ", ") + "}";
         }
 
-        std::string scalarBitPackExpr(const std::vector<std::string> &operands)
+        std::string scalarDirectConcatExpr(const Graph &graph,
+                                           const Operation &op,
+                                           const std::vector<std::string> &operands)
         {
-            const std::string valuesExpr = scalarConcatValueArrayExpr(operands);
-            return "grhsim_pack_bits_u64(" + valuesExpr + ".data(), " + valuesExpr + ".size())";
+            if (operands.empty())
+            {
+                return "UINT64_C(0)";
+            }
+            std::vector<std::string> terms;
+            terms.reserve(operands.size());
+            std::size_t lsbOffset = 0;
+            for (std::size_t i = 0; i < operands.size(); ++i)
+            {
+                const std::size_t operandIndex = operands.size() - i - 1;
+                const std::size_t width = static_cast<std::size_t>(graph.valueWidth(op.operands()[operandIndex]));
+                if (width == 0)
+                {
+                    continue;
+                }
+                std::string term =
+                    scalarTruncExpr("static_cast<std::uint64_t>(" + operands[operandIndex] + ")", width);
+                if (lsbOffset != 0)
+                {
+                    term = "(" + term + " << " + std::to_string(lsbOffset) + ")";
+                }
+                lsbOffset += width;
+                terms.push_back(std::move(term));
+            }
+            std::reverse(terms.begin(), terms.end());
+            if (terms.empty())
+            {
+                return "UINT64_C(0)";
+            }
+            return "(" + joinStrings(terms, " | ") + ")";
         }
 
-        std::string scalarConcatLoopExpr(const Graph &graph,
-                                         const Operation &op,
-                                         const std::vector<std::string> &operands,
-                                         bool wideResult)
+        std::uint64_t scalarRepeatPattern(std::size_t elemWidth, std::size_t rep)
         {
-            const std::size_t operandCount = operands.size();
+            if (elemWidth == 0 || rep == 0)
+            {
+                return 0;
+            }
+            std::uint64_t pattern = 0;
+            for (std::size_t i = 0; i < rep; ++i)
+            {
+                const std::size_t shift = i * elemWidth;
+                if (shift >= 64)
+                {
+                    break;
+                }
+                pattern |= (UINT64_C(1) << shift);
+            }
+            return pattern;
+        }
+
+        std::string scalarDirectReplicateExpr(const std::string &operand,
+                                              std::size_t elemWidth,
+                                              std::size_t rep,
+                                              std::size_t resultWidth)
+        {
+            if (elemWidth == 0 || rep == 0 || resultWidth == 0)
+            {
+                return "UINT64_C(0)";
+            }
+            const std::string elem = scalarTruncExpr("static_cast<std::uint64_t>(" + operand + ")", elemWidth);
+            if (elemWidth == 1)
+            {
+                return "((" + elem + ") ? " + scalarMaskExpr(resultWidth) + " : UINT64_C(0))";
+            }
+            const std::uint64_t pattern = scalarRepeatPattern(elemWidth, rep);
+            return scalarTruncExpr("((" + elem + ") * UINT64_C(" + std::to_string(pattern) + "))", resultWidth);
+        }
+
+        std::string scalarWideConcatLoopExpr(const Graph &graph,
+                                             const Operation &op,
+                                             const std::vector<std::string> &operands)
+        {
             const std::string valuesExpr = scalarConcatValueArrayExpr(operands);
             const auto uniformWidth = concatUniformOperandWidth(graph, op);
             const int32_t resultWidth =
                 op.results().empty() ? 0 : graph.valueWidth(op.results().front());
-            if (wideResult)
+            if (uniformWidth)
             {
-                if (uniformWidth)
-                {
-                    std::ostringstream out;
-                    out << "grhsim_concat_uniform_scalars_words<" << logicWordCount(resultWidth) << ">("
-                        << valuesExpr << ", "
-                        << *uniformWidth << ", "
-                        << resultWidth << ")";
-                    return out.str();
-                }
-                const std::string widthsExpr = scalarConcatWidthArrayExpr(graph, op);
                 std::ostringstream out;
-                out << "grhsim_concat_scalars_words<" << logicWordCount(resultWidth) << ">("
+                out << "grhsim_concat_uniform_scalars_words<" << logicWordCount(resultWidth) << ">("
                     << valuesExpr << ", "
-                    << widthsExpr << ", "
+                    << *uniformWidth << ", "
                     << resultWidth << ")";
                 return out.str();
             }
-            if (uniformWidth)
-            {
-                return "grhsim_concat_uniform_scalars_u64(" + valuesExpr + ".data(), " + valuesExpr + ".size(), " +
-                       std::to_string(*uniformWidth) + ", " + std::to_string(resultWidth) + ")";
-            }
             const std::string widthsExpr = scalarConcatWidthArrayExpr(graph, op);
-            return "grhsim_concat_scalars_u64(" + valuesExpr + ".data(), " + widthsExpr + ".data(), " +
-                   valuesExpr + ".size(), " + std::to_string(resultWidth) + ")";
+            std::ostringstream out;
+            out << "grhsim_concat_scalars_words<" << logicWordCount(resultWidth) << ">("
+                << valuesExpr << ", "
+                << widthsExpr << ", "
+                << resultWidth << ")";
+            return out.str();
         }
 
         bool shouldEmitDirectWideConcatFastPath(const Graph &graph,
@@ -7265,14 +7333,14 @@ namespace wolvrix::lib::emit
             }
             case OperationKind::kConcat:
             {
+                if (resultWidth <= 64)
+                {
+                    return logicBoolExpr(scalarDirectConcatExpr(graph, op, operandExprs));
+                }
                 if (preferLoopedScalarConcatEmit(graph, op))
                 {
                     return eventLogicExprFromWordsExpr(graph, resultValue,
-                                                       scalarConcatLoopExpr(graph, op, operandExprs, true));
-                }
-                if (resultWidth <= 64 && concatAllOperandsAreOneBit(graph, op))
-                {
-                    return logicBoolExpr(scalarBitPackExpr(operandExprs));
+                                                       scalarWideConcatLoopExpr(graph, op, operandExprs));
                 }
                 std::vector<std::string> concatOperandWords;
                 std::vector<int32_t> concatOperandWidths;
@@ -7290,11 +7358,19 @@ namespace wolvrix::lib::emit
             case OperationKind::kReplicate:
             {
                 const auto rep = getAttribute<int64_t>(op, "rep").value_or(1);
+                const std::size_t repCount = rep <= 0 ? 0u : static_cast<std::size_t>(rep);
+                if (resultWidth <= 64)
+                {
+                    return logicBoolExpr(scalarDirectReplicateExpr(operandExprs[0],
+                                                                   static_cast<std::size_t>(graph.valueWidth(operands[0])),
+                                                                   repCount,
+                                                                   static_cast<std::size_t>(resultWidth)));
+                }
                 const int32_t operandWidth = graph.valueWidth(operands[0]);
                 return eventLogicExprFromWordsExpr(
                     graph,
                     resultValue,
-                    replicateWordsExpr(operandWords(0, operandWidth), operandWidth, resultWidth, static_cast<std::size_t>(rep)));
+                    replicateWordsExpr(operandWords(0, operandWidth), operandWidth, resultWidth, repCount));
             }
             case OperationKind::kSliceStatic:
             {
@@ -8016,29 +8092,9 @@ namespace wolvrix::lib::emit
                 return ScalarLogicExpr{"((" + operands[0] + ") ? (" + operandExpr(1, resultWidth) + ") : (" + operandExpr(2, resultWidth) + "))", true};
             case OperationKind::kConcat:
             {
-                if (preferLoopedScalarConcatEmit(graph, op))
-                {
-                    return ScalarLogicExpr{scalarConcatLoopExpr(graph, op, operands, false), true};
-                }
-                if (resultWidth <= 64 && concatAllOperandsAreOneBit(graph, op))
-                {
-                    return ScalarLogicExpr{scalarBitPackExpr(operands), true};
-                }
                 if (resultWidth <= 64)
                 {
-                    if (operands.empty())
-                    {
-                        return ScalarLogicExpr{};
-                    }
-                    std::string expr = scalarTruncExpr(operands[0], static_cast<std::size_t>(graph.valueWidth(op.operands()[0])));
-                    std::size_t accumWidth = static_cast<std::size_t>(graph.valueWidth(op.operands()[0]));
-                    for (std::size_t i = 1; i < operands.size(); ++i)
-                    {
-                        const std::size_t rhsWidth = static_cast<std::size_t>(graph.valueWidth(op.operands()[i]));
-                        expr = scalarConcatExpr(expr, accumWidth, operands[i], rhsWidth);
-                        accumWidth += rhsWidth;
-                    }
-                    return ScalarLogicExpr{expr, true};
+                    return ScalarLogicExpr{scalarDirectConcatExpr(graph, op, operands), true};
                 }
                 if (op.operands().size() == 2)
                 {
@@ -8081,9 +8137,17 @@ namespace wolvrix::lib::emit
             case OperationKind::kReplicate:
             {
                 const auto rep = getAttribute<int64_t>(op, "rep").value_or(1);
-                return ScalarLogicExpr{"grhsim_replicate_u64(" + operands[0] + ", " +
-                                           std::to_string(graph.valueWidth(op.operands()[0])) + ", " + std::to_string(rep) + ")",
-                                       true};
+                const std::size_t repCount = rep <= 0 ? 0u : static_cast<std::size_t>(rep);
+                if (resultWidth <= 64)
+                {
+                    return ScalarLogicExpr{
+                        scalarDirectReplicateExpr(operands[0],
+                                                  static_cast<std::size_t>(graph.valueWidth(op.operands()[0])),
+                                                  repCount,
+                                                  resultWidth),
+                        true};
+                }
+                return ScalarLogicExpr{};
             }
             case OperationKind::kSliceStatic:
             {
@@ -10168,6 +10232,8 @@ namespace wolvrix::lib::emit
             getSessionValue<ActivityScheduleTopoOrder>(options, sessionPrefix + "topo_order");
         const auto *stateReadSupernodes =
             getSessionValue<ActivityScheduleStateReadSupernodes>(options, sessionPrefix + "state_read_supernodes");
+        const auto *supernodeKinds =
+            getSessionValue<ActivityScheduleSupernodeKinds>(options, sessionPrefix + "supernode_kind");
         if (supernodeToOps == nullptr || valueFanout == nullptr || topoOrder == nullptr || stateReadSupernodes == nullptr)
         {
             reportError("missing activity-schedule session data", sessionPrefix);
@@ -10179,6 +10245,7 @@ namespace wolvrix::lib::emit
             .valueFanout = *valueFanout,
             .topoOrder = *topoOrder,
             .stateReadSupernodes = *stateReadSupernodes,
+            .supernodeKinds = supernodeKinds,
         };
 
         const std::size_t schedBatchMaxOps = parseScheduleBatchMaxOps(options);
@@ -10887,71 +10954,6 @@ namespace wolvrix::lib::emit
             *stream << "                                   std::size_t totalWidth,\n";
             *stream << "                                   std::size_t rhsWidth)\n{\n";
             *stream << "    return grhsim_trunc_u64(prefix | grhsim_trunc_u64(rhs, rhsWidth), totalWidth);\n";
-            *stream << "}\n\n";
-            *stream << "inline std::uint64_t grhsim_pack_bits_u64(const std::uint64_t *bits, std::size_t count)\n{\n";
-            *stream << "    std::uint64_t out = 0;\n";
-            *stream << "    for (std::size_t i = 0; i < count; ++i) {\n";
-            *stream << "        out = (out << 1u) | (bits[i] & UINT64_C(1));\n";
-            *stream << "    }\n";
-            *stream << "    return out;\n";
-            *stream << "}\n\n";
-            *stream << "inline std::uint64_t grhsim_concat_scalars_u64(const std::uint64_t *values,\n";
-            *stream << "                                               const std::size_t *widths,\n";
-            *stream << "                                               std::size_t count,\n";
-            *stream << "                                               std::size_t totalWidth)\n{\n";
-            *stream << "    std::uint64_t out = 0;\n";
-            *stream << "    std::size_t cursor = totalWidth;\n";
-            *stream << "    for (std::size_t i = 0; i < count; ++i) {\n";
-            *stream << "        const std::size_t width = widths[i];\n";
-            *stream << "        if (width == 0) {\n";
-            *stream << "            continue;\n";
-            *stream << "        }\n";
-            *stream << "        if (width > cursor) {\n";
-            *stream << "            cursor = 0;\n";
-            *stream << "            continue;\n";
-            *stream << "        }\n";
-            *stream << "        cursor -= width;\n";
-            *stream << "        if (cursor >= 64u) {\n";
-            *stream << "            continue;\n";
-            *stream << "        }\n";
-            *stream << "        const std::uint64_t bits = grhsim_trunc_u64(values[i], width);\n";
-            *stream << "        out |= (cursor == 0 ? bits : (bits << cursor));\n";
-            *stream << "    }\n";
-            *stream << "    return grhsim_trunc_u64(out, totalWidth);\n";
-            *stream << "}\n\n";
-            *stream << "inline std::uint64_t grhsim_concat_uniform_scalars_u64(const std::uint64_t *values,\n";
-            *stream << "                                                       std::size_t count,\n";
-            *stream << "                                                       std::size_t elemWidth,\n";
-            *stream << "                                                       std::size_t totalWidth)\n{\n";
-            *stream << "    std::uint64_t out = 0;\n";
-            *stream << "    std::size_t cursor = totalWidth;\n";
-            *stream << "    for (std::size_t i = 0; i < count; ++i) {\n";
-            *stream << "        if (elemWidth == 0) {\n";
-            *stream << "            continue;\n";
-            *stream << "        }\n";
-            *stream << "        if (elemWidth > cursor) {\n";
-            *stream << "            cursor = 0;\n";
-            *stream << "            continue;\n";
-            *stream << "        }\n";
-            *stream << "        cursor -= elemWidth;\n";
-            *stream << "        if (cursor >= 64u) {\n";
-            *stream << "            continue;\n";
-            *stream << "        }\n";
-            *stream << "        const std::uint64_t bits = grhsim_trunc_u64(values[i], elemWidth);\n";
-            *stream << "        out |= (cursor == 0 ? bits : (bits << cursor));\n";
-            *stream << "    }\n";
-            *stream << "    return grhsim_trunc_u64(out, totalWidth);\n";
-            *stream << "}\n\n";
-            *stream << "inline std::uint64_t grhsim_replicate_u64(std::uint64_t value, std::size_t elemWidth, std::size_t rep)\n{\n";
-            *stream << "    if (elemWidth == 0 || rep == 0) return 0;\n";
-            *stream << "    const std::uint64_t elem = grhsim_trunc_u64(value, elemWidth);\n";
-            *stream << "    std::uint64_t out = 0;\n";
-            *stream << "    for (std::size_t i = 0; i < rep; ++i) {\n";
-            *stream << "        const std::size_t shift = i * elemWidth;\n";
-            *stream << "        if (shift >= 64) break;\n";
-            *stream << "        out |= (elem << shift);\n";
-            *stream << "    }\n";
-            *stream << "    return grhsim_trunc_u64(out, elemWidth * rep);\n";
             *stream << "}\n\n";
             *stream << "inline std::uint64_t grhsim_slice_dynamic_u64(std::uint64_t value, std::uint64_t start, std::size_t width)\n{\n";
             *stream << "    if (start >= 64) return 0;\n";

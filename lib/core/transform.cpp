@@ -908,43 +908,64 @@ namespace wolvrix::lib::transform
                 {
                     options.path = std::string(arg.substr(std::string_view("-path=").size()));
                 }
-                else if (arg == "-supernode-max-size")
+                else if (arg == "-max-compute-node-in-compute-supernode")
                 {
-                    if (!parseSizeArg("-supernode-max-size", options.supernodeMaxSize))
+                    if (!parseSizeArg("-max-compute-node-in-compute-supernode",
+                                      options.maxComputeNodeInComputeSupernode))
                     {
                         return nullptr;
                     }
                 }
-                else if (arg.starts_with("-supernode-max-size="))
+                else if (arg.starts_with("-max-compute-node-in-compute-supernode="))
                 {
                     try
                     {
-                        options.supernodeMaxSize = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-supernode-max-size=").size()))));
+                        options.maxComputeNodeInComputeSupernode = static_cast<std::size_t>(std::stoull(std::string(
+                            arg.substr(std::string_view("-max-compute-node-in-compute-supernode=").size()))));
                     }
                     catch (const std::exception &)
                     {
-                        error = "invalid -supernode-max-size value";
+                        error = "invalid -max-compute-node-in-compute-supernode value";
                         return nullptr;
                     }
                 }
-                else if (arg == "-max-sink-supernode-op")
+                else if (arg == "-max-op-in-compute-node")
                 {
-                    if (!parseSizeArg("-max-sink-supernode-op", options.maxSinkSupernodeOp))
+                    if (!parseSizeArg("-max-op-in-compute-node", options.maxOpInComputeNode))
                     {
                         return nullptr;
                     }
                 }
-                else if (arg.starts_with("-max-sink-supernode-op="))
+                else if (arg.starts_with("-max-op-in-compute-node="))
                 {
                     try
                     {
-                        options.maxSinkSupernodeOp = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-max-sink-supernode-op=").size()))));
+                        options.maxOpInComputeNode = static_cast<std::size_t>(
+                            std::stoull(std::string(arg.substr(std::string_view("-max-op-in-compute-node=").size()))));
                     }
                     catch (const std::exception &)
                     {
-                        error = "invalid -max-sink-supernode-op value";
+                        error = "invalid -max-op-in-compute-node value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-max-op-in-commit-supernode")
+                {
+                    if (!parseSizeArg("-max-op-in-commit-supernode", options.maxOpInCommitSupernode))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-max-op-in-commit-supernode="))
+                {
+                    try
+                    {
+                        options.maxOpInCommitSupernode = static_cast<std::size_t>(std::stoull(std::string(
+                            arg.substr(std::string_view("-max-op-in-commit-supernode=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -max-op-in-commit-supernode value";
                         return nullptr;
                     }
                 }
@@ -993,207 +1014,6 @@ namespace wolvrix::lib::transform
                     else
                     {
                         error = "invalid -enable-chain-merge value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-enable-sibling-merge")
-                {
-                    if (!parseBoolArg("-enable-sibling-merge", options.enableSiblingMerge))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-enable-sibling-merge="))
-                {
-                    const std::string_view text = arg.substr(std::string_view("-enable-sibling-merge=").size());
-                    if (text == "true" || text == "1" || text == "on")
-                    {
-                        options.enableSiblingMerge = true;
-                    }
-                    else if (text == "false" || text == "0" || text == "off")
-                    {
-                        options.enableSiblingMerge = false;
-                    }
-                    else
-                    {
-                        error = "invalid -enable-sibling-merge value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-enable-forward-merge")
-                {
-                    if (!parseBoolArg("-enable-forward-merge", options.enableForwardMerge))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-enable-forward-merge="))
-                {
-                    const std::string_view text = arg.substr(std::string_view("-enable-forward-merge=").size());
-                    if (text == "true" || text == "1" || text == "on")
-                    {
-                        options.enableForwardMerge = true;
-                    }
-                    else if (text == "false" || text == "0" || text == "off")
-                    {
-                        options.enableForwardMerge = false;
-                    }
-                    else
-                    {
-                        error = "invalid -enable-forward-merge value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-enable-refine")
-                {
-                    if (!parseBoolArg("-enable-refine", options.enableRefine))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-enable-refine="))
-                {
-                    const std::string_view text = arg.substr(std::string_view("-enable-refine=").size());
-                    if (text == "true" || text == "1" || text == "on")
-                    {
-                        options.enableRefine = true;
-                    }
-                    else if (text == "false" || text == "0" || text == "off")
-                    {
-                        options.enableRefine = false;
-                    }
-                    else
-                    {
-                        error = "invalid -enable-refine value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-refine-max-iter")
-                {
-                    if (!parseSizeArg("-refine-max-iter", options.refineMaxIter))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-refine-max-iter="))
-                {
-                    try
-                    {
-                        options.refineMaxIter = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-refine-max-iter=").size()))));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -refine-max-iter value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-enable-state-read-tail-absorb")
-                {
-                    if (!parseBoolArg("-enable-state-read-tail-absorb", options.enableStateReadTailAbsorb))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-enable-state-read-tail-absorb="))
-                {
-                    const std::string_view text =
-                        arg.substr(std::string_view("-enable-state-read-tail-absorb=").size());
-                    if (text == "true" || text == "1" || text == "on")
-                    {
-                        options.enableStateReadTailAbsorb = true;
-                    }
-                    else if (text == "false" || text == "0" || text == "off")
-                    {
-                        options.enableStateReadTailAbsorb = false;
-                    }
-                    else
-                    {
-                        error = "invalid -enable-state-read-tail-absorb value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-state-read-tail-absorb-max-targets")
-                {
-                    if (!parseSizeArg("-state-read-tail-absorb-max-targets", options.stateReadTailAbsorbMaxTargets))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-state-read-tail-absorb-max-targets="))
-                {
-                    try
-                    {
-                        options.stateReadTailAbsorbMaxTargets = static_cast<std::size_t>(std::stoull(
-                            std::string(arg.substr(std::string_view("-state-read-tail-absorb-max-targets=").size()))));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -state-read-tail-absorb-max-targets value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-enable-replication")
-                {
-                    if (!parseBoolArg("-enable-replication", options.enableReplication))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-enable-replication="))
-                {
-                    const std::string_view text = arg.substr(std::string_view("-enable-replication=").size());
-                    if (text == "true" || text == "1" || text == "on")
-                    {
-                        options.enableReplication = true;
-                    }
-                    else if (text == "false" || text == "0" || text == "off")
-                    {
-                        options.enableReplication = false;
-                    }
-                    else
-                    {
-                        error = "invalid -enable-replication value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-replication-max-cost")
-                {
-                    if (!parseSizeArg("-replication-max-cost", options.replicationMaxCost))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-replication-max-cost="))
-                {
-                    try
-                    {
-                        options.replicationMaxCost = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-replication-max-cost=").size()))));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -replication-max-cost value";
-                        return nullptr;
-                    }
-                }
-                else if (arg == "-replication-max-targets")
-                {
-                    if (!parseSizeArg("-replication-max-targets", options.replicationMaxTargets))
-                    {
-                        return nullptr;
-                    }
-                }
-                else if (arg.starts_with("-replication-max-targets="))
-                {
-                    try
-                    {
-                        options.replicationMaxTargets = static_cast<std::size_t>(
-                            std::stoull(std::string(arg.substr(std::string_view("-replication-max-targets=").size()))));
-                    }
-                    catch (const std::exception &)
-                    {
-                        error = "invalid -replication-max-targets value";
                         return nullptr;
                     }
                 }

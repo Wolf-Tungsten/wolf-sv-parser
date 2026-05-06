@@ -398,6 +398,8 @@ def _compile_run_pass(name: str, args: list[str], named: dict[str, Any]) -> tupl
         compiled.extend(_compile_stats_kwargs(named))
     elif canonical_name == "repcut":
         compiled.extend(_compile_repcut_kwargs(named))
+    elif canonical_name == "activity-schedule":
+        compiled.extend(_compile_activity_schedule_kwargs(named))
     elif named:
         keys = ", ".join(sorted(named))
         raise TypeError(f"{name} does not accept named pass parameters: {keys}")
@@ -584,6 +586,45 @@ def _compile_repcut_kwargs(named: dict[str, Any]) -> list[str]:
     if keep_intermediate_files:
         out.append("-keep-intermediate-files")
     _ensure_no_extra_named("repcut", local)
+    return out
+
+
+def _compile_activity_schedule_kwargs(named: dict[str, Any]) -> list[str]:
+    local = dict(named)
+    out: list[str] = []
+
+    string_options = [
+        ("path", "-path"),
+        ("cost_model", "-cost-model"),
+    ]
+    size_options = [
+        ("max_compute_node_in_compute_supernode", "-max-compute-node-in-compute-supernode"),
+        ("max_op_in_compute_node", "-max-op-in-compute-node"),
+        ("max_op_in_commit_supernode", "-max-op-in-commit-supernode"),
+    ]
+    bool_options = [
+        ("enable_coarsen", "-enable-coarsen"),
+        ("enable_chain_merge", "-enable-chain-merge"),
+    ]
+
+    for key, arg in string_options:
+        value = _pop_named(local, key, None)
+        if value is not None:
+            out.extend([arg, str(value)])
+    for key, arg in size_options:
+        value = _pop_named(local, key, None)
+        if value is not None:
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(f"activity-schedule {key} must be a non-negative integer")
+            out.extend([arg, str(value)])
+    for key, arg in bool_options:
+        value = _pop_named(local, key, None)
+        if value is not None:
+            if not isinstance(value, bool):
+                raise ValueError(f"activity-schedule {key} must be a boolean")
+            out.extend([arg, "true" if value else "false"])
+
+    _ensure_no_extra_named("activity-schedule", local)
     return out
 
 

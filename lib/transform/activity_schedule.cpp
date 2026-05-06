@@ -86,6 +86,27 @@ namespace wolvrix::lib::transform
             return oss.str();
         }
 
+        std::string describeValue(const wolvrix::lib::grh::Graph &graph,
+                                  wolvrix::lib::grh::ValueId value)
+        {
+            if (!value.valid())
+            {
+                return "<invalid>";
+            }
+            const wolvrix::lib::grh::Value valueInfo = graph.getValue(value);
+            std::ostringstream oss;
+            if (!valueInfo.symbolText().empty())
+            {
+                oss << valueInfo.symbolText();
+            }
+            else
+            {
+                oss << "value#" << value.index;
+            }
+            oss << "(id=" << value.index << ",width=" << valueInfo.width() << ")";
+            return oss.str();
+        }
+
         std::vector<std::string> splitPath(std::string_view path)
         {
             std::vector<std::string> out;
@@ -263,6 +284,7 @@ namespace wolvrix::lib::transform
             ActivityScheduleValueFanout valueFanout;
             ActivityScheduleTopoOrder topoOrder;
             ActivityScheduleStateReadSupernodes stateReadSupernodes;
+            ActivityScheduleSupernodeKinds supernodeKinds;
         };
 
         struct ActivityOpData
@@ -306,23 +328,6 @@ namespace wolvrix::lib::transform
             std::vector<uint32_t> topoPositions;
         };
 
-        struct ReplicationStats
-        {
-            std::size_t clonedOps = 0;
-            std::size_t erasedOps = 0;
-        };
-
-        struct ReplicationPerfStats
-        {
-            std::size_t scannedOps = 0;
-            std::size_t candidateOps = 0;
-            std::size_t userEdgesVisited = 0;
-            std::size_t targetBuckets = 0;
-            std::uint64_t collectObservableMs = 0;
-            std::uint64_t buildSymbolMapMs = 0;
-            std::uint64_t scanAndCloneMs = 0;
-        };
-
         struct FinalMaterializePerfStats
         {
             std::uint64_t rebuildOpDataMs = 0;
@@ -333,6 +338,40 @@ namespace wolvrix::lib::transform
             std::uint64_t buildValueFanoutMs = 0;
             std::uint64_t buildStateReadSetsMs = 0;
             std::uint64_t finalTopoMs = 0;
+        };
+
+        struct ComputeNodeMaterializePerfStats
+        {
+            struct CoarsenIteration
+            {
+                std::size_t iteration = 0;
+                std::size_t clusters = 0;
+                std::size_t clusterDelta = 0;
+                bool changed = false;
+                bool out1Changed = false;
+                bool in1Changed = false;
+                std::uint64_t elapsedMs = 0;
+            };
+
+            std::uint64_t initClustersMs = 0;
+            std::uint64_t topoBeforeCoarsenMs = 0;
+            std::uint64_t coarsenMs = 0;
+            std::uint64_t topoAfterCoarsenMs = 0;
+            std::uint64_t buildClusterViewMs = 0;
+            std::uint64_t dpSegmentMs = 0;
+            std::uint64_t flattenSegmentsMs = 0;
+            std::uint64_t buildFinalSupernodesMs = 0;
+            std::uint64_t buildFinalDagMs = 0;
+            std::uint64_t buildStateReadSetsMs = 0;
+            std::uint64_t finalTopoMs = 0;
+            std::size_t clustersBeforeCoarsen = 0;
+            std::size_t clustersAfterCoarsen = 0;
+            std::size_t coarsenIterations = 0;
+            std::size_t coarsenOut1Merges = 0;
+            std::size_t coarsenIn1Merges = 0;
+            std::size_t segments = 0;
+            std::size_t computeSupernodes = 0;
+            std::vector<CoarsenIteration> coarsenIterationStats;
         };
 
         struct StateReadTailAbsorbStats
@@ -1785,100 +1824,6 @@ namespace wolvrix::lib::transform
             return out;
         }
 
-        bool isReplicationCandidateKind(wolvrix::lib::grh::OperationKind kind) noexcept
-        {
-            switch (kind)
-            {
-            case wolvrix::lib::grh::OperationKind::kConstant:
-            case wolvrix::lib::grh::OperationKind::kEq:
-            case wolvrix::lib::grh::OperationKind::kNe:
-            case wolvrix::lib::grh::OperationKind::kCaseEq:
-            case wolvrix::lib::grh::OperationKind::kCaseNe:
-            case wolvrix::lib::grh::OperationKind::kWildcardEq:
-            case wolvrix::lib::grh::OperationKind::kWildcardNe:
-            case wolvrix::lib::grh::OperationKind::kLt:
-            case wolvrix::lib::grh::OperationKind::kLe:
-            case wolvrix::lib::grh::OperationKind::kGt:
-            case wolvrix::lib::grh::OperationKind::kGe:
-            case wolvrix::lib::grh::OperationKind::kAnd:
-            case wolvrix::lib::grh::OperationKind::kOr:
-            case wolvrix::lib::grh::OperationKind::kXor:
-            case wolvrix::lib::grh::OperationKind::kXnor:
-            case wolvrix::lib::grh::OperationKind::kNot:
-            case wolvrix::lib::grh::OperationKind::kLogicAnd:
-            case wolvrix::lib::grh::OperationKind::kLogicOr:
-            case wolvrix::lib::grh::OperationKind::kLogicNot:
-            case wolvrix::lib::grh::OperationKind::kReduceAnd:
-            case wolvrix::lib::grh::OperationKind::kReduceOr:
-            case wolvrix::lib::grh::OperationKind::kReduceXor:
-            case wolvrix::lib::grh::OperationKind::kReduceNor:
-            case wolvrix::lib::grh::OperationKind::kReduceNand:
-            case wolvrix::lib::grh::OperationKind::kReduceXnor:
-            case wolvrix::lib::grh::OperationKind::kShl:
-            case wolvrix::lib::grh::OperationKind::kLShr:
-            case wolvrix::lib::grh::OperationKind::kAShr:
-            case wolvrix::lib::grh::OperationKind::kMux:
-            case wolvrix::lib::grh::OperationKind::kAssign:
-            case wolvrix::lib::grh::OperationKind::kConcat:
-            case wolvrix::lib::grh::OperationKind::kReplicate:
-            case wolvrix::lib::grh::OperationKind::kSliceStatic:
-            case wolvrix::lib::grh::OperationKind::kSliceDynamic:
-            case wolvrix::lib::grh::OperationKind::kAdd:
-            case wolvrix::lib::grh::OperationKind::kSub:
-                return true;
-            default:
-                return false;
-            }
-        }
-
-        int replicationCost(wolvrix::lib::grh::OperationKind kind) noexcept
-        {
-            switch (kind)
-            {
-            case wolvrix::lib::grh::OperationKind::kConstant:
-                return 0;
-            case wolvrix::lib::grh::OperationKind::kAssign:
-            case wolvrix::lib::grh::OperationKind::kNot:
-            case wolvrix::lib::grh::OperationKind::kLogicNot:
-            case wolvrix::lib::grh::OperationKind::kReduceAnd:
-            case wolvrix::lib::grh::OperationKind::kReduceOr:
-            case wolvrix::lib::grh::OperationKind::kReduceXor:
-            case wolvrix::lib::grh::OperationKind::kReduceNor:
-            case wolvrix::lib::grh::OperationKind::kReduceNand:
-            case wolvrix::lib::grh::OperationKind::kReduceXnor:
-            case wolvrix::lib::grh::OperationKind::kSliceStatic:
-            case wolvrix::lib::grh::OperationKind::kSliceDynamic:
-            case wolvrix::lib::grh::OperationKind::kReplicate:
-                return 1;
-            case wolvrix::lib::grh::OperationKind::kEq:
-            case wolvrix::lib::grh::OperationKind::kNe:
-            case wolvrix::lib::grh::OperationKind::kCaseEq:
-            case wolvrix::lib::grh::OperationKind::kCaseNe:
-            case wolvrix::lib::grh::OperationKind::kWildcardEq:
-            case wolvrix::lib::grh::OperationKind::kWildcardNe:
-            case wolvrix::lib::grh::OperationKind::kLt:
-            case wolvrix::lib::grh::OperationKind::kLe:
-            case wolvrix::lib::grh::OperationKind::kGt:
-            case wolvrix::lib::grh::OperationKind::kGe:
-            case wolvrix::lib::grh::OperationKind::kAnd:
-            case wolvrix::lib::grh::OperationKind::kOr:
-            case wolvrix::lib::grh::OperationKind::kXor:
-            case wolvrix::lib::grh::OperationKind::kXnor:
-            case wolvrix::lib::grh::OperationKind::kLogicAnd:
-            case wolvrix::lib::grh::OperationKind::kLogicOr:
-            case wolvrix::lib::grh::OperationKind::kShl:
-            case wolvrix::lib::grh::OperationKind::kLShr:
-            case wolvrix::lib::grh::OperationKind::kAShr:
-            case wolvrix::lib::grh::OperationKind::kMux:
-            case wolvrix::lib::grh::OperationKind::kConcat:
-            case wolvrix::lib::grh::OperationKind::kAdd:
-            case wolvrix::lib::grh::OperationKind::kSub:
-                return 2;
-            default:
-                return -1;
-            }
-        }
-
         std::unordered_set<wolvrix::lib::grh::ValueId, wolvrix::lib::grh::ValueIdHash>
         collectObservableBoundaryValues(const wolvrix::lib::grh::Graph &graph)
         {
@@ -2156,18 +2101,9 @@ namespace wolvrix::lib::transform
                     const std::size_t clustersBeforeIter = partition.clusters.size();
                     if (options.enableChainMerge)
                     {
-                        changed = tryMergeOut1(partition, opData, options.supernodeMaxSize) || changed;
-                        changed = tryMergeIn1(partition, opData, options.supernodeMaxSize) || changed;
+                        changed = tryMergeOut1(partition, opData, options.maxComputeNodeInComputeSupernode) || changed;
+                        changed = tryMergeIn1(partition, opData, options.maxComputeNodeInComputeSupernode) || changed;
                     }
-                    if (options.enableSiblingMerge)
-                    {
-                        changed = tryMergeSiblings(partition, opData, options.supernodeMaxSize) || changed;
-                    }
-                    if (options.enableForwardMerge)
-                    {
-                        changed = tryMergeForwarders(partition, graph, opData, options.supernodeMaxSize) || changed;
-                    }
-
                     const std::size_t clustersAfterIter = partition.clusters.size();
                     const std::size_t clusterDelta =
                         clustersBeforeIter >= clustersAfterIter ? (clustersBeforeIter - clustersAfterIter) : 0;
@@ -2193,247 +2129,12 @@ namespace wolvrix::lib::transform
             markSinkOnlyClustersFixedBoundary(partition, opData);
             const ClusterView coarseView = buildClusterView(partition, opData);
             const ClusterView dpView = buildTopoOrderedClusterView(coarseView);
-            std::vector<std::vector<uint32_t>> segments = buildDpSegments(dpView, options.supernodeMaxSize);
-            if (options.enableRefine)
-            {
-                segments = refineSegments(dpView, std::move(segments), options.supernodeMaxSize, options.refineMaxIter);
-            }
+            std::vector<std::vector<uint32_t>> segments =
+                buildDpSegments(dpView, options.maxComputeNodeInComputeSupernode);
             partition = materializeSegments(dpView, segments);
             partition = canonicalizePartition(partition, opData);
             markSinkOnlyClustersFixedBoundary(partition, opData);
             return partition;
-        }
-
-        bool runReplicationPhase(wolvrix::lib::grh::Graph &graph,
-                                 SymbolPartition &partition,
-                                 const ActivityOpData &opData,
-                                 std::size_t maxCost,
-                                 std::size_t maxTargets,
-                                 ReplicationStats &stats,
-                                 ReplicationPerfStats *perf,
-                                 std::string &error)
-        {
-            if (partition.clusters.empty() || maxTargets == 0)
-            {
-                return false;
-            }
-
-            const auto observableStart = std::chrono::steady_clock::now();
-            const auto observableValues = collectObservableBoundaryValues(graph);
-            if (perf)
-            {
-                perf->collectObservableMs = elapsedMs(observableStart);
-            }
-            const auto symbolMapStart = std::chrono::steady_clock::now();
-            auto symbolToSupernode = buildSymbolToSupernodeMap(partition);
-            if (perf)
-            {
-                perf->buildSymbolMapMs = elapsedMs(symbolMapStart);
-            }
-            bool changed = false;
-            const auto scanStart = std::chrono::steady_clock::now();
-
-            for (std::size_t revPos = opData.topoSymbols.size(); revPos > 0; --revPos)
-            {
-                if (perf)
-                {
-                    ++perf->scannedOps;
-                }
-                const auto opSym = opData.topoSymbols[revPos - 1];
-                const auto ownerIt = symbolToSupernode.find(opSym);
-                if (ownerIt == symbolToSupernode.end())
-                {
-                    continue;
-                }
-                const uint32_t ownerSupernode = ownerIt->second;
-                if (ownerSupernode >= partition.fixedBoundary.size() ||
-                    partition.fixedBoundary[ownerSupernode] != 0)
-                {
-                    continue;
-                }
-
-                const auto opId = graph.findOperation(opSym);
-                if (!opId.valid())
-                {
-                    continue;
-                }
-                std::optional<wolvrix::lib::grh::Operation> op;
-                try
-                {
-                    op = graph.getOperation(opId);
-                }
-                catch (const std::exception &ex)
-                {
-                    error = "activity-schedule replication getOperation failed symbol=" +
-                            std::string(graph.symbolText(opSym)) + ": " + ex.what();
-                    return false;
-                }
-                if (!isReplicationCandidateKind(op->kind()) || op->results().size() != 1)
-                {
-                    continue;
-                }
-                const int cost = replicationCost(op->kind());
-                if (cost < 0 || static_cast<std::size_t>(cost) > maxCost)
-                {
-                    continue;
-                }
-                if (perf)
-                {
-                    ++perf->candidateOps;
-                }
-
-                const auto result = op->results().front();
-                std::unordered_map<uint32_t, std::vector<wolvrix::lib::grh::ValueUser>> usersByTarget;
-                usersByTarget.reserve(4);
-                std::vector<wolvrix::lib::grh::ValueUser> resultUsers;
-                try
-                {
-                    const auto resultValue = graph.getValue(result);
-                    resultUsers.assign(resultValue.users().begin(), resultValue.users().end());
-                }
-                catch (const std::exception &ex)
-                {
-                    error = "activity-schedule replication getValue/users failed source=" +
-                            describeOp(graph, opId) + ": " + ex.what();
-                    return false;
-                }
-                for (const auto user : resultUsers)
-                {
-                    if (perf)
-                    {
-                        ++perf->userEdgesVisited;
-                    }
-                    const auto userSym = graph.operationSymbol(user.operation);
-                    const auto userIt = symbolToSupernode.find(userSym);
-                    if (userIt == symbolToSupernode.end())
-                    {
-                        continue;
-                    }
-                    const uint32_t targetSupernode = userIt->second;
-                    if (targetSupernode == ownerSupernode ||
-                        targetSupernode >= partition.fixedBoundary.size() ||
-                        partition.fixedBoundary[targetSupernode] != 0)
-                    {
-                        continue;
-                    }
-                    usersByTarget[targetSupernode].push_back(user);
-                }
-                if (usersByTarget.empty() || usersByTarget.size() > maxTargets)
-                {
-                    continue;
-                }
-                if (perf)
-                {
-                    perf->targetBuckets += usersByTarget.size();
-                }
-
-                std::optional<wolvrix::lib::grh::Value> resultInfo;
-                try
-                {
-                    resultInfo = graph.getValue(result);
-                }
-                catch (const std::exception &ex)
-                {
-                    error = "activity-schedule replication getValue(resultInfo) failed source=" +
-                            describeOp(graph, opId) + ": " + ex.what();
-                    return false;
-                }
-                for (const auto &[targetSupernode, users] : usersByTarget)
-                {
-                    if (users.empty())
-                    {
-                        continue;
-                    }
-
-                    const auto cloneSym = graph.makeInternalOpSym();
-                    const auto cloneOp = graph.createOperation(op->kind(), cloneSym);
-                    if (op->srcLoc())
-                    {
-                        graph.setOpSrcLoc(cloneOp, *op->srcLoc());
-                    }
-                    for (const auto &attr : op->attrs())
-                    {
-                        graph.setAttr(cloneOp, attr.key, attr.value);
-                    }
-                    for (const auto operand : op->operands())
-                    {
-                        graph.addOperand(cloneOp, operand);
-                    }
-
-                    const auto cloneResult = graph.createValue(graph.makeInternalValSym(),
-                                                               resultInfo->width(),
-                                                               resultInfo->isSigned(),
-                                                               resultInfo->type());
-                    if (resultInfo->srcLoc())
-                    {
-                        graph.setValueSrcLoc(cloneResult, *resultInfo->srcLoc());
-                    }
-                    graph.addResult(cloneOp, cloneResult);
-
-                    for (const auto user : users)
-                    {
-                        try
-                        {
-                            const auto userOp = graph.getOperation(user.operation);
-                            const auto userOperands = userOp.operands();
-                            if (user.operandIndex >= userOperands.size() || userOperands[user.operandIndex] != result)
-                            {
-                                std::ostringstream oss;
-                                oss << "activity-schedule replication detected stale user edge: source="
-                                    << describeOp(graph, opId) << " result=" << result.index
-                                    << " targetSupernode=" << targetSupernode
-                                    << " user=" << describeOp(graph, user.operation)
-                                    << " operandIndex=" << user.operandIndex;
-                                if (user.operandIndex < userOperands.size())
-                                {
-                                    oss << " currentOperand=" << userOperands[user.operandIndex].index;
-                                }
-                                error = oss.str();
-                                return false;
-                            }
-                            graph.replaceOperand(user.operation, user.operandIndex, cloneResult);
-                        }
-                        catch (const std::exception &ex)
-                        {
-                            error = "activity-schedule replication replaceOperand failed source=" +
-                                    describeOp(graph, opId) +
-                                    " targetSupernode=" + std::to_string(targetSupernode) +
-                                    " userOpIndex=" + std::to_string(user.operation.index) +
-                                    " operandIndex=" + std::to_string(user.operandIndex) +
-                                    ": " + ex.what();
-                            return false;
-                        }
-                    }
-
-                    partition.clusters[targetSupernode].push_back(cloneSym);
-                    symbolToSupernode.emplace(cloneSym, targetSupernode);
-                    ++stats.clonedOps;
-                    changed = true;
-                }
-
-                if (observableValues.find(result) == observableValues.end() &&
-                    graph.getValue(result).users().empty())
-                {
-                    if (!graph.eraseOp(opId))
-                    {
-                        error = "activity-schedule replication failed to erase dead source op: " +
-                                describeOp(graph, opId);
-                        return false;
-                    }
-                    auto &ownerCluster = partition.clusters[ownerSupernode];
-                    ownerCluster.erase(std::remove(ownerCluster.begin(), ownerCluster.end(), opSym),
-                                       ownerCluster.end());
-                    symbolToSupernode.erase(opSym);
-                    ++stats.erasedOps;
-                }
-            }
-
-            if (perf)
-            {
-                perf->scanAndCloneMs = elapsedMs(scanStart);
-            }
-
-            return changed;
         }
 
         bool materializeFinalPartition(const wolvrix::lib::grh::Graph &graph,
@@ -2676,6 +2377,1509 @@ namespace wolvrix::lib::transform
             return true;
         }
 
+        struct ComputeNodeRewriteStats
+        {
+            std::size_t computeNodes = 0;
+            std::size_t computeNodeOpsTotal = 0;
+            std::size_t sourceClonesInComputeNodes = 0;
+            std::size_t directSourceInputsToCommitSupernodes = 0;
+            std::size_t commonExprComputeNodes = 0;
+            std::size_t computeNodeBoundaryValues = 0;
+            std::size_t commitInputRootValues = 0;
+        };
+
+        struct ComputeNode
+        {
+            std::vector<wolvrix::lib::grh::OperationId> ops;
+            std::vector<wolvrix::lib::grh::ValueId> boundaryInputs;
+            bool commonExpr = false;
+        };
+
+        struct CommitNode
+        {
+            std::vector<wolvrix::lib::grh::OperationId> ops;
+            std::vector<wolvrix::lib::grh::ValueId> inputValues;
+        };
+
+        struct ComputeRewriteBuild
+        {
+            std::vector<ComputeNode> computeNodes;
+            std::vector<CommitNode> commitNodes;
+            std::vector<std::vector<uint32_t>> computeDag;
+            std::vector<uint32_t> computeTopoOrder;
+            std::vector<uint32_t> computeNodeOfOp;
+            ComputeNodeRewriteStats stats;
+        };
+
+        const char *activitySupernodeKindName(ActivityScheduleSupernodeKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case ActivityScheduleSupernodeKind::Compute:
+                return "compute";
+            case ActivityScheduleSupernodeKind::Commit:
+                return "commit";
+            }
+            return "unknown";
+        }
+
+        void appendFinalSupernodeSummary(std::ostringstream &oss,
+                                         const wolvrix::lib::grh::Graph &graph,
+                                         const ComputeRewriteBuild &rewrite,
+                                         const ActivityScheduleBuild &build,
+                                         const std::vector<std::vector<uint32_t>> &computeNodesBySupernode,
+                                         uint32_t supernodeId)
+        {
+            oss << "supernode=" << supernodeId;
+            if (supernodeId < build.supernodeKinds.size())
+            {
+                oss << "(" << activitySupernodeKindName(build.supernodeKinds[supernodeId]) << ")";
+            }
+            if (supernodeId < computeNodesBySupernode.size() && !computeNodesBySupernode[supernodeId].empty())
+            {
+                oss << " computeNodes=[";
+                const auto &nodes = computeNodesBySupernode[supernodeId];
+                const std::size_t limit = std::min<std::size_t>(nodes.size(), 8);
+                for (std::size_t i = 0; i < limit; ++i)
+                {
+                    if (i != 0)
+                    {
+                        oss << ",";
+                    }
+                    const uint32_t computeNodeId = nodes[i];
+                    oss << computeNodeId;
+                    if (computeNodeId < rewrite.computeNodes.size())
+                    {
+                        oss << ":ops=" << rewrite.computeNodes[computeNodeId].ops.size();
+                        if (rewrite.computeNodes[computeNodeId].commonExpr)
+                        {
+                            oss << ":common";
+                        }
+                    }
+                }
+                if (nodes.size() > limit)
+                {
+                    oss << ",...";
+                }
+                oss << "]";
+            }
+            if (supernodeId < build.supernodeToOps.size())
+            {
+                const auto &ops = build.supernodeToOps[supernodeId];
+                oss << " ops=[";
+                const std::size_t limit = std::min<std::size_t>(ops.size(), 6);
+                for (std::size_t i = 0; i < limit; ++i)
+                {
+                    if (i != 0)
+                    {
+                        oss << ",";
+                    }
+                    oss << describeOp(graph, ops[i]);
+                }
+                if (ops.size() > limit)
+                {
+                    oss << ",...";
+                }
+                oss << "]";
+            }
+        }
+
+        void appendFinalEdgeReasons(std::ostringstream &oss,
+                                    const wolvrix::lib::grh::Graph &graph,
+                                    const ComputeRewriteBuild &rewrite,
+                                    const ActivityScheduleBuild &build,
+                                    const std::vector<uint32_t> &supernodeOfOp,
+                                    uint32_t from,
+                                    uint32_t to)
+        {
+            oss << " edge " << from << " -> " << to << " via";
+            if (to >= build.supernodeToOps.size())
+            {
+                oss << " <invalid-target>";
+                return;
+            }
+            std::size_t printed = 0;
+            for (const auto toOpId : build.supernodeToOps[to])
+            {
+                const auto operands = graph.opOperands(toOpId);
+                for (std::size_t operandIndex = 0; operandIndex < operands.size(); ++operandIndex)
+                {
+                    const auto operand = operands[operandIndex];
+                    const auto defOp = graph.valueDef(operand);
+                    if (!defOp.valid() || defOp.index >= supernodeOfOp.size() ||
+                        supernodeOfOp[defOp.index] != from)
+                    {
+                        continue;
+                    }
+                    if (printed == 0)
+                    {
+                        oss << " ";
+                    }
+                    else
+                    {
+                        oss << "; ";
+                    }
+                    oss << describeValue(graph, operand)
+                        << " def=" << describeOp(graph, defOp);
+                    if (defOp.index < rewrite.computeNodeOfOp.size() &&
+                        rewrite.computeNodeOfOp[defOp.index] != kInvalidActivitySupernodeId)
+                    {
+                        oss << "(computeNode=" << rewrite.computeNodeOfOp[defOp.index] << ")";
+                    }
+                    oss << " use=" << describeOp(graph, toOpId)
+                        << "(operand=" << operandIndex;
+                    if (toOpId.index < rewrite.computeNodeOfOp.size() &&
+                        rewrite.computeNodeOfOp[toOpId.index] != kInvalidActivitySupernodeId)
+                    {
+                        oss << ",computeNode=" << rewrite.computeNodeOfOp[toOpId.index];
+                    }
+                    oss << ")";
+                    ++printed;
+                    if (printed >= 6)
+                    {
+                        oss << "; ...";
+                        return;
+                    }
+                }
+            }
+            if (printed == 0)
+            {
+                oss << " <no matching operand found>";
+            }
+        }
+
+        std::string describeFinalScheduleCycle(const wolvrix::lib::grh::Graph &graph,
+                                               const ComputeRewriteBuild &rewrite,
+                                               const ActivityScheduleBuild &build,
+                                               const std::vector<std::vector<uint32_t>> &computeNodesBySupernode,
+                                               const std::vector<uint32_t> &supernodeOfOp)
+        {
+            const std::vector<uint32_t> cycle = findCyclePath(build.dag);
+            if (cycle.empty())
+            {
+                return "cycle=<unavailable>";
+            }
+
+            std::ostringstream oss;
+            oss << "cycle_path=";
+            const std::size_t nodeLimit = std::min<std::size_t>(cycle.size(), 16);
+            for (std::size_t i = 0; i < nodeLimit; ++i)
+            {
+                if (i != 0)
+                {
+                    oss << " -> ";
+                }
+                oss << cycle[i];
+            }
+            if (cycle.size() > nodeLimit)
+            {
+                oss << " -> ...";
+            }
+            oss << " cycle_nodes={";
+            const std::size_t summaryLimit = std::min<std::size_t>(cycle.size(), 12);
+            for (std::size_t i = 0; i < summaryLimit; ++i)
+            {
+                if (i != 0)
+                {
+                    oss << " | ";
+                }
+                appendFinalSupernodeSummary(oss, graph, rewrite, build, computeNodesBySupernode, cycle[i]);
+            }
+            if (cycle.size() > summaryLimit)
+            {
+                oss << " | ...";
+            }
+            oss << "} cycle_edges={";
+            const std::size_t edgeLimit = std::min<std::size_t>(cycle.size() - 1, 12);
+            for (std::size_t i = 0; i < edgeLimit; ++i)
+            {
+                if (i != 0)
+                {
+                    oss << " | ";
+                }
+                appendFinalEdgeReasons(oss, graph, rewrite, build, supernodeOfOp, cycle[i], cycle[i + 1]);
+            }
+            if (cycle.size() - 1 > edgeLimit)
+            {
+                oss << " | ...";
+            }
+            oss << "}";
+            return oss.str();
+        }
+
+        ActivityOpClass classifyActivityOp(wolvrix::lib::grh::OperationKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kConstant:
+            case wolvrix::lib::grh::OperationKind::kRegisterReadPort:
+            case wolvrix::lib::grh::OperationKind::kLatchReadPort:
+                return ActivityOpClass::Source;
+            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
+            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryFillPort:
+                return ActivityOpClass::Sink;
+            default:
+                break;
+            }
+            if (isStorageDeclOpKind(kind) || isHierLikeOpKind(kind))
+            {
+                return ActivityOpClass::Declaration;
+            }
+            return ActivityOpClass::Compute;
+        }
+
+        std::vector<ActivityOpClass> buildOpClasses(const wolvrix::lib::grh::Graph &graph,
+                                                    std::size_t maxOpIndex)
+        {
+            std::vector<ActivityOpClass> out(maxOpIndex + 1, ActivityOpClass::Unsupported);
+            for (const auto opId : graph.operations())
+            {
+                if (opId.index < out.size())
+                {
+                    out[opId.index] = classifyActivityOp(graph.opKind(opId));
+                }
+            }
+            return out;
+        }
+
+        bool isObservableRootValue(const wolvrix::lib::grh::Graph &graph,
+                                   wolvrix::lib::grh::ValueId value) noexcept
+        {
+            for (const auto &port : graph.outputPorts())
+            {
+                if (port.value == value)
+                {
+                    return true;
+                }
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                if (port.out == value || port.oe == value)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool vectorContainsValue(const std::vector<wolvrix::lib::grh::ValueId> &values,
+                                 wolvrix::lib::grh::ValueId value)
+        {
+            return std::find(values.begin(), values.end(), value) != values.end();
+        }
+
+        wolvrix::lib::grh::OperationId cloneSingleResultSourceOp(wolvrix::lib::grh::Graph &graph,
+                                                                 wolvrix::lib::grh::OperationId sourceOpId,
+                                                                 wolvrix::lib::grh::ValueId sourceValue,
+                                                                 wolvrix::lib::grh::ValueId &cloneValue,
+                                                                 std::string &error)
+        {
+            try
+            {
+                const auto sourceOp = graph.getOperation(sourceOpId);
+                const auto sourceInfo = graph.getValue(sourceValue);
+                const auto cloneOp = graph.createOperation(sourceOp.kind(), graph.makeInternalOpSym());
+                if (sourceOp.srcLoc())
+                {
+                    graph.setOpSrcLoc(cloneOp, *sourceOp.srcLoc());
+                }
+                for (const auto &attr : sourceOp.attrs())
+                {
+                    graph.setAttr(cloneOp, attr.key, attr.value);
+                }
+                for (const auto operand : sourceOp.operands())
+                {
+                    graph.addOperand(cloneOp, operand);
+                }
+                cloneValue = graph.createValue(graph.makeInternalValSym(),
+                                               sourceInfo.width(),
+                                               sourceInfo.isSigned(),
+                                               sourceInfo.type());
+                if (sourceInfo.srcLoc())
+                {
+                    graph.setValueSrcLoc(cloneValue, *sourceInfo.srcLoc());
+                }
+                graph.addResult(cloneOp, cloneValue);
+                return cloneOp;
+            }
+            catch (const std::exception &ex)
+            {
+                error = "activity-schedule compute-node source clone failed source=" +
+                        describeOp(graph, sourceOpId) + ": " + ex.what();
+                return wolvrix::lib::grh::OperationId::invalid();
+            }
+        }
+
+        std::size_t semanticConsumerCount(const wolvrix::lib::grh::Graph &graph,
+                                          wolvrix::lib::grh::ValueId value,
+                                          const std::vector<ActivityOpClass> &opClasses,
+                                          uint32_t currentNode,
+                                          const std::vector<uint32_t> &nodeOfOp)
+        {
+            std::unordered_set<uint64_t> consumers;
+            const auto valueInfo = graph.getValue(value);
+            for (const auto user : valueInfo.users())
+            {
+                if (user.operation.index >= opClasses.size())
+                {
+                    continue;
+                }
+                const ActivityOpClass opClass = opClasses[user.operation.index];
+                if (opClass != ActivityOpClass::Compute && opClass != ActivityOpClass::Sink)
+                {
+                    continue;
+                }
+                if (user.operation.index < nodeOfOp.size() && nodeOfOp[user.operation.index] == currentNode)
+                {
+                    consumers.insert((static_cast<uint64_t>(currentNode) << 32) |
+                                     static_cast<uint64_t>(user.operation.index));
+                    continue;
+                }
+                consumers.insert(static_cast<uint64_t>(user.operation.index));
+            }
+            return consumers.size();
+        }
+
+        class ComputeNodeBuilder
+        {
+        public:
+            ComputeNodeBuilder(wolvrix::lib::grh::Graph &graph,
+                               const ActivityScheduleOptions &options,
+                               std::vector<ActivityOpClass> &opClasses,
+                               ComputeRewriteBuild &build,
+                               std::string &error)
+                : graph_(graph),
+                  options_(options),
+                  opClasses_(opClasses),
+                  build_(build),
+                  error_(error)
+            {
+                build_.computeNodeOfOp.assign(opClasses_.size(), kInvalidActivitySupernodeId);
+            }
+
+            uint32_t ensureSourceOwnerNode(wolvrix::lib::grh::OperationId opId)
+            {
+                if (!opId.valid() || opId.index >= build_.computeNodeOfOp.size())
+                {
+                    return kInvalidActivitySupernodeId;
+                }
+                uint32_t &owner = build_.computeNodeOfOp[opId.index];
+                if (owner != kInvalidActivitySupernodeId)
+                {
+                    return owner;
+                }
+                owner = newNode(false);
+                build_.computeNodes[owner].ops.push_back(opId);
+                return owner;
+            }
+
+            uint32_t ensureComputeNodeForOp(wolvrix::lib::grh::OperationId opId, bool commonExpr)
+            {
+                if (!opId.valid() || opId.index >= build_.computeNodeOfOp.size())
+                {
+                    return kInvalidActivitySupernodeId;
+                }
+                uint32_t &owner = build_.computeNodeOfOp[opId.index];
+                if (owner != kInvalidActivitySupernodeId)
+                {
+                    return owner;
+                }
+                owner = newNode(commonExpr);
+                absorbComputeOp(owner, opId);
+                return owner;
+            }
+
+        private:
+            uint32_t newNode(bool commonExpr)
+            {
+                const uint32_t nodeId = static_cast<uint32_t>(build_.computeNodes.size());
+                ComputeNode node;
+                node.commonExpr = commonExpr;
+                build_.computeNodes.push_back(std::move(node));
+                if (commonExpr)
+                {
+                    ++build_.stats.commonExprComputeNodes;
+                }
+                return nodeId;
+            }
+
+            bool canAddRawOp(uint32_t nodeId) const
+            {
+                const std::size_t maxOps =
+                    options_.maxOpInComputeNode == 0 ? std::numeric_limits<std::size_t>::max()
+                                                     : options_.maxOpInComputeNode;
+                return nodeId < build_.computeNodes.size() && build_.computeNodes[nodeId].ops.size() < maxOps;
+            }
+
+            void addBoundary(uint32_t nodeId, wolvrix::lib::grh::ValueId value)
+            {
+                if (nodeId >= build_.computeNodes.size() || !value.valid())
+                {
+                    return;
+                }
+                auto &inputs = build_.computeNodes[nodeId].boundaryInputs;
+                if (!vectorContainsValue(inputs, value))
+                {
+                    inputs.push_back(value);
+                }
+            }
+
+            void absorbComputeOp(uint32_t nodeId, wolvrix::lib::grh::OperationId opId)
+            {
+                if (nodeId >= build_.computeNodes.size() || !opId.valid())
+                {
+                    return;
+                }
+                auto &node = build_.computeNodes[nodeId];
+                if (std::find(node.ops.begin(), node.ops.end(), opId) == node.ops.end())
+                {
+                    node.ops.push_back(opId);
+                    if (opId.index < build_.computeNodeOfOp.size())
+                    {
+                        build_.computeNodeOfOp[opId.index] = nodeId;
+                    }
+                }
+                processOperands(nodeId, opId);
+            }
+
+            void processOperands(uint32_t nodeId, wolvrix::lib::grh::OperationId opId)
+            {
+                const auto op = graph_.getOperation(opId);
+                const auto operands = op.operands();
+                for (std::size_t operandIndex = 0; operandIndex < operands.size(); ++operandIndex)
+                {
+                    const auto operand = operands[operandIndex];
+                    const auto defOp = graph_.valueDef(operand);
+                    if (!defOp.valid())
+                    {
+                        addBoundary(nodeId, operand);
+                        continue;
+                    }
+                    if (defOp.index >= opClasses_.size())
+                    {
+                        addBoundary(nodeId, operand);
+                        continue;
+                    }
+                    const ActivityOpClass defClass = opClasses_[defOp.index];
+                    if (defClass == ActivityOpClass::Source)
+                    {
+                        if (!canAddRawOp(nodeId))
+                        {
+                            ensureSourceOwnerNode(defOp);
+                            addBoundary(nodeId, operand);
+                            continue;
+                        }
+                        wolvrix::lib::grh::ValueId cloneValue;
+                        const auto cloneOp = cloneSingleResultSourceOp(graph_, defOp, operand, cloneValue, error_);
+                        if (!cloneOp.valid())
+                        {
+                            return;
+                        }
+                        if (cloneOp.index >= opClasses_.size())
+                        {
+                            opClasses_.resize(cloneOp.index + 1, ActivityOpClass::Unsupported);
+                            build_.computeNodeOfOp.resize(cloneOp.index + 1, kInvalidActivitySupernodeId);
+                        }
+                        opClasses_[cloneOp.index] = ActivityOpClass::Source;
+                        build_.computeNodeOfOp[cloneOp.index] = nodeId;
+                        build_.computeNodes[nodeId].ops.push_back(cloneOp);
+                        ++build_.stats.sourceClonesInComputeNodes;
+                        try
+                        {
+                            graph_.replaceOperand(opId, operandIndex, cloneValue);
+                        }
+                        catch (const std::exception &ex)
+                        {
+                            error_ = "activity-schedule compute-node source clone replaceOperand failed user=" +
+                                     describeOp(graph_, opId) + ": " + ex.what();
+                            return;
+                        }
+                        continue;
+                    }
+                    if (defClass == ActivityOpClass::Sink)
+                    {
+                        error_ = "activity-schedule compute-node builder encountered sink predecessor source=" +
+                                 describeOp(graph_, defOp) + " user=" + describeOp(graph_, opId);
+                        return;
+                    }
+                    if (defClass != ActivityOpClass::Compute)
+                    {
+                        addBoundary(nodeId, operand);
+                        continue;
+                    }
+                    if (defOp.index < build_.computeNodeOfOp.size())
+                    {
+                        const uint32_t existingOwner = build_.computeNodeOfOp[defOp.index];
+                        if (existingOwner != kInvalidActivitySupernodeId)
+                        {
+                            if (existingOwner != nodeId)
+                            {
+                                addBoundary(nodeId, operand);
+                            }
+                            continue;
+                        }
+                    }
+
+                    const std::size_t consumers =
+                        semanticConsumerCount(graph_, operand, opClasses_, nodeId, build_.computeNodeOfOp);
+                    const bool shared = consumers > 1;
+                    if (shared || !canAddRawOp(nodeId))
+                    {
+                        ensureComputeNodeForOp(defOp, shared);
+                        addBoundary(nodeId, operand);
+                        continue;
+                    }
+                    absorbComputeOp(nodeId, defOp);
+                    if (!error_.empty())
+                    {
+                        return;
+                    }
+                }
+            }
+
+            wolvrix::lib::grh::Graph &graph_;
+            const ActivityScheduleOptions &options_;
+            std::vector<ActivityOpClass> &opClasses_;
+            ComputeRewriteBuild &build_;
+            std::string &error_;
+        };
+
+        std::vector<uint32_t> topoOrderForDag(const std::vector<std::vector<uint32_t>> &dag)
+        {
+            wolvrix::lib::toposort::TopoDag<uint32_t> topoDag;
+            topoDag.reserveNodes(dag.size());
+            for (uint32_t node = 0; node < dag.size(); ++node)
+            {
+                topoDag.addNode(node);
+            }
+            for (uint32_t node = 0; node < dag.size(); ++node)
+            {
+                for (const auto succ : dag[node])
+                {
+                    topoDag.addEdge(node, succ);
+                }
+            }
+            std::vector<uint32_t> out;
+            const auto layers = topoDag.toposort();
+            for (const auto &layer : layers)
+            {
+                std::vector<uint32_t> ordered(layer.begin(), layer.end());
+                std::sort(ordered.begin(), ordered.end());
+                out.insert(out.end(), ordered.begin(), ordered.end());
+            }
+            return out;
+        }
+
+        void buildComputeDag(ComputeRewriteBuild &build,
+                             const std::vector<uint32_t> &nodeOfOpByIndex,
+                             const wolvrix::lib::grh::Graph &graph)
+        {
+            build.computeDag.assign(build.computeNodes.size(), {});
+            std::unordered_set<uint64_t> seen;
+            for (uint32_t nodeId = 0; nodeId < build.computeNodes.size(); ++nodeId)
+            {
+                for (const auto boundary : build.computeNodes[nodeId].boundaryInputs)
+                {
+                    const auto defOp = graph.valueDef(boundary);
+                    if (!defOp.valid() || defOp.index >= nodeOfOpByIndex.size())
+                    {
+                        continue;
+                    }
+                    const uint32_t pred = nodeOfOpByIndex[defOp.index];
+                    if (pred == kInvalidActivitySupernodeId || pred == nodeId)
+                    {
+                        continue;
+                    }
+                    const uint64_t packed = (static_cast<uint64_t>(pred) << 32) | nodeId;
+                    if (seen.insert(packed).second)
+                    {
+                        build.computeDag[pred].push_back(nodeId);
+                        ++build.stats.computeNodeBoundaryValues;
+                    }
+                }
+            }
+            for (auto &succs : build.computeDag)
+            {
+                std::sort(succs.begin(), succs.end());
+            }
+        }
+
+        struct NodeClusterView
+        {
+            std::vector<std::vector<uint32_t>> members;
+            std::vector<std::vector<uint32_t>> preds;
+            std::vector<std::vector<uint32_t>> succs;
+            std::vector<uint32_t> clusterOfNode;
+        };
+
+        NodeClusterView buildNodeClusterView(const std::vector<std::vector<uint32_t>> &clusters,
+                                             const std::vector<std::vector<uint32_t>> &nodeDag,
+                                             std::size_t nodeCount)
+        {
+            NodeClusterView view;
+            view.members = clusters;
+            view.preds.resize(clusters.size());
+            view.succs.resize(clusters.size());
+            view.clusterOfNode.assign(nodeCount, kInvalidActivitySupernodeId);
+            for (uint32_t clusterId = 0; clusterId < view.members.size(); ++clusterId)
+            {
+                auto &members = view.members[clusterId];
+                std::sort(members.begin(), members.end());
+                members.erase(std::unique(members.begin(), members.end()), members.end());
+                for (const auto node : members)
+                {
+                    if (node < view.clusterOfNode.size())
+                    {
+                        view.clusterOfNode[node] = clusterId;
+                    }
+                }
+            }
+            for (uint32_t node = 0; node < nodeDag.size(); ++node)
+            {
+                const uint32_t from = node < view.clusterOfNode.size() ? view.clusterOfNode[node]
+                                                                       : kInvalidActivitySupernodeId;
+                if (from == kInvalidActivitySupernodeId)
+                {
+                    continue;
+                }
+                for (const auto succNode : nodeDag[node])
+                {
+                    const uint32_t to = succNode < view.clusterOfNode.size() ? view.clusterOfNode[succNode]
+                                                                             : kInvalidActivitySupernodeId;
+                    if (to == kInvalidActivitySupernodeId || to == from)
+                    {
+                        continue;
+                    }
+                    view.succs[from].push_back(to);
+                    view.preds[to].push_back(from);
+                }
+            }
+            for (auto &preds : view.preds)
+            {
+                std::sort(preds.begin(), preds.end());
+                preds.erase(std::unique(preds.begin(), preds.end()), preds.end());
+            }
+            for (auto &succs : view.succs)
+            {
+                std::sort(succs.begin(), succs.end());
+                succs.erase(std::unique(succs.begin(), succs.end()), succs.end());
+            }
+            return view;
+        }
+
+        std::vector<std::vector<uint32_t>> canonicalizeNodeClusters(std::vector<std::vector<uint32_t>> clusters,
+                                                                    const std::vector<uint32_t> &nodeTopoPos)
+        {
+            for (auto &members : clusters)
+            {
+                std::sort(members.begin(),
+                          members.end(),
+                          [&](uint32_t lhs, uint32_t rhs)
+                          {
+                              const uint32_t lhsPos = lhs < nodeTopoPos.size() ? nodeTopoPos[lhs]
+                                                                               : kInvalidActivitySupernodeId;
+                              const uint32_t rhsPos = rhs < nodeTopoPos.size() ? nodeTopoPos[rhs]
+                                                                               : kInvalidActivitySupernodeId;
+                              if (lhsPos != rhsPos)
+                              {
+                                  return lhsPos < rhsPos;
+                              }
+                              return lhs < rhs;
+                          });
+            }
+            std::sort(clusters.begin(),
+                      clusters.end(),
+                      [&](const auto &lhs, const auto &rhs)
+                      {
+                          const uint32_t lhsHead =
+                              lhs.empty() || lhs.front() >= nodeTopoPos.size() ? kInvalidActivitySupernodeId
+                                                                               : nodeTopoPos[lhs.front()];
+                          const uint32_t rhsHead =
+                              rhs.empty() || rhs.front() >= nodeTopoPos.size() ? kInvalidActivitySupernodeId
+                                                                               : nodeTopoPos[rhs.front()];
+                          if (lhsHead != rhsHead)
+                          {
+                              return lhsHead < rhsHead;
+                          }
+                          return lhs < rhs;
+                      });
+            return clusters;
+        }
+
+        bool orderNodeClustersTopologically(std::vector<std::vector<uint32_t>> &clusters,
+                                            const std::vector<std::vector<uint32_t>> &nodeDag,
+                                            std::size_t nodeCount)
+        {
+            if (clusters.empty())
+            {
+                return true;
+            }
+            const NodeClusterView view = buildNodeClusterView(clusters, nodeDag, nodeCount);
+            std::vector<uint32_t> order;
+            try
+            {
+                order = topoOrderForDag(view.succs);
+            }
+            catch (const std::exception &)
+            {
+                return false;
+            }
+            if (order.size() != view.members.size())
+            {
+                return false;
+            }
+            std::vector<std::vector<uint32_t>> out;
+            out.reserve(order.size());
+            for (const auto clusterId : order)
+            {
+                if (clusterId >= view.members.size())
+                {
+                    return false;
+                }
+                out.push_back(view.members[clusterId]);
+            }
+            clusters = std::move(out);
+            return true;
+        }
+
+        bool tryMergeNodeOut1(std::vector<std::vector<uint32_t>> &clusters,
+                              const std::vector<std::vector<uint32_t>> &nodeDag,
+                              std::size_t nodeCount,
+                              const std::vector<uint32_t> &nodeTopoPos,
+                              std::size_t maxNodes)
+        {
+            const auto view = buildNodeClusterView(clusters, nodeDag, nodeCount);
+            DisjointSet dsu(view.members.size());
+            std::vector<uint32_t> sizes(view.members.size(), 0);
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                sizes[id] = static_cast<uint32_t>(view.members[id].size());
+            }
+            bool changed = false;
+            for (std::size_t idx = view.members.size(); idx > 0; --idx)
+            {
+                const uint32_t id = static_cast<uint32_t>(idx - 1);
+                if (view.succs[id].size() != 1)
+                {
+                    continue;
+                }
+                uint32_t lhs = dsu.find(id);
+                uint32_t rhs = dsu.find(view.succs[id].front());
+                if (lhs == rhs || static_cast<std::size_t>(sizes[lhs] + sizes[rhs]) > maxNodes)
+                {
+                    continue;
+                }
+                if (dsu.unite(lhs, rhs))
+                {
+                    const uint32_t root = dsu.find(lhs);
+                    sizes[root] = sizes[lhs] + sizes[rhs];
+                    changed = true;
+                }
+            }
+            if (!changed)
+            {
+                return false;
+            }
+            std::unordered_map<uint32_t, uint32_t> rootToCluster;
+            std::vector<std::vector<uint32_t>> out;
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                const uint32_t root = dsu.find(id);
+                auto [it, inserted] = rootToCluster.emplace(root, static_cast<uint32_t>(out.size()));
+                if (inserted)
+                {
+                    out.push_back({});
+                }
+                out[it->second].insert(out[it->second].end(), view.members[id].begin(), view.members[id].end());
+            }
+            out = canonicalizeNodeClusters(std::move(out), nodeTopoPos);
+            if (!orderNodeClustersTopologically(out, nodeDag, nodeCount))
+            {
+                return false;
+            }
+            clusters = std::move(out);
+            return true;
+        }
+
+        bool tryMergeNodeIn1(std::vector<std::vector<uint32_t>> &clusters,
+                             const std::vector<std::vector<uint32_t>> &nodeDag,
+                             std::size_t nodeCount,
+                             const std::vector<uint32_t> &nodeTopoPos,
+                             std::size_t maxNodes)
+        {
+            const auto view = buildNodeClusterView(clusters, nodeDag, nodeCount);
+            DisjointSet dsu(view.members.size());
+            std::vector<uint32_t> sizes(view.members.size(), 0);
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                sizes[id] = static_cast<uint32_t>(view.members[id].size());
+            }
+            bool changed = false;
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                if (view.preds[id].size() != 1)
+                {
+                    continue;
+                }
+                uint32_t lhs = dsu.find(id);
+                uint32_t rhs = dsu.find(view.preds[id].front());
+                if (lhs == rhs || static_cast<std::size_t>(sizes[lhs] + sizes[rhs]) > maxNodes)
+                {
+                    continue;
+                }
+                if (dsu.unite(lhs, rhs))
+                {
+                    const uint32_t root = dsu.find(lhs);
+                    sizes[root] = sizes[lhs] + sizes[rhs];
+                    changed = true;
+                }
+            }
+            if (!changed)
+            {
+                return false;
+            }
+            std::unordered_map<uint32_t, uint32_t> rootToCluster;
+            std::vector<std::vector<uint32_t>> out;
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                const uint32_t root = dsu.find(id);
+                auto [it, inserted] = rootToCluster.emplace(root, static_cast<uint32_t>(out.size()));
+                if (inserted)
+                {
+                    out.push_back({});
+                }
+                out[it->second].insert(out[it->second].end(), view.members[id].begin(), view.members[id].end());
+            }
+            out = canonicalizeNodeClusters(std::move(out), nodeTopoPos);
+            if (!orderNodeClustersTopologically(out, nodeDag, nodeCount))
+            {
+                return false;
+            }
+            clusters = std::move(out);
+            return true;
+        }
+
+        std::vector<std::vector<uint32_t>> buildComputeSupernodeSegments(const NodeClusterView &view,
+                                                                         std::size_t maxNodes)
+        {
+            const std::size_t count = view.members.size();
+            std::vector<std::vector<uint32_t>> segments;
+            for (std::size_t begin = 0; begin < count;)
+            {
+                std::size_t accum = 0;
+                std::vector<uint32_t> segment;
+                for (; begin < count; ++begin)
+                {
+                    const std::size_t nextSize = view.members[begin].size();
+                    if (!segment.empty() && accum + nextSize > maxNodes)
+                    {
+                        break;
+                    }
+                    segment.push_back(static_cast<uint32_t>(begin));
+                    accum += nextSize;
+                    if (accum >= maxNodes)
+                    {
+                        ++begin;
+                        break;
+                    }
+                }
+                if (!segment.empty())
+                {
+                    segments.push_back(std::move(segment));
+                }
+            }
+            return segments;
+        }
+
+        std::vector<std::vector<uint32_t>> flattenNodeSegments(const NodeClusterView &view,
+                                                               const std::vector<std::vector<uint32_t>> &segments,
+                                                               const std::vector<uint32_t> &nodeTopoPos)
+        {
+            std::vector<std::vector<uint32_t>> out;
+            out.reserve(segments.size());
+            for (const auto &segment : segments)
+            {
+                std::vector<uint32_t> nodes;
+                for (const auto clusterId : segment)
+                {
+                    if (clusterId < view.members.size())
+                    {
+                        nodes.insert(nodes.end(), view.members[clusterId].begin(), view.members[clusterId].end());
+                    }
+                }
+                out.push_back(std::move(nodes));
+            }
+            for (auto &nodes : out)
+            {
+                std::sort(nodes.begin(),
+                          nodes.end(),
+                          [&](uint32_t lhs, uint32_t rhs)
+                          {
+                              const uint32_t lhsPos = lhs < nodeTopoPos.size() ? nodeTopoPos[lhs]
+                                                                               : kInvalidActivitySupernodeId;
+                              const uint32_t rhsPos = rhs < nodeTopoPos.size() ? nodeTopoPos[rhs]
+                                                                               : kInvalidActivitySupernodeId;
+                              if (lhsPos != rhsPos)
+                              {
+                                  return lhsPos < rhsPos;
+                              }
+                              return lhs < rhs;
+                          });
+            }
+            return out;
+        }
+
+        bool topoSortLocalOps(const wolvrix::lib::grh::Graph &graph,
+                              const std::vector<wolvrix::lib::grh::OperationId> &ops,
+                              std::vector<wolvrix::lib::grh::OperationId> &out,
+                              std::string &error)
+        {
+            out.clear();
+            if (ops.size() < 2)
+            {
+                out = ops;
+                return true;
+            }
+
+            std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> local;
+            local.reserve(ops.size());
+            for (const auto opId : ops)
+            {
+                local.insert(opId);
+            }
+
+            wolvrix::lib::toposort::TopoDag<wolvrix::lib::grh::OperationId,
+                                            wolvrix::lib::grh::OperationIdHash>
+                dag;
+            dag.reserveNodes(ops.size());
+            for (const auto opId : ops)
+            {
+                dag.addNode(opId);
+            }
+            for (const auto opId : ops)
+            {
+                for (const auto operand : graph.opOperands(opId))
+                {
+                    const auto defOp = graph.valueDef(operand);
+                    if (defOp.valid() && local.find(defOp) != local.end() && defOp != opId)
+                    {
+                        dag.addEdge(defOp, opId);
+                    }
+                }
+            }
+
+            try
+            {
+                const auto layers = dag.toposort();
+                out.reserve(ops.size());
+                for (const auto &layer : layers)
+                {
+                    std::vector<wolvrix::lib::grh::OperationId> ordered(layer.begin(), layer.end());
+                    std::sort(ordered.begin(),
+                              ordered.end(),
+                              [](const auto lhs, const auto rhs)
+                              {
+                                  return lhs.index < rhs.index;
+                              });
+                    out.insert(out.end(), ordered.begin(), ordered.end());
+                }
+                if (out.size() == ops.size())
+                {
+                    return true;
+                }
+                error = "activity-schedule local op topo failed: missing ops";
+                return false;
+            }
+            catch (const std::exception &ex)
+            {
+                std::ostringstream oss;
+                oss << "activity-schedule local op topo failed: " << ex.what()
+                    << " ops=" << ops.size();
+                const std::size_t limit = std::min<std::size_t>(ops.size(), 12);
+                oss << " sample=[";
+                for (std::size_t i = 0; i < limit; ++i)
+                {
+                    if (i != 0)
+                    {
+                        oss << ",";
+                    }
+                    oss << describeOp(graph, ops[i]);
+                }
+                if (ops.size() > limit)
+                {
+                    oss << ",...";
+                }
+                oss << "]";
+                error = oss.str();
+                return false;
+            }
+        }
+
+        bool buildComputeNodeRewrite(wolvrix::lib::grh::Graph &graph,
+                                     const ActivityScheduleOptions &options,
+                                     const ActivityOpData &opData,
+                                     std::vector<ActivityOpClass> &opClasses,
+                                     ComputeRewriteBuild &out,
+                                     std::string &error)
+        {
+            out = ComputeRewriteBuild{};
+            out.computeNodeOfOp.assign(opClasses.size(), kInvalidActivitySupernodeId);
+            ComputeNodeBuilder builder(graph, options, opClasses, out, error);
+
+            const std::size_t maxCommitOps = options.maxOpInCommitSupernode;
+            std::vector<uint32_t> sinkTopoPositions;
+            sinkTopoPositions.reserve(opData.topoOps.size());
+            for (uint32_t topoPos = 0; topoPos < opData.topoOps.size(); ++topoPos)
+            {
+                const auto opId = opData.topoOps[topoPos];
+                if (opId.index < opClasses.size() && opClasses[opId.index] == ActivityOpClass::Sink)
+                {
+                    sinkTopoPositions.push_back(topoPos);
+                }
+            }
+            WorkingPartition sinkPartition =
+                buildEventClusteredSinkPartition(graph, opData, sinkTopoPositions, maxCommitOps);
+            for (const auto &cluster : sinkPartition.clusters)
+            {
+                CommitNode commit;
+                for (const auto topoPos : cluster)
+                {
+                    const auto sinkOp = opData.topoOps[topoPos];
+                    commit.ops.push_back(sinkOp);
+                    for (const auto operand : graph.opOperands(sinkOp))
+                    {
+                        if (!vectorContainsValue(commit.inputValues, operand))
+                        {
+                            commit.inputValues.push_back(operand);
+                            ++out.stats.commitInputRootValues;
+                        }
+                    }
+                }
+                out.commitNodes.push_back(std::move(commit));
+            }
+
+            auto ensureRootValue = [&](wolvrix::lib::grh::ValueId value, bool commitRoot) {
+                const auto defOp = graph.valueDef(value);
+                if (!defOp.valid())
+                {
+                    return;
+                }
+                if (defOp.index >= opClasses.size())
+                {
+                    return;
+                }
+                const ActivityOpClass defClass = opClasses[defOp.index];
+                if (defClass == ActivityOpClass::Source)
+                {
+                    if (commitRoot)
+                    {
+                        ++out.stats.directSourceInputsToCommitSupernodes;
+                    }
+                    builder.ensureSourceOwnerNode(defOp);
+                    return;
+                }
+                if (defClass == ActivityOpClass::Sink)
+                {
+                    error = "activity-schedule compute root is defined by sink op value=" +
+                            std::to_string(value.index) + " def=" + describeOp(graph, defOp);
+                    return;
+                }
+                if (defClass == ActivityOpClass::Compute)
+                {
+                    const bool common = semanticConsumerCount(graph,
+                                                              value,
+                                                              opClasses,
+                                                              kInvalidActivitySupernodeId,
+                                                              out.computeNodeOfOp) > 1;
+                    builder.ensureComputeNodeForOp(defOp, common);
+                }
+            };
+
+            for (const auto &commit : out.commitNodes)
+            {
+                for (const auto input : commit.inputValues)
+                {
+                    ensureRootValue(input, true);
+                    if (!error.empty())
+                    {
+                        return false;
+                    }
+                }
+            }
+            for (const auto &port : graph.outputPorts())
+            {
+                ensureRootValue(port.value, false);
+                if (!error.empty())
+                {
+                    return false;
+                }
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                ensureRootValue(port.out, false);
+                if (!error.empty())
+                {
+                    return false;
+                }
+                ensureRootValue(port.oe, false);
+                if (!error.empty())
+                {
+                    return false;
+                }
+            }
+            for (const auto opId : opData.topoOps)
+            {
+                if (opId.index >= opClasses.size() || opClasses[opId.index] != ActivityOpClass::Compute)
+                {
+                    continue;
+                }
+                if (!graph.opResults(opId).empty())
+                {
+                    continue;
+                }
+                builder.ensureComputeNodeForOp(opId, false);
+                if (!error.empty())
+                {
+                    return false;
+                }
+            }
+
+            buildComputeDag(out, out.computeNodeOfOp, graph);
+            try
+            {
+                out.computeTopoOrder = topoOrderForDag(out.computeDag);
+            }
+            catch (const std::exception &ex)
+            {
+                error = std::string("activity-schedule compute-node topo failed: ") + ex.what();
+                return false;
+            }
+            out.stats.computeNodes = out.computeNodes.size();
+            out.stats.computeNodeOpsTotal = 0;
+            for (const auto &node : out.computeNodes)
+            {
+                out.stats.computeNodeOpsTotal += node.ops.size();
+            }
+            return true;
+        }
+
+        bool materializeComputeNodeSchedule(const wolvrix::lib::grh::Graph &graph,
+                                            const ActivityScheduleOptions &options,
+                                            const ComputeRewriteBuild &rewrite,
+                                            ActivityScheduleBuild &build,
+                                            ComputeNodeMaterializePerfStats *perf,
+                                            std::string &error)
+        {
+            const std::size_t maxComputeNodes = options.maxComputeNodeInComputeSupernode;
+            const auto initClustersStart = std::chrono::steady_clock::now();
+            std::vector<uint32_t> nodeTopoPos(rewrite.computeNodes.size(), kInvalidActivitySupernodeId);
+            for (uint32_t pos = 0; pos < rewrite.computeTopoOrder.size(); ++pos)
+            {
+                const uint32_t node = rewrite.computeTopoOrder[pos];
+                if (node < nodeTopoPos.size())
+                {
+                    nodeTopoPos[node] = pos;
+                }
+            }
+            std::vector<std::vector<uint32_t>> clusters;
+            clusters.reserve(rewrite.computeNodes.size());
+            for (const auto node : rewrite.computeTopoOrder)
+            {
+                clusters.push_back(std::vector<uint32_t>{node});
+            }
+            clusters = canonicalizeNodeClusters(std::move(clusters), nodeTopoPos);
+            if (perf)
+            {
+                perf->initClustersMs = elapsedMs(initClustersStart);
+                perf->clustersBeforeCoarsen = clusters.size();
+            }
+
+            const auto topoBeforeStart = std::chrono::steady_clock::now();
+            if (!orderNodeClustersTopologically(clusters, rewrite.computeDag, rewrite.computeNodes.size()))
+            {
+                error = "activity-schedule compute-node cluster topo failed before coarsen";
+                return false;
+            }
+            if (perf)
+            {
+                perf->topoBeforeCoarsenMs = elapsedMs(topoBeforeStart);
+            }
+
+            const auto coarsenStart = std::chrono::steady_clock::now();
+            if (options.enableCoarsen)
+            {
+                bool changed = true;
+                while (changed)
+                {
+                    const auto iterStart = std::chrono::steady_clock::now();
+                    const std::size_t clustersBeforeIter = clusters.size();
+                    changed = false;
+                    bool out1Changed = false;
+                    bool in1Changed = false;
+                    if (options.enableChainMerge)
+                    {
+                        const std::size_t clustersBeforeOut1 = clusters.size();
+                        out1Changed = tryMergeNodeOut1(clusters,
+                                                       rewrite.computeDag,
+                                                       rewrite.computeNodes.size(),
+                                                       nodeTopoPos,
+                                                       maxComputeNodes);
+                        if (out1Changed && perf)
+                        {
+                            perf->coarsenOut1Merges += clustersBeforeOut1 >= clusters.size()
+                                                           ? clustersBeforeOut1 - clusters.size()
+                                                           : 0;
+                        }
+                        changed = out1Changed || changed;
+
+                        const std::size_t clustersBeforeIn1 = clusters.size();
+                        in1Changed = tryMergeNodeIn1(clusters,
+                                                     rewrite.computeDag,
+                                                     rewrite.computeNodes.size(),
+                                                     nodeTopoPos,
+                                                     maxComputeNodes);
+                        if (in1Changed && perf)
+                        {
+                            perf->coarsenIn1Merges += clustersBeforeIn1 >= clusters.size()
+                                                          ? clustersBeforeIn1 - clusters.size()
+                                                          : 0;
+                        }
+                        changed = in1Changed || changed;
+                    }
+                    if (perf)
+                    {
+                        const std::size_t clustersAfterIter = clusters.size();
+                        const std::size_t clusterDelta =
+                            clustersBeforeIter >= clustersAfterIter ? clustersBeforeIter - clustersAfterIter : 0;
+                        ++perf->coarsenIterations;
+                        perf->coarsenIterationStats.push_back({
+                            .iteration = perf->coarsenIterations,
+                            .clusters = clustersAfterIter,
+                            .clusterDelta = clusterDelta,
+                            .changed = changed,
+                            .out1Changed = out1Changed,
+                            .in1Changed = in1Changed,
+                            .elapsedMs = elapsedMs(iterStart),
+                        });
+                    }
+                }
+            }
+            if (perf)
+            {
+                perf->coarsenMs = elapsedMs(coarsenStart);
+                perf->clustersAfterCoarsen = clusters.size();
+            }
+
+            const auto topoAfterStart = std::chrono::steady_clock::now();
+            if (!orderNodeClustersTopologically(clusters, rewrite.computeDag, rewrite.computeNodes.size()))
+            {
+                error = "activity-schedule compute-node cluster topo failed after coarsen";
+                return false;
+            }
+            if (perf)
+            {
+                perf->topoAfterCoarsenMs = elapsedMs(topoAfterStart);
+            }
+
+            const auto buildClusterViewStart = std::chrono::steady_clock::now();
+            const NodeClusterView clusterView =
+                buildNodeClusterView(clusters, rewrite.computeDag, rewrite.computeNodes.size());
+            if (perf)
+            {
+                perf->buildClusterViewMs = elapsedMs(buildClusterViewStart);
+            }
+
+            const auto dpSegmentStart = std::chrono::steady_clock::now();
+            const auto segments = buildComputeSupernodeSegments(clusterView, maxComputeNodes);
+            if (perf)
+            {
+                perf->dpSegmentMs = elapsedMs(dpSegmentStart);
+                perf->segments = segments.size();
+            }
+
+            const auto flattenSegmentsStart = std::chrono::steady_clock::now();
+            const auto computeSupernodes = flattenNodeSegments(clusterView, segments, nodeTopoPos);
+            if (perf)
+            {
+                perf->flattenSegmentsMs = elapsedMs(flattenSegmentsStart);
+                perf->computeSupernodes = computeSupernodes.size();
+            }
+
+            const auto buildFinalSupernodesStart = std::chrono::steady_clock::now();
+            build = ActivityScheduleBuild{};
+            build.supernodeToOps.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
+            build.supernodeKinds.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
+            std::vector<std::vector<uint32_t>> computeNodesBySupernode;
+            computeNodesBySupernode.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
+            std::vector<uint32_t> finalSupernodeByComputeNode(rewrite.computeNodes.size(), kInvalidActivitySupernodeId);
+            for (uint32_t supernodeId = 0; supernodeId < computeSupernodes.size(); ++supernodeId)
+            {
+                std::vector<wolvrix::lib::grh::OperationId> ops;
+                computeNodesBySupernode.push_back(computeSupernodes[supernodeId]);
+                for (const auto computeNodeId : computeSupernodes[supernodeId])
+                {
+                    if (computeNodeId >= rewrite.computeNodes.size())
+                    {
+                        continue;
+                    }
+                    finalSupernodeByComputeNode[computeNodeId] = supernodeId;
+                    const auto &nodeOps = rewrite.computeNodes[computeNodeId].ops;
+                    ops.insert(ops.end(), nodeOps.begin(), nodeOps.end());
+                }
+                std::vector<wolvrix::lib::grh::OperationId> orderedOps;
+                if (!topoSortLocalOps(graph, ops, orderedOps, error))
+                {
+                    return false;
+                }
+                build.supernodeToOps.push_back(std::move(orderedOps));
+                build.supernodeKinds.push_back(ActivityScheduleSupernodeKind::Compute);
+            }
+            const uint32_t commitBase = static_cast<uint32_t>(build.supernodeToOps.size());
+            for (const auto &commit : rewrite.commitNodes)
+            {
+                build.supernodeToOps.push_back(commit.ops);
+                build.supernodeKinds.push_back(ActivityScheduleSupernodeKind::Commit);
+                computeNodesBySupernode.push_back({});
+            }
+            if (perf)
+            {
+                perf->buildFinalSupernodesMs = elapsedMs(buildFinalSupernodesStart);
+            }
+
+            const auto buildFinalDagStart = std::chrono::steady_clock::now();
+            std::size_t maxOpIndex = 0;
+            for (const auto opId : graph.operations())
+            {
+                maxOpIndex = std::max<std::size_t>(maxOpIndex, opId.index);
+            }
+            build.opToSupernode.assign(maxOpIndex, kInvalidActivitySupernodeId);
+            std::vector<uint32_t> supernodeOfOp(maxOpIndex + 1, kInvalidActivitySupernodeId);
+            for (uint32_t supernodeId = 0; supernodeId < build.supernodeToOps.size(); ++supernodeId)
+            {
+                for (const auto opId : build.supernodeToOps[supernodeId])
+                {
+                    if (opId.index == 0 || opId.index > maxOpIndex)
+                    {
+                        continue;
+                    }
+                    build.opToSupernode[opId.index - 1] = supernodeId;
+                    supernodeOfOp[opId.index] = supernodeId;
+                }
+            }
+
+            build.dag.assign(build.supernodeToOps.size(), {});
+            if (!graph.values().empty())
+            {
+                build.valueFanout.assign(graph.values().back().index, {});
+            }
+            std::unordered_set<uint64_t> seenEdges;
+            for (uint32_t supernodeId = 0; supernodeId < build.supernodeToOps.size(); ++supernodeId)
+            {
+                for (const auto toOpId : build.supernodeToOps[supernodeId])
+                {
+                    const auto toOp = graph.getOperation(toOpId);
+                    for (const auto operand : toOp.operands())
+                    {
+                        const auto defOp = graph.valueDef(operand);
+                        if (!defOp.valid() || defOp.index >= supernodeOfOp.size())
+                        {
+                            continue;
+                        }
+                        const uint32_t from = supernodeOfOp[defOp.index];
+                        const uint32_t to = supernodeId;
+                        if (from == kInvalidActivitySupernodeId || from == to)
+                        {
+                            continue;
+                        }
+                        if (from < build.supernodeKinds.size() &&
+                            build.supernodeKinds[from] == ActivityScheduleSupernodeKind::Commit)
+                        {
+                            continue;
+                        }
+                        const uint64_t packed = (static_cast<uint64_t>(from) << 32) | to;
+                        if (seenEdges.insert(packed).second)
+                        {
+                            build.dag[from].push_back(to);
+                        }
+                        if (operand.index > 0 && operand.index <= build.valueFanout.size())
+                        {
+                            build.valueFanout[operand.index - 1].push_back(to);
+                        }
+                    }
+                }
+            }
+            for (auto &succs : build.dag)
+            {
+                std::sort(succs.begin(), succs.end());
+                succs.erase(std::unique(succs.begin(), succs.end()), succs.end());
+            }
+            for (auto &fanout : build.valueFanout)
+            {
+                std::sort(fanout.begin(), fanout.end());
+                fanout.erase(std::unique(fanout.begin(), fanout.end()), fanout.end());
+            }
+            if (perf)
+            {
+                perf->buildFinalDagMs = elapsedMs(buildFinalDagStart);
+            }
+
+            const auto buildStateReadSetsStart = std::chrono::steady_clock::now();
+            for (uint32_t supernodeId = 0; supernodeId < build.supernodeToOps.size(); ++supernodeId)
+            {
+                if (supernodeId < build.supernodeKinds.size() &&
+                    build.supernodeKinds[supernodeId] == ActivityScheduleSupernodeKind::Commit)
+                {
+                    continue;
+                }
+                for (const auto opId : build.supernodeToOps[supernodeId])
+                {
+                    const auto stateSymbol = stateSymbolForReadOp(graph.getOperation(opId));
+                    if (stateSymbol && !stateSymbol->empty())
+                    {
+                        build.stateReadSupernodes[*stateSymbol].push_back(supernodeId);
+                    }
+                }
+            }
+            for (auto &[_, supernodes] : build.stateReadSupernodes)
+            {
+                std::sort(supernodes.begin(), supernodes.end());
+                supernodes.erase(std::unique(supernodes.begin(), supernodes.end()), supernodes.end());
+            }
+            if (perf)
+            {
+                perf->buildStateReadSetsMs = elapsedMs(buildStateReadSetsStart);
+            }
+
+            const auto finalTopoStart = std::chrono::steady_clock::now();
+            try
+            {
+                build.topoOrder = topoOrderForDag(build.dag);
+            }
+            catch (const std::exception &ex)
+            {
+                error = std::string("activity-schedule final topo failed: ") + ex.what() + " " +
+                        describeFinalScheduleCycle(graph,
+                                                   rewrite,
+                                                   build,
+                                                   computeNodesBySupernode,
+                                                   supernodeOfOp);
+                return false;
+            }
+            if (build.topoOrder.size() != build.supernodeToOps.size())
+            {
+                error = "activity-schedule final topo failed: missing supernodes";
+                return false;
+            }
+            if (perf)
+            {
+                perf->finalTopoMs = elapsedMs(finalTopoStart);
+            }
+            (void)commitBase;
+            return true;
+        }
+
     } // namespace
 
     ActivitySchedulePass::ActivitySchedulePass()
@@ -2704,26 +3908,35 @@ namespace wolvrix::lib::transform
             result.failed = true;
             return result;
         }
-        if (options_.supernodeMaxSize == 0)
+
+        const std::size_t maxComputeNodes = options_.maxComputeNodeInComputeSupernode;
+        const std::size_t maxCommitOps = options_.maxOpInCommitSupernode;
+        if (maxComputeNodes == 0)
         {
-            error("activity-schedule supernode_max_size must be >= 1");
+            error("activity-schedule max_compute_node_in_compute_supernode must be >= 1");
             result.failed = true;
             return result;
         }
-        if (options_.refineMaxIter == 0)
+        if (maxCommitOps == 0)
         {
-            error("activity-schedule refine_max_iter must be >= 1");
+            error("activity-schedule max_op_in_commit_supernode must be >= 1");
             result.failed = true;
             return result;
         }
+        if (options_.maxOpInComputeNode == 0)
+        {
+            error("activity-schedule max_op_in_compute_node must be >= 1");
+            result.failed = true;
+            return result;
+        }
+        options_.maxComputeNodeInComputeSupernode = maxComputeNodes;
+        options_.maxOpInCommitSupernode = maxCommitOps;
         if (options_.costModel != "edge-cut")
         {
             error("activity-schedule only supports -cost-model=edge-cut");
             result.failed = true;
             return result;
         }
-        const std::size_t maxSinkSupernodeOp =
-            options_.maxSinkSupernodeOp == 0 ? options_.supernodeMaxSize : options_.maxSinkSupernodeOp;
 
         std::string resolveError;
         const std::optional<std::string> targetGraphName =
@@ -2757,15 +3970,10 @@ namespace wolvrix::lib::transform
                           std::string(wolvrix::lib::grh::toString(op.kind())));
                 result.failed = true;
             }
-            if (graph->operationSymbol(opId).valid())
+            if (!graph->operationSymbol(opId).valid() && isPartitionableOpKind(op.kind()))
             {
-                continue;
+                opsNeedingSymbol.push_back(opId);
             }
-            if (!isPartitionableOpKind(op.kind()))
-            {
-                continue;
-            }
-            opsNeedingSymbol.push_back(opId);
         }
         if (result.failed)
         {
@@ -2778,11 +3986,11 @@ namespace wolvrix::lib::transform
             graphChanged = true;
         }
 
-        const auto seedBuildStart = std::chrono::steady_clock::now();
+        const auto buildOpDataStart = std::chrono::steady_clock::now();
         graph->freeze();
         std::string buildError;
         ActivityOpData opData = buildActivityOpData(*graph, buildError);
-        const std::uint64_t buildOpDataMs = elapsedMs(seedBuildStart);
+        const std::uint64_t buildOpDataMs = elapsedMs(buildOpDataStart);
         if (!buildError.empty())
         {
             error(*graph, buildError);
@@ -2790,323 +3998,129 @@ namespace wolvrix::lib::transform
             return result;
         }
 
-        const auto sinkPartitionStart = std::chrono::steady_clock::now();
-        const std::vector<uint32_t> sinkTopoPositions = collectSinkTopoPositions(*graph, opData);
-        WorkingPartition sinkPartition =
-            buildEventClusteredSinkPartition(*graph, opData, sinkTopoPositions, maxSinkSupernodeOp);
-        sinkPartition = canonicalizePartition(sinkPartition, opData);
-        const std::uint64_t sinkPartitionMs = elapsedMs(sinkPartitionStart);
-        std::vector<uint8_t> sinkTopoMask(opData.topoOps.size(), 0U);
-        markCoveredTopoPositions(sinkPartition, sinkTopoMask);
-
-        const std::size_t sinkCoveredOpCount =
-            std::accumulate(sinkPartition.clusters.begin(),
-                            sinkPartition.clusters.end(),
-                            std::size_t{0},
-                            [](std::size_t acc, const std::vector<uint32_t> &cluster)
-                            {
-                                return acc + cluster.size();
-                            });
-        const std::size_t residualOpCount =
-            std::count(sinkTopoMask.begin(), sinkTopoMask.end(), static_cast<uint8_t>(0U));
-
-        logInfo("activity-schedule timing: special_partition sink_supernodes=" +
-                std::to_string(sinkPartition.clusters.size()) +
-                " sink_ops=" + std::to_string(sinkCoveredOpCount) +
-                " sink_chunk_limit=" + std::to_string(maxSinkSupernodeOp) +
-                " residual_ops=" + std::to_string(residualOpCount) +
-                " sink_elapsed_ms=" + std::to_string(sinkPartitionMs));
-
-        const auto seedPartitionStart = std::chrono::steady_clock::now();
-        WorkingPartition partition = buildInitialPartition(opData, sinkPartition);
-        partition = canonicalizePartition(partition, opData);
-        if (const std::string cycle = describeWorkingPartitionCycle(partition, opData); !cycle.empty())
-        {
-            logInfo("activity-schedule debug: initial_partition_cycle " + cycle);
-        }
-        const std::uint64_t seedPartitionMs = elapsedMs(seedPartitionStart);
-        const std::size_t seedSupernodeCount = partition.clusters.size();
-
-        StateReadTailAbsorbStats stateReadTailAbsorbStats;
-        std::uint64_t stateReadTailAbsorbMs = 0;
-        std::uint64_t rebuildAfterStateReadTailAbsorbMs = 0;
-        std::size_t stateReadTailAbsorbTargetSupernodes = 0;
-        if (options_.enableStateReadTailAbsorb && !partition.clusters.empty())
-        {
-            const auto absorbStart = std::chrono::steady_clock::now();
-            const WorkingPartition targetPartition =
-                buildStateReadTailAbsorbTargetPartition(*graph, partition, opData, options_);
-            stateReadTailAbsorbTargetSupernodes = targetPartition.clusters.size();
-            SymbolPartition targetSymbolPartition = buildSymbolPartition(targetPartition, opData);
-            if (runStateReadTailAbsorbPhase(*graph,
-                                            targetSymbolPartition,
-                                            options_.stateReadTailAbsorbMaxTargets,
-                                            stateReadTailAbsorbStats,
-                                            buildError))
-            {
-                graphChanged = true;
-                graph->freeze();
-                const auto rebuildStart = std::chrono::steady_clock::now();
-                opData = buildActivityOpData(*graph, buildError);
-                rebuildAfterStateReadTailAbsorbMs = elapsedMs(rebuildStart);
-                if (!buildError.empty())
-                {
-                    error(*graph, buildError);
-                    result.failed = true;
-                    return result;
-                }
-                partition = rebuildWorkingPartitionFromSymbolPartition(targetSymbolPartition, opData);
-                partition = canonicalizePartition(partition, opData);
-                if (const std::string cycle = describeWorkingPartitionCycle(partition, opData); !cycle.empty())
-                {
-                    logInfo("activity-schedule debug: post_state_read_tail_absorb_cycle " + cycle);
-                }
-            }
-            stateReadTailAbsorbMs = elapsedMs(absorbStart);
-        }
-
-        std::uint64_t coarsenMs = 0;
-        std::size_t coarsenIterations = 0;
-        if (!partition.clusters.empty() && options_.enableCoarsen)
-        {
-            const auto coarsenStart = std::chrono::steady_clock::now();
-            std::size_t tailIterations = 0;
-            bool changed = true;
-            while (changed)
-            {
-                ++coarsenIterations;
-                changed = false;
-                const auto iterStart = std::chrono::steady_clock::now();
-                const std::size_t clustersBeforeIter = partition.clusters.size();
-                bool out1Changed = false;
-                bool in1Changed = false;
-                bool siblingChanged = false;
-                bool forwardChanged = false;
-                if (options_.enableChainMerge)
-                {
-                    out1Changed = tryMergeOut1(partition, opData, options_.supernodeMaxSize);
-                    in1Changed = tryMergeIn1(partition, opData, options_.supernodeMaxSize);
-                    changed = out1Changed || in1Changed || changed;
-                }
-                if (options_.enableSiblingMerge)
-                {
-                    siblingChanged = tryMergeSiblings(partition, opData, options_.supernodeMaxSize);
-                    changed = siblingChanged || changed;
-                }
-                if (options_.enableForwardMerge)
-                {
-                    forwardChanged = tryMergeForwarders(partition, *graph, opData, options_.supernodeMaxSize);
-                    changed = forwardChanged || changed;
-                }
-                const std::size_t clustersAfterIter = partition.clusters.size();
-                const std::size_t clusterDelta =
-                    clustersBeforeIter >= clustersAfterIter ? (clustersBeforeIter - clustersAfterIter) : 0;
-                logInfo("activity-schedule timing: coarsen_iter=" + std::to_string(coarsenIterations) +
-                        " clusters=" + std::to_string(partition.clusters.size()) +
-                        " cluster_delta=" + std::to_string(clusterDelta) +
-                        " changed=" + (changed ? std::string("true") : std::string("false")) +
-                        " out1=" + (out1Changed ? std::string("1") : std::string("0")) +
-                        " in1=" + (in1Changed ? std::string("1") : std::string("0")) +
-                        " siblings=" + (siblingChanged ? std::string("1") : std::string("0")) +
-                        " forward=" + (forwardChanged ? std::string("1") : std::string("0")) +
-                        " elapsed_ms=" + std::to_string(elapsedMs(iterStart)));
-
-                const bool smallDeltaTail =
-                    clustersBeforeIter >= kCoarsenTailLargeClusterThreshold &&
-                    clusterDelta < kCoarsenTailMaxClusterDeltaExclusive;
-                if (smallDeltaTail)
-                {
-                    ++tailIterations;
-                }
-                else
-                {
-                    tailIterations = 0;
-                }
-                if (tailIterations >= kCoarsenTailMaxConsecutiveIters)
-                {
-                    logInfo("activity-schedule timing: coarsen_tail_stop clusters=" +
-                            std::to_string(partition.clusters.size()) +
-                            " tail_iters=" + std::to_string(tailIterations) +
-                            " cluster_delta=" + std::to_string(clusterDelta) +
-                            " threshold_exclusive=" + std::to_string(kCoarsenTailMaxClusterDeltaExclusive));
-                    break;
-                }
-            }
-            coarsenMs = elapsedMs(coarsenStart);
-        }
-
-        const auto dpPrepStart = std::chrono::steady_clock::now();
-        partition = canonicalizePartition(partition, opData);
-        if (const std::string cycle = describeWorkingPartitionCycle(partition, opData); !cycle.empty())
-        {
-            logInfo("activity-schedule debug: coarsen_partition_cycle " + cycle);
-        }
-        const std::size_t coarseSupernodeCount = partition.clusters.size();
-        ClusterView coarseView = buildClusterView(partition, opData);
-        ClusterView dpView = buildTopoOrderedClusterView(coarseView);
-        const std::uint64_t dpPrepMs = elapsedMs(dpPrepStart);
-        const auto dpStart = std::chrono::steady_clock::now();
-        std::vector<std::vector<uint32_t>> segments = buildDpSegments(dpView, options_.supernodeMaxSize);
-        const std::uint64_t dpMs = elapsedMs(dpStart);
-        const std::size_t dpSupernodeCount = segments.size();
-        std::uint64_t refineMs = 0;
-        if (options_.enableRefine)
-        {
-            const auto refineStart = std::chrono::steady_clock::now();
-            segments = refineSegments(dpView, std::move(segments), options_.supernodeMaxSize, options_.refineMaxIter);
-            refineMs = elapsedMs(refineStart);
-        }
-        const auto materializeSegmentsStart = std::chrono::steady_clock::now();
-        partition = materializeSegments(dpView, segments);
-        partition = canonicalizePartition(partition, opData);
-        markSinkOnlyClustersFixedBoundary(partition, opData);
-        if (const std::string cycle = describeWorkingPartitionCycle(partition, opData); !cycle.empty())
-        {
-            logInfo("activity-schedule debug: post_dp_partition_cycle " + cycle);
-        }
-        const std::uint64_t materializeSegmentsMs = elapsedMs(materializeSegmentsStart);
-
-        const auto symbolPartitionStart = std::chrono::steady_clock::now();
-        SymbolPartition symbolPartition = buildSymbolPartition(partition, opData);
-        const std::uint64_t symbolPartitionMs = elapsedMs(symbolPartitionStart);
-        ReplicationStats replicationStats;
-        ReplicationPerfStats replicationPerf;
-        std::uint64_t replicationMs = 0;
-        if (options_.enableReplication)
-        {
-            const auto replicationStart = std::chrono::steady_clock::now();
-            if (runReplicationPhase(*graph,
-                                    symbolPartition,
-                                    opData,
-                                    options_.replicationMaxCost,
-                                    options_.replicationMaxTargets,
-                                    replicationStats,
-                                    &replicationPerf,
-                                    buildError))
-            {
-                graphChanged = true;
-            }
-            replicationMs = elapsedMs(replicationStart);
-            if (!buildError.empty())
-            {
-                error(*graph, buildError);
-                result.failed = true;
-                return result;
-            }
-        }
-
-        const auto freezeAfterReplicationStart = std::chrono::steady_clock::now();
-        graph->freeze();
-        const std::uint64_t freezeAfterReplicationMs = elapsedMs(freezeAfterReplicationStart);
-
-        ActivityScheduleBuild build;
-        ActivityOpData finalOpData;
-        std::vector<uint32_t> supernodeOfOp;
-        FinalMaterializePerfStats finalPerf;
-        const auto finalMaterializeStart = std::chrono::steady_clock::now();
-        if (!materializeFinalPartition(*graph, symbolPartition, finalOpData, build, supernodeOfOp, &finalPerf, buildError))
+        std::vector<ActivityOpClass> opClasses = buildOpClasses(*graph, opData.maxOpIndex);
+        ComputeRewriteBuild rewrite;
+        const auto computeNodeStart = std::chrono::steady_clock::now();
+        if (!buildComputeNodeRewrite(*graph, options_, opData, opClasses, rewrite, buildError))
         {
             error(*graph, buildError);
             result.failed = true;
             return result;
         }
-        const std::uint64_t finalMaterializeMs = elapsedMs(finalMaterializeStart);
+        const std::uint64_t computeNodeMs = elapsedMs(computeNodeStart);
+        if (rewrite.stats.sourceClonesInComputeNodes != 0)
+        {
+            graphChanged = true;
+        }
+
+        const auto freezeStart = std::chrono::steady_clock::now();
+        graph->freeze();
+        const std::uint64_t freezeMs = elapsedMs(freezeStart);
+
+        ActivityScheduleBuild build;
+        ComputeNodeMaterializePerfStats materializePerf;
+        const auto materializeStart = std::chrono::steady_clock::now();
+        if (!materializeComputeNodeSchedule(*graph, options_, rewrite, build, &materializePerf, buildError))
+        {
+            error(*graph, buildError);
+            result.failed = true;
+            return result;
+        }
+        const std::uint64_t materializeMs = elapsedMs(materializeStart);
 
         const std::string keyPrefix = options_.path + ".activity_schedule.";
         const auto exportStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "supernode_to_ops",
                         build.supernodeToOps,
                         "activity-schedule.supernode-to-ops");
-        const std::uint64_t exportSupernodeToOpsMs = elapsedMs(exportStart);
-        const auto exportOpToSupernodeStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "op_to_supernode",
                         build.opToSupernode,
                         "activity-schedule.op-to-supernode");
-        const std::uint64_t exportOpToSupernodeMs = elapsedMs(exportOpToSupernodeStart);
-        const auto exportDagStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "dag", build.dag, "activity-schedule.dag");
-        const std::uint64_t exportDagMs = elapsedMs(exportDagStart);
-        const auto exportValueFanoutStart = std::chrono::steady_clock::now();
+        setSessionValue(keyPrefix + "supernode_kind",
+                        build.supernodeKinds,
+                        "activity-schedule.supernode-kind");
         setSessionValue(keyPrefix + "value_fanout", build.valueFanout, "activity-schedule.value-fanout");
-        const std::uint64_t exportValueFanoutMs = elapsedMs(exportValueFanoutStart);
-        const auto exportTopoOrderStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "topo_order", build.topoOrder, "activity-schedule.topo-order");
-        const std::uint64_t exportTopoOrderMs = elapsedMs(exportTopoOrderStart);
-        const auto exportStateReadStart = std::chrono::steady_clock::now();
         setSessionValue(keyPrefix + "state_read_supernodes",
                         build.stateReadSupernodes,
                         "activity-schedule.state-read-supernodes");
-        const std::uint64_t exportStateReadMs = elapsedMs(exportStateReadStart);
-        const std::uint64_t exportTotalMs = elapsedMs(exportStart);
+        const std::uint64_t exportMs = elapsedMs(exportStart);
+
+        const std::size_t computeSupernodes =
+            std::count(build.supernodeKinds.begin(),
+                       build.supernodeKinds.end(),
+                       ActivityScheduleSupernodeKind::Compute);
+        const std::size_t commitSupernodes =
+            std::count(build.supernodeKinds.begin(),
+                       build.supernodeKinds.end(),
+                       ActivityScheduleSupernodeKind::Commit);
 
         logInfo("activity-schedule timing(ms): build_op_data=" + std::to_string(buildOpDataMs) +
-                " sink_partition=" + std::to_string(sinkPartitionMs) +
-                " seed_partition=" + std::to_string(seedPartitionMs) +
-                " state_read_tail_absorb=" + std::to_string(stateReadTailAbsorbMs) +
-                " rebuild_after_state_read_tail_absorb=" + std::to_string(rebuildAfterStateReadTailAbsorbMs) +
-                " coarsen=" + std::to_string(coarsenMs) +
-                " dp_prep=" + std::to_string(dpPrepMs) +
-                " dp=" + std::to_string(dpMs) +
-                " refine=" + std::to_string(refineMs) +
-                " materialize_segments=" + std::to_string(materializeSegmentsMs) +
-                " symbol_partition=" + std::to_string(symbolPartitionMs) +
-                " replication=" + std::to_string(replicationMs) +
-                " freeze_after_replication=" + std::to_string(freezeAfterReplicationMs) +
-                " final_materialize=" + std::to_string(finalMaterializeMs) +
-                " export_session=" + std::to_string(exportTotalMs) +
+                " compute_node_build=" + std::to_string(computeNodeMs) +
+                " freeze_after_compute_node=" + std::to_string(freezeMs) +
+                " final_materialize=" + std::to_string(materializeMs) +
+                " export_session=" + std::to_string(exportMs) +
                 " total=" + std::to_string(elapsedMs(totalStart)));
-        logInfo("activity-schedule timing detail: coarsen_iters=" + std::to_string(coarsenIterations) +
+        logInfo("activity-schedule compute-node materialize timing(ms): init_clusters=" +
+                std::to_string(materializePerf.initClustersMs) +
+                " topo_before_coarsen=" + std::to_string(materializePerf.topoBeforeCoarsenMs) +
+                " coarsen=" + std::to_string(materializePerf.coarsenMs) +
+                " topo_after_coarsen=" + std::to_string(materializePerf.topoAfterCoarsenMs) +
+                " build_cluster_view=" + std::to_string(materializePerf.buildClusterViewMs) +
+                " dp_segment=" + std::to_string(materializePerf.dpSegmentMs) +
+                " flatten_segments=" + std::to_string(materializePerf.flattenSegmentsMs) +
+                " build_final_supernodes=" + std::to_string(materializePerf.buildFinalSupernodesMs) +
+                " build_final_dag=" + std::to_string(materializePerf.buildFinalDagMs) +
+                " build_state_read_sets=" + std::to_string(materializePerf.buildStateReadSetsMs) +
+                " final_topo=" + std::to_string(materializePerf.finalTopoMs));
+        logInfo("activity-schedule compute-node coarsen detail: enabled=" +
+                std::string(options_.enableCoarsen ? "true" : "false") +
+                " chain_merge=" + std::string(options_.enableChainMerge ? "true" : "false") +
+                " iterations=" + std::to_string(materializePerf.coarsenIterations) +
+                " out1_merges=" + std::to_string(materializePerf.coarsenOut1Merges) +
+                " in1_merges=" + std::to_string(materializePerf.coarsenIn1Merges) +
+                " clusters_before=" + std::to_string(materializePerf.clustersBeforeCoarsen) +
+                " clusters_after=" + std::to_string(materializePerf.clustersAfterCoarsen) +
+                " segments=" + std::to_string(materializePerf.segments) +
+                " compute_supernodes=" + std::to_string(materializePerf.computeSupernodes));
+        for (const auto &iter : materializePerf.coarsenIterationStats)
+        {
+            logInfo("activity-schedule timing: compute_node_coarsen_iter=" +
+                    std::to_string(iter.iteration) +
+                    " clusters=" + std::to_string(iter.clusters) +
+                    " cluster_delta=" + std::to_string(iter.clusterDelta) +
+                    " changed=" + (iter.changed ? std::string("true") : std::string("false")) +
+                    " out1=" + (iter.out1Changed ? std::string("1") : std::string("0")) +
+                    " in1=" + (iter.in1Changed ? std::string("1") : std::string("0")) +
+                    " elapsed_ms=" + std::to_string(iter.elapsedMs));
+        }
+        logInfo("activity-schedule timing detail: compute_nodes=" +
+                std::to_string(rewrite.stats.computeNodes) +
+                " compute_node_ops_total=" + std::to_string(rewrite.stats.computeNodeOpsTotal) +
+                " source_clones_in_compute_nodes=" +
+                std::to_string(rewrite.stats.sourceClonesInComputeNodes) +
+                " direct_source_inputs_to_commit_supernodes=" +
+                std::to_string(rewrite.stats.directSourceInputsToCommitSupernodes) +
+                " common_expr_compute_nodes=" + std::to_string(rewrite.stats.commonExprComputeNodes) +
+                " compute_node_boundary_values=" +
+                std::to_string(rewrite.stats.computeNodeBoundaryValues) +
+                " commit_input_root_values=" + std::to_string(rewrite.stats.commitInputRootValues) +
+                " compute_supernodes=" + std::to_string(computeSupernodes) +
+                " commit_supernodes=" + std::to_string(commitSupernodes) +
                 " topo_edges=" + std::to_string(opData.topoEdges.size()) +
-                " final_topo_edges=" + std::to_string(finalOpData.topoEdges.size()) +
                 " graph_ops=" + std::to_string(graph->operations().size()) +
                 " graph_values=" + std::to_string(graph->values().size()));
-        logInfo("activity-schedule timing state_read_tail_absorb: target_supernodes=" +
-                std::to_string(stateReadTailAbsorbTargetSupernodes) +
-                " cloned=" + std::to_string(stateReadTailAbsorbStats.clonedOps) +
-                " erased=" + std::to_string(stateReadTailAbsorbStats.erasedOps) +
-                " kept_observable=" + std::to_string(stateReadTailAbsorbStats.keptObservableReads) +
-                " kept_local=" + std::to_string(stateReadTailAbsorbStats.keptLocalReads) +
-                " skipped_too_many_targets=" + std::to_string(stateReadTailAbsorbStats.skippedTooManyTargets));
-        logInfo("activity-schedule timing replication(ms): collect_observable=" +
-                std::to_string(replicationPerf.collectObservableMs) +
-                " build_symbol_map=" + std::to_string(replicationPerf.buildSymbolMapMs) +
-                " scan_and_clone=" + std::to_string(replicationPerf.scanAndCloneMs) +
-                " scanned_ops=" + std::to_string(replicationPerf.scannedOps) +
-                " candidate_ops=" + std::to_string(replicationPerf.candidateOps) +
-                " user_edges_visited=" + std::to_string(replicationPerf.userEdgesVisited) +
-                " target_buckets=" + std::to_string(replicationPerf.targetBuckets));
-        logInfo("activity-schedule timing final_materialize(ms): rebuild_op_data=" +
-                std::to_string(finalPerf.rebuildOpDataMs) +
-                " map_live_ops=" + std::to_string(finalPerf.mapLiveOpsMs) +
-                " collect_live_clusters=" + std::to_string(finalPerf.collectLiveClustersMs) +
-                " build_supernode_maps=" + std::to_string(finalPerf.buildSupernodeMapsMs) +
-                " build_dag=" + std::to_string(finalPerf.buildDagMs) +
-                " build_value_fanout=" + std::to_string(finalPerf.buildValueFanoutMs) +
-                " build_state_read_sets=" + std::to_string(finalPerf.buildStateReadSetsMs) +
-                " final_topo=" + std::to_string(finalPerf.finalTopoMs));
-        logInfo("activity-schedule timing export(ms): supernode_to_ops=" +
-                std::to_string(exportSupernodeToOpsMs) +
-                " op_to_supernode=" + std::to_string(exportOpToSupernodeMs) +
-                " dag=" + std::to_string(exportDagMs) +
-                " value_fanout=" + std::to_string(exportValueFanoutMs) +
-                " topo_order=" + std::to_string(exportTopoOrderMs) +
-                " state_read_supernodes=" + std::to_string(exportStateReadMs));
 
         std::ostringstream summary;
         summary << "activity-schedule: path=" << options_.path
                 << " graph=" << graph->symbol()
                 << " supernodes=" << build.supernodeToOps.size()
-                << " seed_supernodes=" << seedSupernodeCount
-                << " coarse_supernodes=" << coarseSupernodeCount
-                << " dp_supernodes=" << dpSupernodeCount
-                << " sink_supernodes=" << sinkPartition.clusters.size()
-                << " sink_ops=" << sinkTopoPositions.size()
-                << " eligible_ops=" << finalOpData.topoOps.size()
-                << " state_read_tail_absorb_target_supernodes=" << stateReadTailAbsorbTargetSupernodes
-                << " state_read_tail_absorb_cloned=" << stateReadTailAbsorbStats.clonedOps
-                << " state_read_tail_absorb_erased=" << stateReadTailAbsorbStats.erasedOps
-                << " replication_cloned=" << replicationStats.clonedOps
-                << " replication_erased=" << replicationStats.erasedOps
+                << " compute_supernodes=" << computeSupernodes
+                << " commit_supernodes=" << commitSupernodes
+                << " compute_nodes=" << rewrite.stats.computeNodes
+                << " source_clones=" << rewrite.stats.sourceClonesInComputeNodes
+                << " eligible_ops=" << opData.topoOps.size()
                 << " state_read_sets=" << build.stateReadSupernodes.size()
                 << " graph_changed=" << (graphChanged ? "true" : "false");
         logInfo(summary.str());

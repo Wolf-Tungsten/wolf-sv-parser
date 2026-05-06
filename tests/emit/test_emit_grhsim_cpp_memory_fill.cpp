@@ -132,7 +132,20 @@ int main()
     }
 
     const std::string header = readFile(outDir / "grhsim_top.hpp");
-    const std::string sched = readFile(outDir / "grhsim_top_sched_0.cpp");
+    std::string sched;
+    for (const auto &entry : std::filesystem::directory_iterator(outDir))
+    {
+        if (!entry.is_regular_file())
+        {
+            continue;
+        }
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("grhsim_top_sched_", 0) == 0 && entry.path().extension() == ".cpp")
+        {
+            sched += readFile(entry.path());
+            sched.push_back('\n');
+        }
+    }
     if (header.empty() || sched.empty())
     {
         return fail("missing generated grhsim files");

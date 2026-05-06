@@ -123,11 +123,57 @@ namespace wolvrix::app::pybind
             return outer;
         }
 
+        PyObject *exportActivityScheduleSupernodeKinds(const wolvrix::lib::transform::SessionSlot &slot,
+                                                       std::string_view key,
+                                                       std::string_view view)
+        {
+            if (view != "python")
+            {
+                PyErr_Format(PyExc_ValueError,
+                             "unsupported activity-schedule export view: %s",
+                             std::string(view).c_str());
+                return nullptr;
+            }
+
+            const auto *typed =
+                dynamic_cast<const wolvrix::lib::transform::SessionSlotValue<
+                    wolvrix::lib::transform::ActivityScheduleSupernodeKinds> *>(&slot);
+            if (!typed)
+            {
+                PyErr_Format(PyExc_TypeError,
+                             "activity-schedule session value has unexpected native type: %s",
+                             std::string(key).c_str());
+                return nullptr;
+            }
+
+            PyObject *out = PyList_New(static_cast<Py_ssize_t>(typed->value.size()));
+            if (!out)
+            {
+                return nullptr;
+            }
+            for (Py_ssize_t idx = 0; idx < static_cast<Py_ssize_t>(typed->value.size()); ++idx)
+            {
+                const auto kind = typed->value[static_cast<std::size_t>(idx)];
+                const char *text =
+                    kind == wolvrix::lib::transform::ActivityScheduleSupernodeKind::Commit ? "commit" : "compute";
+                PyObject *item = PyUnicode_FromString(text);
+                if (!item)
+                {
+                    Py_DECREF(out);
+                    return nullptr;
+                }
+                PyList_SET_ITEM(out, idx, item);
+            }
+            return out;
+        }
+
         const bool kActivityScheduleExporterRegistered = []() {
             registerSessionNativeExporter("activity-schedule.supernode-to-ops",
                                           exportActivityScheduleSupernodeToOps);
             registerSessionNativeExporter("activity-schedule.dag",
                                           exportNestedUint32Vector<wolvrix::lib::transform::ActivityScheduleDag>);
+            registerSessionNativeExporter("activity-schedule.supernode-kind",
+                                          exportActivityScheduleSupernodeKinds);
             return true;
         }();
 

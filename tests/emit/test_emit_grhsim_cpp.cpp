@@ -869,6 +869,14 @@ namespace
         manager.addPass(std::make_unique<ActivitySchedulePass>(std::move(options)));
         PassDiagnostics diags;
         PassManagerResult result = manager.run(design, diags);
+        if (!result.success || diags.hasError())
+        {
+            for (const auto &diag : diags.messages())
+            {
+                std::cerr << "[emit_grhsim_cpp] activity-schedule diagnostic: "
+                          << diag.message << '\n';
+            }
+        }
         return result.success && !diags.hasError();
     }
 
@@ -883,7 +891,6 @@ namespace
         {
             scheduleOptions.path = "top";
         }
-        scheduleOptions.enableReplication = true;
         if (!runActivitySchedule(design, session, std::move(scheduleOptions)))
         {
             return false;
@@ -1761,10 +1768,16 @@ int main()
     {
         return fail("Missing runtime helper header");
     }
-    if (runtime.find("grhsim_concat_uniform_scalars_u64") == std::string::npos ||
-        runtime.find("grhsim_concat_uniform_scalars_words") == std::string::npos)
+    if (runtime.find("grhsim_concat_uniform_scalars_words") == std::string::npos)
     {
         return fail("Missing scalar concat loop helpers in runtime");
+    }
+    if (runtime.find("grhsim_pack_bits_u64") != std::string::npos ||
+        runtime.find("grhsim_concat_scalars_u64") != std::string::npos ||
+        runtime.find("grhsim_concat_uniform_scalars_u64") != std::string::npos ||
+        runtime.find("grhsim_replicate_u64") != std::string::npos)
+    {
+        return fail("runtime should not emit unused small-width loop helpers");
     }
     if (runtime.find("grhsim_concat_words") == std::string::npos ||
         runtime.find("grhsim_replicate_words") == std::string::npos ||
@@ -1795,13 +1808,19 @@ int main()
     {
         return fail("Missing wide runtime helper usage");
     }
-    const bool hasScalarConcatU64Helper =
-        sched.find("grhsim_concat_uniform_scalars_u64<8>") != std::string::npos ||
-        sched.find("grhsim_concat_uniform_scalars_u64(std::array") != std::string::npos ||
-        sched.find("grhsim_concat_uniform_scalars_u64(") != std::string::npos;
-    if (!hasScalarConcatU64Helper)
+    if (sched.find("grhsim_concat_uniform_scalars_u64(") != std::string::npos ||
+        sched.find("grhsim_concat_scalars_u64(") != std::string::npos)
     {
-        return fail("Missing looped scalar concat helper usage");
+        return fail("scalar concat with result width <= 64 should emit direct bit expressions instead of u64 concat helpers");
+    }
+    if (sched.find("grhsim_pack_bits_u64(std::array") != std::string::npos)
+    {
+        return fail("one-bit scalar concat should emit direct bit expressions instead of grhsim_pack_bits_u64(std::array...)");
+    }
+    if (sched.find("rep_op") != std::string::npos &&
+        sched.find("grhsim_replicate_u64(") != std::string::npos)
+    {
+        return fail("scalar replicate with result width <= 64 should emit a direct expression instead of grhsim_replicate_u64");
     }
     const bool hasWideSliceHelperCoverage =
         sched.find("wide_slice_static_op") != std::string::npos &&
@@ -2684,8 +2703,8 @@ int main()
         EmitDiagnostics wideConcatFastDiag;
         EmitResult wideConcatFastResult;
         ActivityScheduleOptions wideConcatFastSchedule;
-        wideConcatFastSchedule.supernodeMaxSize = 1;
-        wideConcatFastSchedule.maxSinkSupernodeOp = 1;
+        wideConcatFastSchedule.maxComputeNodeInComputeSupernode = 1;
+        wideConcatFastSchedule.maxOpInCommitSupernode = 1;
         if (!emitWithActivitySchedule(wideConcatFastDesign,
                                       wideConcatFastDir,
                                       wideConcatFastDiag,

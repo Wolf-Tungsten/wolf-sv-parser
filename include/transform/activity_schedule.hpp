@@ -12,23 +12,29 @@
 
 namespace wolvrix::lib::transform
 {
+    enum class ActivityOpClass : uint8_t
+    {
+        Source,
+        Sink,
+        Compute,
+        Declaration,
+        Unsupported,
+    };
+
+    enum class ActivityScheduleSupernodeKind : uint8_t
+    {
+        Compute = 0,
+        Commit = 1,
+    };
 
     struct ActivityScheduleOptions
     {
         std::string path;
-        std::size_t supernodeMaxSize = 72;
-        std::size_t maxSinkSupernodeOp = 4096;
+        std::size_t maxComputeNodeInComputeSupernode = 72;
+        std::size_t maxOpInComputeNode = 8192;
+        std::size_t maxOpInCommitSupernode = 4096;
         bool enableCoarsen = true;
         bool enableChainMerge = true;
-        bool enableSiblingMerge = true;
-        bool enableForwardMerge = true;
-        bool enableRefine = true;
-        std::size_t refineMaxIter = 4;
-        bool enableStateReadTailAbsorb = true;
-        std::size_t stateReadTailAbsorbMaxTargets = 8;
-        bool enableReplication = false;
-        std::size_t replicationMaxCost = 2;
-        std::size_t replicationMaxTargets = 8;
         std::string costModel = "edge-cut";
     };
 
@@ -46,6 +52,7 @@ namespace wolvrix::lib::transform
     using ActivityScheduleValueFanout = std::vector<std::vector<uint32_t>>;
     using ActivityScheduleTopoOrder = std::vector<uint32_t>;
     using ActivityScheduleStateReadSupernodes = std::unordered_map<std::string, std::vector<uint32_t>>;
+    using ActivityScheduleSupernodeKinds = std::vector<ActivityScheduleSupernodeKind>;
 
     inline constexpr uint32_t kInvalidActivitySupernodeId = std::numeric_limits<uint32_t>::max();
 
