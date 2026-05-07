@@ -3461,6 +3461,12 @@ namespace wolvrix::lib::transform
             }
 
             auto ensureRootValue = [&](wolvrix::lib::grh::ValueId value, bool commitRoot) {
+                if (!value.valid() || value.graph != graph.id())
+                {
+                    error = std::string("activity-schedule root value ownership mismatch commit_root=") +
+                            (commitRoot ? "true" : "false");
+                    return;
+                }
                 const auto defOp = graph.valueDef(value);
                 if (!defOp.valid())
                 {
@@ -3508,7 +3514,9 @@ namespace wolvrix::lib::transform
                     }
                 }
             }
-            for (const auto &port : graph.outputPorts())
+            const auto outputPorts = std::vector<wolvrix::lib::grh::Port>(graph.outputPorts().begin(),
+                                                                          graph.outputPorts().end());
+            for (const auto &port : outputPorts)
             {
                 ensureRootValue(port.value, false);
                 if (!error.empty())
@@ -3516,7 +3524,9 @@ namespace wolvrix::lib::transform
                     return false;
                 }
             }
-            for (const auto &port : graph.inoutPorts())
+            const auto inoutPorts = std::vector<wolvrix::lib::grh::InoutPort>(graph.inoutPorts().begin(),
+                                                                               graph.inoutPorts().end());
+            for (const auto &port : inoutPorts)
             {
                 ensureRootValue(port.out, false);
                 if (!error.empty())

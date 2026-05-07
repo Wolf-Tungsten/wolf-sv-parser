@@ -226,13 +226,19 @@ namespace wolvrix::lib::emit
             {
                 localIndices.reserve(indices.size());
                 globalIndices.reserve(indices.size());
+                const std::size_t currentBitIndex =
+                    context->currentActiveId == kInvalidIndex
+                        ? kInvalidIndex
+                        : (context->currentActiveId % kActiveFlagBitsPerWord);
                 for (uint32_t activeId : indices)
                 {
                     const std::size_t targetWordIndex =
                         static_cast<std::size_t>(activeId) / kActiveFlagBitsPerWord;
+                    const std::size_t targetBitIndex =
+                        static_cast<std::size_t>(activeId) % kActiveFlagBitsPerWord;
                     if (targetWordIndex == context->currentWordIndex &&
                         context->currentActiveId != kInvalidIndex &&
-                        static_cast<std::size_t>(activeId) > context->currentActiveId)
+                        targetBitIndex > currentBitIndex)
                     {
                         localIndices.push_back(activeId);
                     }
@@ -6392,7 +6398,8 @@ namespace wolvrix::lib::emit
                                           const EmitModel &model,
                                           ValueId resultValue,
                                           const std::string &wordsExpr,
-                                          const SupernodeLocalExprContext *context = nullptr)
+                                          const SupernodeLocalExprContext *context = nullptr,
+                                          const ActivationEmitContext *activationContext = nullptr)
         {
             const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             const int32_t resultWidth = graph.valueWidth(resultValue);
@@ -6422,7 +6429,7 @@ namespace wolvrix::lib::emit
                 if (needChangeDetect)
                 {
                     stream << "            if (grhsim_assign_words(" << lhs << ", next_words, " << resultWidth << ")) {\n";
-                    emitChangedValuePropagation(stream, model, resultValue, "                ");
+                    emitChangedValuePropagation(stream, model, resultValue, "                ", activationContext);
                     stream << "            }\n";
                 }
                 else
@@ -6437,7 +6444,8 @@ namespace wolvrix::lib::emit
                 if (needChangeDetect)
                 {
                     stream << "            if (" << lhs << " != next_value) {\n";
-                    emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
+                    emitChangedValueEffects(
+                        stream, model, resultValue, lhs, "next_value", "                ", activationContext);
                     stream << "                " << lhs << " = next_value;\n";
                     stream << "            }\n";
                 }
@@ -6454,7 +6462,8 @@ namespace wolvrix::lib::emit
                                              const EmitModel &model,
                                              ValueId resultValue,
                                              const std::string &wordsExpr,
-                                             SupernodeLocalExprContext *context)
+                                             SupernodeLocalExprContext *context,
+                                             const ActivationEmitContext *activationContext = nullptr)
         {
             if (!isMaterializedValue(model, resultValue))
             {
@@ -6469,7 +6478,7 @@ namespace wolvrix::lib::emit
                 recordSupernodeLocalExprRef(graph, resultValue, lhs, SupernodeLocalExprKind::kWideWords, context);
                 return;
             }
-            emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, wordsExpr, context);
+            emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, wordsExpr, context, activationContext);
         }
 
         void emitLogicAssignFromBoolExpr(std::ostream &stream,
@@ -6477,7 +6486,8 @@ namespace wolvrix::lib::emit
                                          const EmitModel &model,
                                          ValueId resultValue,
                                          const std::string &boolExpr,
-                                         SupernodeLocalExprContext *context = nullptr)
+                                         SupernodeLocalExprContext *context = nullptr,
+                                         const ActivationEmitContext *activationContext = nullptr)
         {
             const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             if (!isMaterializedValue(model, resultValue))
@@ -6504,7 +6514,8 @@ namespace wolvrix::lib::emit
             if (needChangeDetect)
             {
                 stream << "            if (" << lhs << " != next_value) {\n";
-                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
+                emitChangedValueEffects(
+                    stream, model, resultValue, lhs, "next_value", "                ", activationContext);
                 stream << "                " << lhs << " = next_value;\n";
                 stream << "            }\n";
             }
@@ -6521,7 +6532,8 @@ namespace wolvrix::lib::emit
                                            ValueId resultValue,
                                            const std::string &expr,
                                            bool alreadyBoundedToResultWidth,
-                                           SupernodeLocalExprContext *context = nullptr)
+                                           SupernodeLocalExprContext *context = nullptr,
+                                           const ActivationEmitContext *activationContext = nullptr)
         {
             const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             const std::string cppType = cppTypeForValue(graph, resultValue);
@@ -6554,7 +6566,8 @@ namespace wolvrix::lib::emit
             if (needChangeDetect)
             {
                 stream << "            if (" << lhs << " != next_value) {\n";
-                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ");
+                emitChangedValueEffects(
+                    stream, model, resultValue, lhs, "next_value", "                ", activationContext);
                 stream << "                " << lhs << " = next_value;\n";
                 stream << "            }\n";
             }
@@ -7082,11 +7095,13 @@ namespace wolvrix::lib::emit
             }
             if (isWideLogicValue(graph, resultValue))
             {
-                emitLogicAssignFromWideWordsExpr(stream, graph, model, resultValue, *expr, context);
+                emitLogicAssignFromWideWordsExpr(
+                    stream, graph, model, resultValue, *expr, context, nullptr);
             }
             else
             {
-                emitLogicAssignFromScalarExpr(stream, graph, model, resultValue, *expr, true, context);
+                emitLogicAssignFromScalarExpr(
+                    stream, graph, model, resultValue, *expr, true, context, nullptr);
             }
             return true;
         }
@@ -9391,7 +9406,8 @@ namespace wolvrix::lib::emit
                                                                      model,
                                                                      resultValue,
                                                                      *expr,
-                                                                     &localExprContext);
+                                                                     &localExprContext,
+                                                                     &activationContext);
                                 }
                                 else
                                 {
@@ -9401,7 +9417,8 @@ namespace wolvrix::lib::emit
                                                                   resultValue,
                                                                   "static_cast<std::uint64_t>(" + *expr + ")",
                                                                   false,
-                                                                  &localExprContext);
+                                                                  &localExprContext,
+                                                                  &activationContext);
                                 }
                             }
                             else
@@ -9446,7 +9463,7 @@ namespace wolvrix::lib::emit
                             if (isWideLogicValue(graph, resultValue))
                             {
                                 emitLogicAssignFromWideWordsExpr(
-                                    stream, graph, model, resultValue, stateExpr, &localExprContext);
+                                    stream, graph, model, resultValue, stateExpr, &localExprContext, &activationContext);
                             }
                             else
                             {
@@ -9456,7 +9473,8 @@ namespace wolvrix::lib::emit
                                                               resultValue,
                                                               "static_cast<std::uint64_t>(" + stateExpr + ")",
                                                               true,
-                                                              &localExprContext);
+                                                              &localExprContext,
+                                                              &activationContext);
                             }
                             break;
                         }
@@ -9464,7 +9482,7 @@ namespace wolvrix::lib::emit
                         if (isWideLogicValue(graph, op.results().front()))
                         {
                             emitLogicAssignFromWordsExpr(
-                                stream, graph, model, resultValue, stateExpr, &localExprContext);
+                                stream, graph, model, resultValue, stateExpr, &localExprContext, &activationContext);
                         }
                         else
                         {
@@ -9521,7 +9539,8 @@ namespace wolvrix::lib::emit
                                          ? stateExpr + "[" + rowAccess.rowExpr + "]"
                                          : "((" + rowAccess.inRangeExpr + ") ? " + stateExpr + "[" + rowAccess.rowExpr +
                                                "] : " + wordsArrayTypeForWidth(graph.valueWidth(resultValue)) + "{})"),
-                                    &localExprContext);
+                                    &localExprContext,
+                                    &activationContext);
                             }
                             else
                             {
@@ -9535,7 +9554,8 @@ namespace wolvrix::lib::emit
                                          : "((" + rowAccess.inRangeExpr + ") ? static_cast<std::uint64_t>(" + stateExpr +
                                                "[" + rowAccess.rowExpr + "]) : UINT64_C(0))"),
                                     true,
-                                    &localExprContext);
+                                    &localExprContext,
+                                    &activationContext);
                             }
                             break;
                         }
@@ -10015,10 +10035,22 @@ namespace wolvrix::lib::emit
                     }
                     ++opIndex;
                 }
-                if (outerCommitEventExpr.has_value())
-                {
-                    stream << "            }\n";
-                }
+                    if (outerCommitEventExpr.has_value())
+                    {
+                        stream << "            }\n";
+                    }
+                    if (batch.phase == ScheduleBatch::Phase::kCompute)
+                    {
+                        stream << "        const std::uint8_t newlyActivatedWordFlags = static_cast<std::uint8_t>(\n";
+                        stream << "            supernode_active_curr_[" << word.activeFlagWordIndex
+                               << "u] & dispatchMask);\n";
+                        stream << "        activeWordFlags = static_cast<std::uint8_t>(\n";
+                        stream << "            activeWordFlags | newlyActivatedWordFlags);\n";
+                        stream << "        supernode_active_curr_[" << word.activeFlagWordIndex
+                               << "u] = static_cast<std::uint8_t>(supernode_active_curr_["
+                               << word.activeFlagWordIndex
+                               << "u] & static_cast<std::uint8_t>(~dispatchMask));\n";
+                    }
                     stream << "        }\n";
                     stream << "        }\n";
                 }
