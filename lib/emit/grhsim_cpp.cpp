@@ -3187,6 +3187,39 @@ namespace wolvrix::lib::emit
                 context);
         }
 
+        void emitOpComment(std::ostream &stream,
+                           const Operation &op,
+                           std::string_view indent)
+        {
+            stream << indent << "// op " << op.symbolText() << " [" << toString(op.kind()) << "]";
+            auto emitTargetAttr = [&](std::string_view label, std::string_view attrName)
+            {
+                if (const auto target = getAttribute<std::string>(op, attrName))
+                {
+                    stream << " " << label << "=" << *target;
+                }
+            };
+            switch (op.kind())
+            {
+            case OperationKind::kRegisterReadPort:
+            case OperationKind::kRegisterWritePort:
+                emitTargetAttr("reg", "regSymbol");
+                break;
+            case OperationKind::kLatchReadPort:
+            case OperationKind::kLatchWritePort:
+                emitTargetAttr("latch", "latchSymbol");
+                break;
+            case OperationKind::kMemoryReadPort:
+            case OperationKind::kMemoryWritePort:
+            case OperationKind::kMemoryFillPort:
+                emitTargetAttr("mem", "memSymbol");
+                break;
+            default:
+                break;
+            }
+            stream << "\n";
+        }
+
         std::string renderScalarLogicExpr(const Graph &graph, ValueId resultValue, const ScalarLogicExpr &rhs)
         {
             if (rhs.alreadyBoundedToResultWidth)
@@ -8928,7 +8961,7 @@ namespace wolvrix::lib::emit
                 return std::string("scalar state write missing operands: ") + std::string(op.symbolText());
             }
             const StateShadowDecl &shadow = model.stateShadows[write.shadowIndex];
-            stream << indent << "// op " << op.symbolText() << "\n";
+            emitOpComment(stream, op, indent);
             stream << indent << scalarStateWriteHelperName(write.shadowScalarKind) << "("
                    << truthyLogicValueExpr(graph, model, operands[0], context) << ", "
                    << stateShadowTouchedRef(shadow) << ", "
@@ -8963,7 +8996,7 @@ namespace wolvrix::lib::emit
                 return std::string("write state missing: ") + write.symbol;
             }
             const StateDecl &state = stateIt->second;
-            stream << indent << "// op " << op.symbolText() << "\n";
+            emitOpComment(stream, op, indent);
             stream << indent << "// Commit writes update visible state directly and reactivate readers on change.\n";
             const std::string innerIndent = std::string(indent) + "    ";
             const auto headIt = model.stateHeadSupernodesBySymbol.find(write.symbol);
@@ -9482,7 +9515,7 @@ namespace wolvrix::lib::emit
                         continue;
                     }
                     const auto operands = op.operands();
-                    stream << "            // op " << op.symbolText() << "\n";
+                    emitOpComment(stream, op, "            ");
                     switch (op.kind())
                     {
                     case OperationKind::kConstant:

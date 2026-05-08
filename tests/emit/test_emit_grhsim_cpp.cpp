@@ -1759,6 +1759,14 @@ int main()
     {
         return fail("default grhsim emit should not generate perf counter APIs");
     }
+    if (sched.find("// op reg_q_read_op [kRegisterReadPort] reg=reg_q") == std::string::npos ||
+        sched.find("// op reg_q_write [kRegisterWritePort] reg=reg_q") == std::string::npos ||
+        sched.find("// op wide_mem_read [kMemoryReadPort] mem=wide_mem") == std::string::npos ||
+        sched.find("// op wide_mem_write [kMemoryWritePort] mem=wide_mem") == std::string::npos ||
+        sched.find("// op sum_add [kAdd]") == std::string::npos)
+    {
+        return fail("schedule comments should include operation kind and storage target annotations");
+    }
     if (header.find("inline static constexpr const char *value_") == std::string::npos ||
         header.find("= \"q=%0d\";") == std::string::npos)
     {

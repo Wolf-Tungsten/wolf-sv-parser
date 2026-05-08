@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -53,6 +54,42 @@ namespace wolvrix::lib::transform
     using ActivityScheduleTopoOrder = std::vector<uint32_t>;
     using ActivityScheduleStateReadSupernodes = std::unordered_map<std::string, std::vector<uint32_t>>;
     using ActivityScheduleSupernodeKinds = std::vector<ActivityScheduleSupernodeKind>;
+
+    struct ActivityScheduleSummaryStats
+    {
+        using KindCountMap = std::map<std::string, std::size_t>;
+
+        std::size_t supernodes = 0;
+        std::size_t computeSupernodes = 0;
+        std::size_t commitSupernodes = 0;
+        std::size_t dagEdges = 0;
+        std::size_t boundaryValues = 0;
+        std::size_t boundaryActivationEdges = 0;
+        std::size_t computeComputeValuePairs = 0;
+        std::size_t computeCommitValuePairs = 0;
+        std::size_t stateReadActivationEdges = 0;
+        std::size_t memoryReadActivationEdges = 0;
+        std::size_t constantActivationEdges = 0;
+        std::size_t otherComputeActivationEdges = 0;
+        std::size_t otherComputeSingleTargetValues = 0;
+        std::size_t otherComputeMultiTargetValues = 0;
+        std::size_t otherComputeSingleTargetActivationEdges = 0;
+        std::size_t otherComputeMultiTargetActivationEdges = 0;
+        std::size_t otherComputeUniqueSupernodePairs = 0;
+        std::size_t otherComputeDuplicateActivationEdges = 0;
+        std::size_t computeNodes = 0;
+        std::size_t computeNodeOpsTotal = 0;
+        std::size_t sourceClonesInComputeNodes = 0;
+        std::size_t directSourceInputsToCommitSupernodes = 0;
+        std::size_t commonExprComputeNodes = 0;
+        std::size_t computeNodeBoundaryValues = 0;
+        std::size_t commitInputRootValues = 0;
+        std::size_t topoEdges = 0;
+        std::size_t graphOps = 0;
+        std::size_t graphValues = 0;
+        KindCountMap activationEdgesBySourceKind;
+        KindCountMap activationSourceValuesBySourceKind;
+    };
 
     inline constexpr uint32_t kInvalidActivitySupernodeId = std::numeric_limits<uint32_t>::max();
 

@@ -63,6 +63,7 @@ namespace
         const ActivityScheduleTopoOrder *topoOrder = nullptr;
         const ActivityScheduleStateReadSupernodes *stateReadSupernodes = nullptr;
         const ActivityScheduleSupernodeKinds *supernodeKinds = nullptr;
+        const std::string *summaryStats = nullptr;
     };
 
     ScheduleView loadSchedule(const SessionStore &session, const std::string &graphName)
@@ -76,6 +77,7 @@ namespace
             getSessionValue<ActivityScheduleTopoOrder>(session, prefix + "topo_order"),
             getSessionValue<ActivityScheduleStateReadSupernodes>(session, prefix + "state_read_supernodes"),
             getSessionValue<ActivityScheduleSupernodeKinds>(session, prefix + "supernode_kind"),
+            getSessionValue<std::string>(session, prefix + "summary_stats"),
         };
     }
 
@@ -97,7 +99,7 @@ namespace
         if (schedule.supernodeToOps == nullptr || schedule.opToSupernode == nullptr ||
             schedule.dag == nullptr || schedule.valueFanout == nullptr ||
             schedule.topoOrder == nullptr || schedule.stateReadSupernodes == nullptr ||
-            schedule.supernodeKinds == nullptr)
+            schedule.supernodeKinds == nullptr || schedule.summaryStats == nullptr)
         {
             return fail("Expected all activity-schedule session outputs to exist");
         }
@@ -212,6 +214,30 @@ int main()
         if (!hasFanoutTo(*schedule.valueFanout, maskValue, writeSupernode))
         {
             return fail("Expected direct source value dependency into commit supernode");
+        }
+        if (schedule.summaryStats->find("\"compute_commit_value_pairs\":2") == std::string::npos)
+        {
+            return fail("Expected summary_stats to report two compute->commit value pairs in top case");
+        }
+        if (schedule.summaryStats->find("\"compute_compute_value_pairs\":0") == std::string::npos)
+        {
+            return fail("Expected summary_stats to report zero compute->compute value pairs in top case");
+        }
+        if (schedule.summaryStats->find("\"state_read_activation_edges\":0") == std::string::npos)
+        {
+            return fail("Expected top case to avoid cross-supernode state-read propagation");
+        }
+        if (schedule.summaryStats->find("\"memory_read_activation_edges\":0") == std::string::npos)
+        {
+            return fail("Expected top case to report zero memory-read propagation");
+        }
+        if (schedule.summaryStats->find("\"constant_activation_edges\":1") == std::string::npos)
+        {
+            return fail("Expected top case to report one constant propagation edge");
+        }
+        if (schedule.summaryStats->find("\"other_compute_activation_edges\":1") == std::string::npos)
+        {
+            return fail("Expected top case to report one compute propagation edge");
         }
         const auto readersIt = schedule.stateReadSupernodes->find("q");
         if (readersIt == schedule.stateReadSupernodes->end() || readersIt->second.empty())
@@ -342,6 +368,10 @@ int main()
         {
             return fail("Expected memory read not to be cloned as source");
         }
+        if (schedule.summaryStats->find("\"memory_read_activation_edges\":0") == std::string::npos)
+        {
+            return fail("Expected mem_read case to avoid cross-supernode memory-read propagation");
+        }
     }
 
     {
@@ -408,6 +438,14 @@ int main()
             !hasFanoutTo(*schedule.valueFanout, shared, (*schedule.opToSupernode)[xorOp.index - 1]))
         {
             return fail("Expected shared expression fanout to both consumers");
+        }
+        if (schedule.summaryStats->find("\"other_compute_activation_edges\":2") == std::string::npos)
+        {
+            return fail("Expected common_expr case to report two compute propagation edges");
+        }
+        if (schedule.summaryStats->find("\"other_compute_multi_target_values\":1") == std::string::npos)
+        {
+            return fail("Expected common_expr case to report one multi-target compute value");
         }
     }
 

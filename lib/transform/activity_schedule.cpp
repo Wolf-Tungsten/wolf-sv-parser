@@ -282,11 +282,201 @@ namespace wolvrix::lib::transform
             ActivityScheduleOpToSupernode opToSupernode;
             std::vector<std::vector<uint32_t>> dag;
             ActivityScheduleValueFanout valueFanout;
+            std::vector<wolvrix::lib::grh::OperationKind> valueSourceKind;
+            std::vector<uint32_t> valueSourceSupernode;
             ActivityScheduleTopoOrder topoOrder;
             ActivityScheduleStateReadSupernodes stateReadSupernodes;
             ActivityScheduleSupernodeKinds supernodeKinds;
         };
 
+        std::string encodeActivityScheduleSummaryStatsJson(const ActivityScheduleSummaryStats &stats)
+        {
+            const auto emitCountMap = [](std::ostringstream &out,
+                                         std::string_view key,
+                                         const ActivityScheduleSummaryStats::KindCountMap &counts)
+            {
+                out << ",\"" << key << "\":{";
+                bool first = true;
+                for (const auto &[name, count] : counts)
+                {
+                    if (!first)
+                    {
+                        out << ",";
+                    }
+                    first = false;
+                    out << "\"" << name << "\":" << count;
+                }
+                out << "}";
+            };
+            std::ostringstream out;
+            out << "{";
+            out << "\"supernodes\":" << stats.supernodes;
+            out << ",\"compute_supernodes\":" << stats.computeSupernodes;
+            out << ",\"commit_supernodes\":" << stats.commitSupernodes;
+            out << ",\"dag_edges\":" << stats.dagEdges;
+            out << ",\"boundary_values\":" << stats.boundaryValues;
+            out << ",\"boundary_activation_edges\":" << stats.boundaryActivationEdges;
+            out << ",\"compute_compute_value_pairs\":" << stats.computeComputeValuePairs;
+            out << ",\"compute_commit_value_pairs\":" << stats.computeCommitValuePairs;
+            out << ",\"state_read_activation_edges\":" << stats.stateReadActivationEdges;
+            out << ",\"memory_read_activation_edges\":" << stats.memoryReadActivationEdges;
+            out << ",\"constant_activation_edges\":" << stats.constantActivationEdges;
+            out << ",\"other_compute_activation_edges\":" << stats.otherComputeActivationEdges;
+            out << ",\"other_compute_single_target_values\":" << stats.otherComputeSingleTargetValues;
+            out << ",\"other_compute_multi_target_values\":" << stats.otherComputeMultiTargetValues;
+            out << ",\"other_compute_single_target_activation_edges\":"
+                << stats.otherComputeSingleTargetActivationEdges;
+            out << ",\"other_compute_multi_target_activation_edges\":"
+                << stats.otherComputeMultiTargetActivationEdges;
+            out << ",\"other_compute_unique_supernode_pairs\":" << stats.otherComputeUniqueSupernodePairs;
+            out << ",\"other_compute_duplicate_activation_edges\":" << stats.otherComputeDuplicateActivationEdges;
+            out << ",\"compute_nodes\":" << stats.computeNodes;
+            out << ",\"compute_node_ops_total\":" << stats.computeNodeOpsTotal;
+            out << ",\"source_clones_in_compute_nodes\":" << stats.sourceClonesInComputeNodes;
+            out << ",\"direct_source_inputs_to_commit_supernodes\":"
+                << stats.directSourceInputsToCommitSupernodes;
+            out << ",\"common_expr_compute_nodes\":" << stats.commonExprComputeNodes;
+            out << ",\"compute_node_boundary_values\":" << stats.computeNodeBoundaryValues;
+            out << ",\"commit_input_root_values\":" << stats.commitInputRootValues;
+            out << ",\"topo_edges\":" << stats.topoEdges;
+            out << ",\"graph_ops\":" << stats.graphOps;
+            out << ",\"graph_values\":" << stats.graphValues;
+            emitCountMap(out, "activation_edges_by_source_kind", stats.activationEdgesBySourceKind);
+            emitCountMap(out, "activation_source_values_by_source_kind", stats.activationSourceValuesBySourceKind);
+            out << "}";
+            return out.str();
+        }
+
+        ActivityScheduleSummaryStats buildActivityScheduleSummaryStats(const ActivityScheduleBuild &build,
+                                                                      const ActivityScheduleRewriteResult &rewrite,
+                                                                      const ActivityOpData &opData,
+                                                                      const wolvrix::lib::grh::Graph &graph)
+        {
+            ActivityScheduleSummaryStats stats;
+            std::unordered_set<uint64_t> otherComputeUniquePairs;
+            stats.supernodes = build.supernodeToOps.size();
+            stats.computeNodes = rewrite.stats.computeNodes;
+            stats.computeNodeOpsTotal = rewrite.stats.computeNodeOpsTotal;
+            stats.sourceClonesInComputeNodes = rewrite.stats.sourceClonesInComputeNodes;
+            stats.directSourceInputsToCommitSupernodes = rewrite.stats.directSourceInputsToCommitSupernodes;
+            stats.commonExprComputeNodes = rewrite.stats.commonExprComputeNodes;
+            stats.computeNodeBoundaryValues = rewrite.stats.computeNodeBoundaryValues;
+            stats.commitInputRootValues = rewrite.stats.commitInputRootValues;
+            stats.topoEdges = opData.topoEdges.size();
+            stats.graphOps = graph.operations().size();
+            stats.graphValues = graph.values().size();
+            for (const auto kind : build.supernodeKinds)
+            {
+                if (kind == ActivityScheduleSupernodeKind::Compute)
+                {
+                    ++stats.computeSupernodes;
+                }
+                else if (kind == ActivityScheduleSupernodeKind::Commit)
+                {
+                    ++stats.commitSupernodes;
+                }
+            }
+            for (const auto &succs : build.dag)
+            {
+                stats.dagEdges += succs.size();
+            }
+            for (std::size_t valueIndex = 0; valueIndex < build.valueFanout.size(); ++valueIndex)
+            {
+                const auto &fanout = build.valueFanout[valueIndex];
+                if (fanout.empty())
+                {
+                    continue;
+                }
+                ++stats.boundaryValues;
+                stats.boundaryActivationEdges += fanout.size();
+                const std::string sourceKindName =
+                    valueIndex + 1 < build.valueSourceKind.size()
+                        ? std::string(wolvrix::lib::grh::toString(build.valueSourceKind[valueIndex + 1]))
+                        : std::string("unknown");
+                stats.activationEdgesBySourceKind[sourceKindName] += fanout.size();
+                stats.activationSourceValuesBySourceKind[sourceKindName] += 1;
+                if (valueIndex + 1 < build.valueSourceKind.size())
+                {
+                    switch (build.valueSourceKind[valueIndex + 1])
+                    {
+                    case wolvrix::lib::grh::OperationKind::kRegisterReadPort:
+                    case wolvrix::lib::grh::OperationKind::kLatchReadPort:
+                        stats.stateReadActivationEdges += fanout.size();
+                        break;
+                    case wolvrix::lib::grh::OperationKind::kMemoryReadPort:
+                        stats.memoryReadActivationEdges += fanout.size();
+                        break;
+                    case wolvrix::lib::grh::OperationKind::kConstant:
+                        stats.constantActivationEdges += fanout.size();
+                        break;
+                    default:
+                        stats.otherComputeActivationEdges += fanout.size();
+                        if (fanout.size() <= 1)
+                        {
+                            ++stats.otherComputeSingleTargetValues;
+                            stats.otherComputeSingleTargetActivationEdges += fanout.size();
+                        }
+                        else
+                        {
+                            ++stats.otherComputeMultiTargetValues;
+                            stats.otherComputeMultiTargetActivationEdges += fanout.size();
+                        }
+                        break;
+                    }
+                }
+                else
+                {
+                    stats.otherComputeActivationEdges += fanout.size();
+                    if (fanout.size() <= 1)
+                    {
+                        ++stats.otherComputeSingleTargetValues;
+                        stats.otherComputeSingleTargetActivationEdges += fanout.size();
+                    }
+                    else
+                    {
+                        ++stats.otherComputeMultiTargetValues;
+                        stats.otherComputeMultiTargetActivationEdges += fanout.size();
+                    }
+                }
+                const bool isOtherCompute =
+                    valueIndex + 1 >= build.valueSourceKind.size() ||
+                    (build.valueSourceKind[valueIndex + 1] != wolvrix::lib::grh::OperationKind::kRegisterReadPort &&
+                     build.valueSourceKind[valueIndex + 1] != wolvrix::lib::grh::OperationKind::kLatchReadPort &&
+                     build.valueSourceKind[valueIndex + 1] != wolvrix::lib::grh::OperationKind::kMemoryReadPort &&
+                     build.valueSourceKind[valueIndex + 1] != wolvrix::lib::grh::OperationKind::kConstant);
+                const uint32_t sourceSupernode =
+                    valueIndex + 1 < build.valueSourceSupernode.size() ? build.valueSourceSupernode[valueIndex + 1]
+                                                                       : kInvalidActivitySupernodeId;
+                for (const auto targetSupernode : fanout)
+                {
+                    if (targetSupernode >= build.supernodeKinds.size())
+                    {
+                        continue;
+                    }
+                    if (isOtherCompute && sourceSupernode != kInvalidActivitySupernodeId)
+                    {
+                        const uint64_t packed =
+                            (static_cast<uint64_t>(sourceSupernode) << 32) | targetSupernode;
+                        otherComputeUniquePairs.insert(packed);
+                    }
+                    if (build.supernodeKinds[targetSupernode] == ActivityScheduleSupernodeKind::Compute)
+                    {
+                        ++stats.computeComputeValuePairs;
+                    }
+                    else if (build.supernodeKinds[targetSupernode] == ActivityScheduleSupernodeKind::Commit)
+                    {
+                        ++stats.computeCommitValuePairs;
+                    }
+                }
+            }
+            stats.otherComputeUniqueSupernodePairs = otherComputeUniquePairs.size();
+            if (stats.otherComputeActivationEdges >= stats.otherComputeUniqueSupernodePairs)
+            {
+                stats.otherComputeDuplicateActivationEdges =
+                    stats.otherComputeActivationEdges - stats.otherComputeUniqueSupernodePairs;
+            }
+            return stats;
+        }
         struct ActivityOpData
         {
             std::vector<wolvrix::lib::grh::OperationId> topoOps;
@@ -3783,6 +3973,25 @@ namespace wolvrix::lib::transform
             if (!graph.values().empty())
             {
                 build.valueFanout.assign(graph.values().back().index, {});
+                build.valueSourceKind.assign(graph.values().back().index + 1,
+                                             wolvrix::lib::grh::OperationKind::kConstant);
+                build.valueSourceSupernode.assign(graph.values().back().index + 1, kInvalidActivitySupernodeId);
+                for (const auto valueId : graph.values())
+                {
+                    if (!valueId.valid() || valueId.index >= build.valueSourceKind.size())
+                    {
+                        continue;
+                    }
+                    const auto defOpId = graph.valueDef(valueId);
+                    if (defOpId.valid())
+                    {
+                        build.valueSourceKind[valueId.index] = graph.opKind(defOpId);
+                        if (defOpId.index > 0 && defOpId.index - 1 < build.opToSupernode.size())
+                        {
+                            build.valueSourceSupernode[valueId.index] = build.opToSupernode[defOpId.index - 1];
+                        }
+                    }
+                }
             }
             std::unordered_set<uint64_t> seenEdges;
             for (uint32_t supernodeId = 0; supernodeId < build.supernodeToOps.size(); ++supernodeId)
@@ -4055,6 +4264,11 @@ namespace wolvrix::lib::transform
         setSessionValue(keyPrefix + "state_read_supernodes",
                         build.stateReadSupernodes,
                         "activity-schedule.state-read-supernodes");
+        const ActivityScheduleSummaryStats summaryStats =
+            buildActivityScheduleSummaryStats(build, rewrite, opData, *graph);
+        setSessionValue(keyPrefix + "summary_stats",
+                        encodeActivityScheduleSummaryStatsJson(summaryStats),
+                        "stats");
         const std::uint64_t exportMs = elapsedMs(exportStart);
 
         const std::size_t computeSupernodes =

@@ -12,7 +12,7 @@
 - 先按 event guard 构造 `commitSupernode`
 - 从 commit 输入、graph output、inout out/oe 反向构造 `computeNode`
 - 只把 `kConstant` / `kRegisterReadPort` / `kLatchReadPort` source op 克隆到 `computeNode`
-- 以 `computeNode` 为单位做 topo / coarsen / DP，生成最终 `computeSupernode`
+- 以 `computeNode` 为单位做 topo / coarsen / 连续分段，生成最终 `computeSupernode`
 - 展开并导出最终 `computeSupernode` / `commitSupernode` 调度模型
 - 导出 `supernode_to_ops` / `op_to_supernode` / `supernode_kind` / `value_fanout` / `topo_order` / `state_read_supernodes`
 
@@ -39,7 +39,7 @@
 | `-max-op-in-commit-supernode` | `4096` | 单个 `commitSupernode` 最多包含的 sink op 数 |
 | `-enable-coarsen` | `true` | 是否在 computeNode DAG 上执行 coarsen |
 | `-enable-chain-merge` | `true` | 是否启用 computeNode out1 / in1 chain merge |
-| `-cost-model` | `edge-cut` | 当前只支持 `edge-cut` |
+| `-cost-model` | `edge-cut` | 运行入口仍要求传入 `edge-cut`；当前主路径不再按 edge-cut DP 分段 |
 
 ## Session 输出
 
@@ -60,7 +60,7 @@
 
 1. `commitSupernode` 只包含 sink op，按 event key 聚类，再按 `maxOpInCommitSupernode` 切 chunk。
 2. `computeNode` 是中间粒度，包含普通 compute op 和克隆进来的 source op。
-3. `computeSupernode` 由 `computeNode` 经 topo / coarsen / DP 得到，`maxComputeNodeInComputeSupernode` 统计的是 `computeNode` 数量，不是 raw op 数。
+3. `computeSupernode` 由 `computeNode` 经 topo / coarsen / 连续 topo 分段得到，`maxComputeNodeInComputeSupernode` 统计的是 `computeNode` 数量，不是 raw op 数。
 
 `sink op` 包括：
 
@@ -86,15 +86,34 @@
 - `commitSupernode` 不作为 value producer 产生出边
 - `supernode_kind` 显式标记最终 supernode 是 `compute` 还是 `commit`
 
-## 历史 coarsen 说明
+## 当前 computeSupernode 调度算法
 
-下文部分记录旧实现的 coarsen / replication 背景，保留用于性能对比和历史排查；新主路径不再按 `sink + residual singleton` seed partition 执行。
+截至 `2026-05-08`，主路径的 `computeSupernode` 调度逻辑对应 `buildComputeNodeRewrite(...)` + `materializeComputeNodeSchedule(...)`，行为如下：
 
-## 当前 `coarsen` 的 change-coupled 规则
+1. 先从 sink 输入、graph output、inout out/oe 反向构造 `computeNode`，再建立 `computeNode` DAG。
+2. 初始 cluster 是“每个 `computeNode` 各自一个 cluster”，并先按 DAG topo 排序。
+3. 如果启用 coarsen，只做 `out1` / `in1` chain merge：
+  - `out1`：当前 cluster 只有一个后继时，尝试与该后继合并。
+  - `in1`：当前 cluster 只有一个前驱时，尝试与该前驱合并。
+  - 两种 merge 都只受 `maxComputeNodeInComputeSupernode` 约束。
+4. coarsen 之后，按 topo 顺序把连续 cluster 累加进当前 segment；一旦再加入下一个 cluster 会超过 `maxComputeNodeInComputeSupernode`，就切开，开始下一个 segment。
 
-截至 `2026-04-27`，`enable-forward-merge` 已不再只表示“forwarder merge”。
+当前主路径里：
 
-当前它会优先尝试把 singleton cluster 合并到某个前驱 cluster，但前提是：这个 op 的输出对该前驱输入是“输入一变，输出一定变”的关系。
+- 分段输入只包含 `computeNode`，不混入 `commitSupernode`
+- 不再使用旧 `WorkingPartition` 路径里的 `fixedBoundary`
+- 不再在主路径里使用 edge-cut 打分 DP
+- `-cost-model=edge-cut` 目前只保留为运行入口的兼容性检查
+
+## 旧路径遗留说明
+
+下文部分记录文件中仍保留的旧 `WorkingPartition` / `fixedBoundary` / DP 代码路径，主要用于历史排查和性能对比；它们不是当前主路径。
+
+## 旧路径 `coarsen` 的 change-coupled 规则
+
+截至 `2026-04-27`，旧 `WorkingPartition` 路径里的 `enable-forward-merge` 已不再只表示“forwarder merge”。
+
+这条旧路径会优先尝试把 singleton cluster 合并到某个前驱 cluster，但前提是：这个 op 的输出对该前驱输入是“输入一变，输出一定变”的关系。
 
 目前已经显式纳入的规则是：
 
@@ -111,18 +130,20 @@
 - `kEq` / `kNe` / 比较类 / reduction 类：多个不同输入可能映射到同一个输出
 - `kAnd` / `kOr` / `kMul` / shift 类：输入变化可能被 mask、折叠或截断掉
 
-如果 guaranteed-change 规则不命中，当前实现仍会保留一层 legacy alias/forwarder fallback，主要覆盖：
+如果 guaranteed-change 规则不命中，旧路径仍会保留一层 legacy alias/forwarder fallback，主要覆盖：
 
 - `kAssign`
 - `kConcat`
 - `kSliceStatic`
 - `kSliceDynamic`
 
-这意味着当前版本已经开始把 `coarsen` 往“同步变动驱动”的方向收敛，但还没有完全删掉旧的 forwarder 兼容路径。
+这意味着旧路径已经开始把 `coarsen` 往“同步变动驱动”的方向收敛，但还没有完全删掉旧的 forwarder 兼容路径。
 
-## 历史旧实现 `max-compute-node-in-compute-supernode` 的真实含义
+## 旧 `WorkingPartition` 路径里 `max-compute-node-in-compute-supernode` 的含义
 
-这个参数不是：
+下面这些说明只适用于旧 `WorkingPartition` / DP 路径，不适用于当前 `computeNode` 主路径。
+
+在旧路径里，这个参数不是：
 
 - 最终 supernode 数量目标
 - 单个 supernode 的 bit 数上限
@@ -143,15 +164,17 @@
 - 因此最终 `supernode_to_ops[i].size()` 可能明显大于 `max-compute-node-in-compute-supernode`
 - 这仍然不等价于 emit 后文件大小上限；如果某些 op 自身的 C++ 展开非常大，仍可能生成很大的 `sched_*.cpp`
 
-## 当前边界语义
+## 旧路径中的 `fixedBoundary` 语义
 
-截至 `2026-04-12`，`activity-schedule` 已不再通过 `fixedBoundary` 强制隔离 side-effect op。
+截至 `2026-05-08`，当前主路径的 `computeNode` 调度不再使用 `fixedBoundary`。
 
-当前实现里，`isSideEffectBoundaryKind(...)` 恒为 `false`，原因是：
+文件里仍保留的旧 `WorkingPartition` 路径中，`isSideEffectBoundaryKind(...)` 恒为 `false`，原因是：
 
 - GrhSIM 的时序和 side effect 由 event edge / commit 语义控制
 - `activity-schedule` 不再额外插入“单次执行保护”
 - `kSystemTask` / `kDpicCall` / `kLatchWritePort` 等 op 不再因为 pass 内部边界规则被强制拆开
+
+此外，旧路径里还会把 `sink-only cluster` 标成 `fixedBoundary`，用于阻止旧的 `WorkingPartition` merge / DP 跨过 sink cluster；这部分逻辑同样不在当前主路径里生效。
 
 ## replication 后置拆分
 
