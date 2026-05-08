@@ -1636,6 +1636,11 @@ namespace wolvrix::lib::emit
             bool isSigned = false;
             ValueId value{};
             std::string stateSymbol;
+            ValueSlotScalarKind waveformPrevScalarKind = ValueSlotScalarKind::kBool;
+            std::size_t waveformPrevStorageOffset = 0;
+            std::size_t waveformPrevWordCount = 0;
+            std::size_t waveformPrevRealIndex = 0;
+            std::size_t waveformPrevStringIndex = 0;
         };
 
         struct EmitModel
@@ -1712,6 +1717,9 @@ namespace wolvrix::lib::emit
             std::array<std::size_t, static_cast<std::size_t>(ValueSlotScalarKind::kCount)> memoryWriteMaskScalarBaseOffsets{};
             std::map<std::size_t, std::size_t> memoryWriteMaskWideBaseOffsetsByWords;
             std::size_t memoryWriteStorageBytes = 0;
+            std::size_t waveformPrevLogicStorageBytes = 0;
+            std::size_t waveformPrevRealCount = 0;
+            std::size_t waveformPrevStringCount = 0;
             bool needsSystemTaskRuntime = false;
             bool emitPerf = false;
             bool emitWaveform = false;
@@ -5411,6 +5419,47 @@ namespace wolvrix::lib::emit
             return true;
         }
 
+        void assignWaveformPrevStorageLayout(EmitModel &model)
+        {
+            std::size_t logicStorageOffset = 0;
+            model.waveformPrevRealCount = 0;
+            model.waveformPrevStringCount = 0;
+            for (auto &signal : model.waveformSignals)
+            {
+                switch (signal.type)
+                {
+                case ValueType::Real:
+                    signal.waveformPrevRealIndex = model.waveformPrevRealCount++;
+                    break;
+                case ValueType::String:
+                    signal.waveformPrevStringIndex = model.waveformPrevStringCount++;
+                    break;
+                case ValueType::Logic:
+                default:
+                {
+                    const int32_t width = signal.width <= 0 ? 1 : signal.width;
+                    if (isWideLogicWidth(width))
+                    {
+                        logicStorageOffset = alignTo(logicStorageOffset, alignof(std::uint64_t));
+                        signal.waveformPrevStorageOffset = logicStorageOffset;
+                        signal.waveformPrevWordCount = logicWordCount(width);
+                        logicStorageOffset += signal.waveformPrevWordCount * sizeof(std::uint64_t);
+                    }
+                    else
+                    {
+                        signal.waveformPrevScalarKind = valueScalarSlotKindForWidth(width);
+                        logicStorageOffset =
+                            alignTo(logicStorageOffset, valuePackedScalarSlotAlignment(signal.waveformPrevScalarKind));
+                        signal.waveformPrevStorageOffset = logicStorageOffset;
+                        logicStorageOffset += valuePackedScalarSlotByteSize(signal.waveformPrevScalarKind);
+                    }
+                    break;
+                }
+                }
+            }
+            model.waveformPrevLogicStorageBytes = logicStorageOffset;
+        }
+
         std::unordered_set<ValueId, ValueIdHash> collectDeclaredSymbolWaveformValueIds(const Graph &graph)
         {
             std::unordered_set<ValueId, ValueIdHash> valueIds;
@@ -5469,26 +5518,82 @@ namespace wolvrix::lib::emit
             switch (signal.type)
             {
             case ValueType::Real:
-                stream << indent << "waveform_writer_->emit_real(waveform_handles_[" << signalIndex << "], " << expr
-                       << ");\n";
+                stream << indent << "{\n";
+                stream << indent << "    const double curr_value = static_cast<double>(" << expr << ");\n";
+                stream << indent << "    auto &prev_value = waveform_prev_real_slots_[" << signal.waveformPrevRealIndex
+                       << "];\n";
+                stream << indent << "    if (force || prev_value != curr_value) {\n";
+                stream << indent << "        waveform_writer_->emit_real(waveform_handles_[" << signalIndex
+                       << "], curr_value);\n";
+                stream << indent << "        prev_value = curr_value;\n";
+                stream << indent << "    }\n";
+                stream << indent << "}\n";
                 break;
             case ValueType::String:
-                stream << indent << "waveform_writer_->emit_string(waveform_handles_[" << signalIndex << "], " << expr
-                       << ");\n";
+                stream << indent << "{\n";
+                stream << indent << "    const std::string curr_value = " << expr << ";\n";
+                stream << indent << "    auto &prev_value = waveform_prev_string_slots_["
+                       << signal.waveformPrevStringIndex << "];\n";
+                stream << indent << "    if (force || prev_value != curr_value) {\n";
+                stream << indent << "        waveform_writer_->emit_string(waveform_handles_[" << signalIndex
+                       << "], curr_value);\n";
+                stream << indent << "        prev_value = curr_value;\n";
+                stream << indent << "    }\n";
+                stream << indent << "}\n";
                 break;
             case ValueType::Logic:
             default:
                 if (isWideLogicWidth(signal.width))
                 {
-                    stream << indent << "waveform_writer_->emit_logic_words(waveform_handles_[" << signalIndex << "], "
-                           << (signal.width <= 0 ? 1 : signal.width) << "u, "
-                           << waveformWideExprForSignal(graph, model, signal) << ");\n";
+                    stream << indent << "{\n";
+                    stream << indent << "    auto &prev_value = "
+                           << packedWideStorageDirectRefExpr("waveform_prev_logic_storage_",
+                                                             signal.waveformPrevWordCount,
+                                                             std::to_string(signal.waveformPrevStorageOffset))
+                           << ";\n";
+                    stream << indent << "    if (force) {\n";
+                    stream << indent << "        grhsim_assign_words(prev_value, "
+                           << waveformWideExprForSignal(graph, model, signal) << ", "
+                           << (signal.width <= 0 ? 1 : signal.width) << "u);\n";
+                    stream << indent << "        waveform_writer_->emit_logic_words(waveform_handles_["
+                           << signalIndex << "], " << (signal.width <= 0 ? 1 : signal.width)
+                           << "u, prev_value);\n";
+                    stream << indent << "    } else if (grhsim_assign_words(prev_value, "
+                           << waveformWideExprForSignal(graph, model, signal) << ", "
+                           << (signal.width <= 0 ? 1 : signal.width) << "u)) {\n";
+                    stream << indent << "        waveform_writer_->emit_logic_words(waveform_handles_["
+                           << signalIndex << "], " << (signal.width <= 0 ? 1 : signal.width)
+                           << "u, prev_value);\n";
+                    stream << indent << "    }\n";
+                    stream << indent << "}\n";
                 }
                 else
                 {
-                    stream << indent << "waveform_writer_->emit_logic_u64(waveform_handles_[" << signalIndex << "], "
-                           << (signal.width <= 0 ? 1 : signal.width) << "u, static_cast<std::uint64_t>(" << expr
-                           << "));\n";
+                    stream << indent << "{\n";
+                    if (signal.waveformPrevScalarKind == ValueSlotScalarKind::kBool)
+                    {
+                        stream << indent << "    const std::uint8_t curr_value = static_cast<std::uint8_t>((" << expr
+                               << ") ? 1u : 0u);\n";
+                    }
+                    else
+                    {
+                        stream << indent << "    const auto curr_value = static_cast<"
+                               << scalarLogicSlotCppType(signal.waveformPrevScalarKind)
+                               << ">(grhsim_trunc_u64(static_cast<std::uint64_t>(" << expr << "), "
+                               << (signal.width <= 0 ? 1 : signal.width) << "u));\n";
+                    }
+                    stream << indent << "    auto &prev_value = "
+                           << packedScalarStorageDirectRefExpr("waveform_prev_logic_storage_",
+                                                               signal.waveformPrevScalarKind,
+                                                               std::to_string(signal.waveformPrevStorageOffset))
+                           << ";\n";
+                    stream << indent << "    if (force || prev_value != curr_value) {\n";
+                    stream << indent << "        waveform_writer_->emit_logic_u64(waveform_handles_["
+                           << signalIndex << "], " << (signal.width <= 0 ? 1 : signal.width)
+                           << "u, static_cast<std::uint64_t>(curr_value));\n";
+                    stream << indent << "        prev_value = curr_value;\n";
+                    stream << indent << "    }\n";
+                    stream << indent << "}\n";
                 }
                 break;
             }
@@ -10213,7 +10318,7 @@ namespace wolvrix::lib::emit
                             model.waveformSignals.data() + waveformBegin, waveformEnd - waveformBegin),
                         "    ");
                     stream << "}\n";
-                    stream << "\nvoid " << className << "::dump_waveform_batch_" << batch.index << "()\n{\n";
+                    stream << "\nvoid " << className << "::dump_waveform_batch_" << batch.index << "(bool force)\n{\n";
                     for (std::size_t signalIndex = waveformBegin; signalIndex < waveformEnd; ++signalIndex)
                     {
                         emitWaveformSignalWrite(stream, graph, model, model.waveformSignals[signalIndex], signalIndex, "    ");
@@ -10350,6 +10455,7 @@ namespace wolvrix::lib::emit
         if (waveformMode == WaveformMode::kDeclaredSymbols)
         {
             collectDeclaredSymbolWaveformSignals(graph, model, model.waveformSignals);
+            assignWaveformPrevStorageLayout(model);
         }
         for (OperationId opId : graph.operations())
         {
@@ -13451,9 +13557,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     {
                         *stream << "    void register_waveform_batch_" << batchIndex
                                 << "(grhsim_fst_writer &writer);\n";
-                        *stream << "    void dump_waveform_batch_" << batchIndex << "();\n";
+                        *stream << "    void dump_waveform_batch_" << batchIndex << "(bool force);\n";
                     }
                 }
+                *stream << "    void reset_waveform_tracking();\n";
             }
             for (const auto &chunk : initChunks)
             {
@@ -13708,6 +13815,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             if (model.emitWaveform)
             {
                 *stream << "    bool waveform_enabled_ = false;\n";
+                *stream << "    bool waveform_initialized_ = false;\n";
                 *stream << "    std::string waveform_path_ = \"" << escapeCppString(prefix + ".fst") << "\";\n";
                 *stream << "    std::unique_ptr<grhsim_fst_writer> waveform_writer_;\n";
                 *stream << "    std::vector<std::uint32_t> waveform_handles_;\n";
@@ -13765,6 +13873,31 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             if (!model.valueFieldDecls.empty())
             {
                 *stream << '\n';
+            }
+            if (model.emitWaveform)
+            {
+                if (model.waveformPrevLogicStorageBytes != 0)
+                {
+                    *stream << "    static constexpr std::size_t kWaveformPrevLogicStorageBytes = "
+                            << model.waveformPrevLogicStorageBytes << ";\n";
+                    *stream << "    alignas(std::uint64_t) std::array<std::byte, kWaveformPrevLogicStorageBytes> "
+                            << "waveform_prev_logic_storage_{};\n";
+                }
+                if (model.waveformPrevRealCount != 0)
+                {
+                    *stream << "    std::array<double, " << model.waveformPrevRealCount
+                            << "> waveform_prev_real_slots_{};\n";
+                }
+                if (model.waveformPrevStringCount != 0)
+                {
+                    *stream << "    std::array<std::string, " << model.waveformPrevStringCount
+                            << "> waveform_prev_string_slots_{};\n";
+                }
+                if (model.waveformPrevLogicStorageBytes != 0 || model.waveformPrevRealCount != 0 ||
+                    model.waveformPrevStringCount != 0)
+                {
+                    *stream << '\n';
+                }
             }
             if (model.stateLogicStorageBytes != 0)
             {
@@ -14245,6 +14378,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        waveform_writer_.reset();\n";
                 *stream << "    }\n";
                 *stream << "    waveform_handles_.clear();\n";
+                *stream << "    reset_waveform_tracking();\n";
             }
             for (const auto &chunk : initChunks)
             {
@@ -15017,6 +15151,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             }
             if (model.emitWaveform)
             {
+                *stream << "void " << className << "::reset_waveform_tracking()\n{\n";
+                *stream << "    waveform_initialized_ = false;\n";
+                *stream << "}\n\n";
                 *stream << "void " << className << "::configure_waveform(bool enabled, std::string path)\n{\n";
                 *stream << "    if (!path.empty()) {\n";
                 *stream << "        set_waveform_path(std::move(path));\n";
@@ -15030,6 +15167,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        waveform_writer_.reset();\n";
                 *stream << "        waveform_handles_.clear();\n";
                 *stream << "    }\n";
+                *stream << "    if (!waveform_enabled_) {\n";
+                *stream << "        reset_waveform_tracking();\n";
+                *stream << "    }\n";
                 *stream << "}\n\n";
                 *stream << "bool " << className << "::waveform_enabled() const\n{\n";
                 *stream << "    return waveform_enabled_;\n";
@@ -15041,6 +15181,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        waveform_writer_.reset();\n";
                 *stream << "        waveform_handles_.clear();\n";
                 *stream << "    }\n";
+                *stream << "    reset_waveform_tracking();\n";
                 *stream << "}\n\n";
                 *stream << "const std::string &" << className << "::waveform_path() const\n{\n";
                 *stream << "    return waveform_path_;\n";
@@ -15071,6 +15212,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    if (!waveform_writer_) {\n";
                 *stream << "        return;\n";
                 *stream << "    }\n";
+                *stream << "    const bool force = !waveform_initialized_;\n";
                 *stream << "    waveform_writer_->emit_time(time);\n";
                 for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
                 {
@@ -15078,9 +15220,10 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                         waveformSignalRangeForBatch(model.waveformSignals.size(), scheduleBatches.size(), batchIndex);
                     if (waveformBegin < waveformEnd)
                     {
-                        *stream << "    dump_waveform_batch_" << batchIndex << "();\n";
+                        *stream << "    dump_waveform_batch_" << batchIndex << "(force);\n";
                     }
                 }
+                *stream << "    waveform_initialized_ = true;\n";
                 *stream << "}\n\n";
             }
             if (model.needsSystemTaskRuntime)
