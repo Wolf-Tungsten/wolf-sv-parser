@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -43,10 +44,13 @@ namespace wolvrix::lib::emit
         using wolvrix::lib::grh::ValueType;
         using wolvrix::lib::transform::ActivityScheduleStateReadSupernodes;
         using wolvrix::lib::transform::ActivityScheduleSupernodeKind;
+        using wolvrix::lib::transform::ActivityScheduleComputeNodesBySupernode;
         using wolvrix::lib::transform::ActivityScheduleSupernodeKinds;
         using wolvrix::lib::transform::ActivityScheduleSupernodeToOps;
         using wolvrix::lib::transform::ActivityScheduleTopoOrder;
         using wolvrix::lib::transform::ActivityScheduleValueFanout;
+
+        constexpr std::size_t kInlineSystemTaskArgLimit = 16;
 
         template <typename T>
         std::optional<T> getAttribute(const Operation &op, std::string_view key)
@@ -116,6 +120,98 @@ namespace wolvrix::lib::emit
             return out;
         }
 
+        template <typename ArgExprFn>
+        void emitSystemTaskCall(std::ostream &stream,
+                                std::string_view indent,
+                                std::string_view name,
+                                std::size_t argCount,
+                                ArgExprFn argExpr)
+        {
+            const std::string escapedName = escapeCppString(name);
+            if (argCount == 0)
+            {
+                stream << indent << "execute_system_task(\"" << escapedName << "\", {});\n";
+                return;
+            }
+            if (argCount <= kInlineSystemTaskArgLimit)
+            {
+                stream << indent << "execute_system_task(\"" << escapedName << "\", {";
+                for (std::size_t i = 0; i < argCount; ++i)
+                {
+                    if (i != 0)
+                    {
+                        stream << ", ";
+                    }
+                    stream << argExpr(i);
+                }
+                stream << "});\n";
+                return;
+            }
+
+            stream << indent << "execute_system_task(\"" << escapedName << "\", {\n";
+            for (std::size_t i = 0; i < argCount; ++i)
+            {
+                stream << indent << "    " << argExpr(i);
+                if (i + 1u != argCount)
+                {
+                    stream << ',';
+                }
+                stream << '\n';
+            }
+            stream << indent << "});\n";
+        }
+
+        template <typename ArgExprFn>
+        void emitScalarFormatSystemTaskCall(std::ostream &stream,
+                                            std::string_view indent,
+                                            std::string_view name,
+                                            const std::string &handleExpr,
+                                            const std::string &formatExpr,
+                                            std::size_t argCount,
+                                            ArgExprFn argExpr)
+        {
+            const std::string escapedName = escapeCppString(name);
+            stream << indent << "execute_scalar_format_system_task(\"" << escapedName << "\", "
+                   << handleExpr << ", " << formatExpr << ", ";
+            if (argCount == 0)
+            {
+                stream << "{});\n";
+                return;
+            }
+            stream << "{\n";
+            for (std::size_t i = 0; i < argCount; ++i)
+            {
+                stream << indent << "    " << argExpr(i);
+                if (i + 1u != argCount)
+                {
+                    stream << ',';
+                }
+                stream << '\n';
+            }
+            stream << indent << "});\n";
+        }
+
+        template <typename ArgExprFn>
+        void emitDirectScalarFormatSystemTaskCall(std::ostream &stream,
+                                                  std::string_view indent,
+                                                  bool useHandle,
+                                                  bool newline,
+                                                  const std::string &handleExpr,
+                                                  const std::string &formatExpr,
+                                                  std::size_t argCount,
+                                                  ArgExprFn argExpr)
+        {
+            stream << indent << "emit_scalar_format_system_task_direct("
+                   << (useHandle ? "true" : "false") << ", "
+                   << (newline ? "true" : "false") << ", "
+                   << handleExpr << ", " << formatExpr;
+            for (std::size_t i = 0; i < argCount; ++i)
+            {
+                stream << ", " << argExpr(i);
+            }
+            stream << ");\n";
+        }
+
         std::string sanitizeCommentText(std::string_view text)
         {
             std::string out;
@@ -175,6 +271,13 @@ namespace wolvrix::lib::emit
             bool operator==(const ActiveMaskEntry &) const = default;
         };
 
+        struct ActiveMaskChunk
+        {
+            std::size_t wordIndex = 0;
+            std::size_t byteWidth = 1;
+            std::uint64_t mask = 0;
+        };
+
         std::size_t bitWordCount(std::size_t bitCount) noexcept
         {
             return (bitCount + 63u) / 64u;
@@ -199,12 +302,175 @@ namespace wolvrix::lib::emit
             return entries;
         }
 
+        bool hasContiguousActiveMaskEntries(const std::vector<ActiveMaskEntry> &entries,
+                                            std::size_t offset,
+                                            std::size_t width) noexcept
+        {
+            if (offset + width > entries.size())
+            {
+                return false;
+            }
+            const std::size_t baseWordIndex = entries[offset].wordIndex;
+            for (std::size_t i = 1; i < width; ++i)
+            {
+                if (entries[offset + i].wordIndex != baseWordIndex + i)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        std::uint64_t packActiveMaskChunk(const std::vector<ActiveMaskEntry> &entries,
+                                          std::size_t offset,
+                                          std::size_t width) noexcept
+        {
+            std::uint64_t mask = 0;
+            for (std::size_t i = 0; i < width; ++i)
+            {
+                mask |= static_cast<std::uint64_t>(entries[offset + i].mask) << (i * 8u);
+            }
+            return mask;
+        }
+
+        std::vector<ActiveMaskChunk> buildActiveMaskChunks(const std::vector<ActiveMaskEntry> &entries)
+        {
+            std::vector<ActiveMaskChunk> chunks;
+            chunks.reserve(entries.size());
+            for (std::size_t i = 0; i < entries.size();)
+            {
+                std::size_t width = 1;
+                if (hasContiguousActiveMaskEntries(entries, i, 8))
+                {
+                    width = 8;
+                }
+                else if (hasContiguousActiveMaskEntries(entries, i, 4))
+                {
+                    width = 4;
+                }
+                else if (hasContiguousActiveMaskEntries(entries, i, 2))
+                {
+                    width = 2;
+                }
+                chunks.push_back(ActiveMaskChunk{
+                    .wordIndex = entries[i].wordIndex,
+                    .byteWidth = width,
+                    .mask = packActiveMaskChunk(entries, i, width),
+                });
+                i += width;
+            }
+            return chunks;
+        }
+
+        void emitActiveMaskChunkStatement(std::ostream &stream,
+                                          std::string_view activeExpr,
+                                          const ActiveMaskChunk &chunk,
+                                          std::string_view indent)
+        {
+            if (chunk.byteWidth == 8)
+            {
+                stream << indent << "grhsim_or_active_u64(" << activeExpr << ".data(), " << chunk.wordIndex
+                       << "u, UINT64_C(" << chunk.mask << "));\n";
+            }
+            else if (chunk.byteWidth == 4)
+            {
+                stream << indent << "grhsim_or_active_u32(" << activeExpr << ".data(), " << chunk.wordIndex
+                       << "u, UINT32_C(" << static_cast<std::uint32_t>(chunk.mask) << "));\n";
+            }
+            else if (chunk.byteWidth == 2)
+            {
+                stream << indent << "grhsim_or_active_u16(" << activeExpr << ".data(), " << chunk.wordIndex
+                       << "u, UINT16_C(" << static_cast<std::uint16_t>(chunk.mask) << "));\n";
+            }
+            else
+            {
+                stream << indent << activeExpr << "[" << chunk.wordIndex << "u] |= UINT8_C("
+                       << static_cast<unsigned>(chunk.mask) << ");\n";
+            }
+        }
+
+        std::string conditionalMaskExpr(std::string_view conditionExpr, std::size_t byteWidth)
+        {
+            const std::string cond(conditionExpr);
+            switch (byteWidth)
+            {
+            case 8:
+                return "static_cast<std::uint64_t>(-static_cast<std::uint64_t>(" + cond + "))";
+            case 4:
+                return "static_cast<std::uint32_t>(-static_cast<std::uint32_t>(" + cond + "))";
+            case 2:
+                return "static_cast<std::uint16_t>(-static_cast<std::uint16_t>(" + cond + "))";
+            default:
+                return "static_cast<std::uint8_t>(-static_cast<std::uint8_t>(" + cond + "))";
+            }
+        }
+
+        void emitConditionalActiveMaskChunkStatement(std::ostream &stream,
+                                                     std::string_view activeExpr,
+                                                     std::string_view conditionExpr,
+                                                     const ActiveMaskChunk &chunk,
+                                                     std::string_view indent)
+        {
+            if (chunk.byteWidth == 8)
+            {
+                stream << indent << "grhsim_or_active_u64(" << activeExpr << ".data(), " << chunk.wordIndex
+                       << "u, static_cast<std::uint64_t>(" << conditionalMaskExpr(conditionExpr, 8)
+                       << " & UINT64_C(" << chunk.mask << ")));\n";
+            }
+            else if (chunk.byteWidth == 4)
+            {
+                stream << indent << "grhsim_or_active_u32(" << activeExpr << ".data(), " << chunk.wordIndex
+                       << "u, static_cast<std::uint32_t>(" << conditionalMaskExpr(conditionExpr, 4)
+                       << " & UINT32_C(" << static_cast<std::uint32_t>(chunk.mask) << ")));\n";
+            }
+            else if (chunk.byteWidth == 2)
+            {
+                stream << indent << "grhsim_or_active_u16(" << activeExpr << ".data(), " << chunk.wordIndex
+                       << "u, static_cast<std::uint16_t>(" << conditionalMaskExpr(conditionExpr, 2)
+                       << " & UINT16_C(" << static_cast<std::uint16_t>(chunk.mask) << ")));\n";
+            }
+            else
+            {
+                stream << indent << activeExpr << "[" << chunk.wordIndex
+                       << "u] |= static_cast<std::uint8_t>(" << conditionalMaskExpr(conditionExpr, 1)
+                       << " & UINT8_C(" << static_cast<unsigned>(chunk.mask) << "));\n";
+            }
+        }
+
         struct ActivationEmitContext
         {
             std::size_t currentWordIndex = 0;
             std::size_t currentActiveId = kInvalidIndex;
             std::string_view localActiveExpr;
         };
+
+        struct DeferredActivationGroup
+        {
+            std::vector<uint32_t> activeIds;
+            std::string changedExpr;
+        };
+
+        using DeferredActivationGroups = std::vector<DeferredActivationGroup>;
+
+        struct DeferredActivationEmitContext
+        {
+            DeferredActivationGroups *groups = nullptr;
+        };
+
+        std::string activationGroupKey(const std::vector<uint32_t> &activeIds)
+        {
+            std::string key;
+            key.reserve(activeIds.size() * 8u);
+            for (uint32_t activeId : activeIds)
+            {
+                if (!key.empty())
+                {
+                    key.push_back(',');
+                }
+                key += std::to_string(activeId);
+            }
+            return key;
+        }
 
         void emitActivationStatements(std::ostream &stream,
                                       std::string_view activeExpr,
@@ -295,10 +561,96 @@ namespace wolvrix::lib::emit
                 stream << indent << "}\n";
                 return;
             }
-            for (const auto &entry : entries)
+            const std::vector<ActiveMaskChunk> chunks = buildActiveMaskChunks(entries);
+            for (const auto &chunk : chunks)
             {
-                stream << indent << activeExpr << "[" << entry.wordIndex << "u] |= UINT8_C("
-                       << static_cast<unsigned>(entry.mask) << ");\n";
+                emitActiveMaskChunkStatement(stream, activeExpr, chunk, indent);
+            }
+        }
+
+        void emitConditionalActivationStatements(std::ostream &stream,
+                                                 std::string_view activeExpr,
+                                                 std::string_view activeCountExpr,
+                                                 const std::vector<uint32_t> &indices,
+                                                 std::string_view conditionExpr,
+                                                 std::string_view indent,
+                                                 const struct ActivationEmitContext *context = nullptr,
+                                                 const std::vector<std::size_t> *activeIdBySupernode = nullptr)
+        {
+            (void)activeCountExpr;
+            (void)activeIdBySupernode;
+            if (indices.empty())
+            {
+                return;
+            }
+
+            std::vector<uint32_t> localIndices;
+            std::vector<uint32_t> globalIndices;
+            if (context != nullptr && !context->localActiveExpr.empty())
+            {
+                localIndices.reserve(indices.size());
+                globalIndices.reserve(indices.size());
+                const std::size_t currentBitIndex =
+                    context->currentActiveId == kInvalidIndex
+                        ? kInvalidIndex
+                        : (context->currentActiveId % kActiveFlagBitsPerWord);
+                for (uint32_t activeId : indices)
+                {
+                    const std::size_t targetWordIndex =
+                        static_cast<std::size_t>(activeId) / kActiveFlagBitsPerWord;
+                    const std::size_t targetBitIndex =
+                        static_cast<std::size_t>(activeId) % kActiveFlagBitsPerWord;
+                    if (targetWordIndex == context->currentWordIndex &&
+                        context->currentActiveId != kInvalidIndex &&
+                        targetBitIndex > currentBitIndex)
+                    {
+                        localIndices.push_back(activeId);
+                    }
+                    else
+                    {
+                        globalIndices.push_back(activeId);
+                    }
+                }
+            }
+            else
+            {
+                globalIndices = indices;
+            }
+
+            std::size_t statementCount = localIndices.empty() ? 0u : 1u;
+            const std::vector<ActiveMaskEntry> entries = buildActiveMaskEntries(globalIndices);
+            const std::vector<ActiveMaskChunk> chunks = buildActiveMaskChunks(entries);
+            statementCount += chunks.size();
+            if (entries.size() >= kActivationTableThreshold || statementCount > 3u)
+            {
+                stream << indent << "if (" << conditionExpr << ") {\n";
+                emitActivationStatements(stream,
+                                         activeExpr,
+                                         activeCountExpr,
+                                         indices,
+                                         std::string(indent) + "    ",
+                                         context,
+                                         activeIdBySupernode);
+                stream << indent << "}\n";
+                return;
+            }
+
+            if (!localIndices.empty())
+            {
+                std::uint8_t localMask = UINT8_C(0);
+                for (uint32_t index : localIndices)
+                {
+                    localMask = static_cast<std::uint8_t>(
+                        localMask |
+                        (UINT8_C(1) << (static_cast<std::size_t>(index) % kActiveFlagBitsPerWord)));
+                }
+                stream << indent << context->localActiveExpr
+                       << " |= static_cast<std::uint8_t>(" << conditionalMaskExpr(conditionExpr, 1)
+                       << " & UINT8_C(" << static_cast<unsigned>(localMask) << "));\n";
+            }
+            for (const auto &chunk : chunks)
+            {
+                emitConditionalActiveMaskChunkStatement(stream, activeExpr, conditionExpr, chunk, indent);
             }
         }
 
@@ -353,8 +705,195 @@ namespace wolvrix::lib::emit
                 total += 7 + ((entries.size() + 7u) / 8u);
                 return total;
             }
-            total += entries.size() * 3u;
+            total += buildActiveMaskChunks(entries).size() * 3u;
             return total;
+        }
+
+        std::size_t estimateConditionalActivationEmitCost(const std::vector<uint32_t> &indices,
+                                                          const ActivationEmitContext *context = nullptr) noexcept
+        {
+            if (indices.empty())
+            {
+                return 0;
+            }
+
+            std::vector<uint32_t> localIndices;
+            std::vector<uint32_t> globalIndices;
+            if (context != nullptr && !context->localActiveExpr.empty())
+            {
+                localIndices.reserve(indices.size());
+                globalIndices.reserve(indices.size());
+                const std::size_t currentBitIndex =
+                    context->currentActiveId == kInvalidIndex
+                        ? kInvalidIndex
+                        : (context->currentActiveId % kActiveFlagBitsPerWord);
+                for (uint32_t activeId : indices)
+                {
+                    const std::size_t targetWordIndex =
+                        static_cast<std::size_t>(activeId) / kActiveFlagBitsPerWord;
+                    const std::size_t targetBitIndex =
+                        static_cast<std::size_t>(activeId) % kActiveFlagBitsPerWord;
+                    if (targetWordIndex == context->currentWordIndex &&
+                        context->currentActiveId != kInvalidIndex &&
+                        targetBitIndex > currentBitIndex)
+                    {
+                        localIndices.push_back(activeId);
+                    }
+                    else
+                    {
+                        globalIndices.push_back(activeId);
+                    }
+                }
+            }
+            else
+            {
+                globalIndices = indices;
+            }
+
+            const std::vector<ActiveMaskEntry> entries = buildActiveMaskEntries(globalIndices);
+            const std::vector<ActiveMaskChunk> chunks = buildActiveMaskChunks(entries);
+            const std::size_t statementCount = (localIndices.empty() ? 0u : 1u) + chunks.size();
+            if (entries.size() >= kActivationTableThreshold || statementCount > 3u)
+            {
+                return 2u + estimateActivationEmitLines(indices, context);
+            }
+            return statementCount;
+        }
+
+        void emitDeferredActivationFlushStatements(std::ostream &stream,
+                                                   std::string_view activeExpr,
+                                                   std::string_view activeCountExpr,
+                                                   const DeferredActivationGroups &groups,
+                                                   std::string_view indent,
+                                                   const ActivationEmitContext *context = nullptr)
+        {
+            if (groups.empty())
+            {
+                return;
+            }
+
+            struct ConditionalMask
+            {
+                std::string conditionExpr;
+                std::uint8_t mask = 0;
+            };
+            struct WordMaskAccumulator
+            {
+                std::size_t wordIndex = 0;
+                std::string tempName;
+                std::vector<ConditionalMask> updates;
+            };
+
+            std::vector<ConditionalMask> localUpdates;
+            std::map<std::size_t, WordMaskAccumulator> wordAccumulators;
+            std::size_t directCost = 0;
+            std::size_t aggregateUpdateCost = 0;
+
+            for (const auto &group : groups)
+            {
+                directCost += estimateConditionalActivationEmitCost(group.activeIds, context);
+
+                std::vector<uint32_t> localIndices;
+                std::vector<uint32_t> globalIndices;
+                if (context != nullptr && !context->localActiveExpr.empty())
+                {
+                    localIndices.reserve(group.activeIds.size());
+                    globalIndices.reserve(group.activeIds.size());
+                    const std::size_t currentBitIndex =
+                        context->currentActiveId == kInvalidIndex
+                            ? kInvalidIndex
+                            : (context->currentActiveId % kActiveFlagBitsPerWord);
+                    for (uint32_t activeId : group.activeIds)
+                    {
+                        const std::size_t targetWordIndex =
+                            static_cast<std::size_t>(activeId) / kActiveFlagBitsPerWord;
+                        const std::size_t targetBitIndex =
+                            static_cast<std::size_t>(activeId) % kActiveFlagBitsPerWord;
+                        if (targetWordIndex == context->currentWordIndex &&
+                            context->currentActiveId != kInvalidIndex &&
+                            targetBitIndex > currentBitIndex)
+                        {
+                            localIndices.push_back(activeId);
+                        }
+                        else
+                        {
+                            globalIndices.push_back(activeId);
+                        }
+                    }
+                }
+                else
+                {
+                    globalIndices = group.activeIds;
+                }
+
+                if (!localIndices.empty())
+                {
+                    std::uint8_t localMask = UINT8_C(0);
+                    for (uint32_t activeId : localIndices)
+                    {
+                        localMask = static_cast<std::uint8_t>(
+                            localMask |
+                            (UINT8_C(1) << (static_cast<std::size_t>(activeId) % kActiveFlagBitsPerWord)));
+                    }
+                    localUpdates.push_back(ConditionalMask{.conditionExpr = group.changedExpr, .mask = localMask});
+                }
+
+                for (const auto &entry : buildActiveMaskEntries(globalIndices))
+                {
+                    auto &accumulator = wordAccumulators[entry.wordIndex];
+                    if (accumulator.tempName.empty())
+                    {
+                        accumulator.wordIndex = entry.wordIndex;
+                        accumulator.tempName = "grhsim_deferred_active_word_" + std::to_string(entry.wordIndex);
+                    }
+                    accumulator.updates.push_back(ConditionalMask{.conditionExpr = group.changedExpr,
+                                                                  .mask = entry.mask});
+                    ++aggregateUpdateCost;
+                }
+            }
+
+            const std::size_t aggregateCost =
+                localUpdates.size() + aggregateUpdateCost + (wordAccumulators.size() * 2u);
+            if (wordAccumulators.empty() || aggregateCost + 2u >= directCost)
+            {
+                for (const auto &group : groups)
+                {
+                    emitConditionalActivationStatements(stream,
+                                                        activeExpr,
+                                                        activeCountExpr,
+                                                        group.activeIds,
+                                                        group.changedExpr,
+                                                        indent,
+                                                        context);
+                }
+                return;
+            }
+
+            for (const auto &update : localUpdates)
+            {
+                stream << indent << context->localActiveExpr
+                       << " |= static_cast<std::uint8_t>(" << conditionalMaskExpr(update.conditionExpr, 1)
+                       << " & UINT8_C(" << static_cast<unsigned>(update.mask) << "));\n";
+            }
+            for (const auto &[_, accumulator] : wordAccumulators)
+            {
+                stream << indent << "std::uint8_t " << accumulator.tempName << " = UINT8_C(0);\n";
+            }
+            for (const auto &[_, accumulator] : wordAccumulators)
+            {
+                for (const auto &update : accumulator.updates)
+                {
+                    stream << indent << accumulator.tempName << " = static_cast<std::uint8_t>("
+                           << accumulator.tempName << " | (" << conditionalMaskExpr(update.conditionExpr, 1)
+                           << " & UINT8_C(" << static_cast<unsigned>(update.mask) << ")));\n";
+                }
+            }
+            for (const auto &[_, accumulator] : wordAccumulators)
+            {
+                stream << indent << activeExpr << "[" << accumulator.wordIndex
+                       << "u] = static_cast<std::uint8_t>(" << activeExpr << "[" << accumulator.wordIndex
+                       << "u] | " << accumulator.tempName << ");\n";
+            }
         }
 
         struct EmitModel;
@@ -374,9 +913,12 @@ namespace wolvrix::lib::emit
             std::unordered_map<ValueId, SupernodeLocalExpr, ValueIdHash> byValue;
             std::unordered_map<ValueId, std::string, ValueIdHash> storedValueRefByValue;
             std::unordered_map<std::string, std::string> stateRefBySymbol;
+            std::unordered_map<ValueId, std::size_t, ValueIdHash> useCountByValue;
         };
         bool isWritePortKind(OperationKind kind) noexcept;
         bool valueNeedsTrackedChange(const EmitModel &model, ValueId resultValue);
+        bool isMaterializedValue(const EmitModel &model, ValueId value);
+        std::optional<std::string> stableValueExpr(const Graph &graph, const EmitModel &model, ValueId value);
         std::string resolvedScheduleValueExpr(const EmitModel &model,
                                               ValueId value,
                                               const SupernodeLocalExprContext *context);
@@ -384,6 +926,9 @@ namespace wolvrix::lib::emit
                                           ValueId value,
                                           const std::string &expr,
                                           int32_t destWidth);
+        std::string assignWordsInlineExpr(const std::string &lhsExpr,
+                                          const std::string &rhsExpr,
+                                          int32_t width);
 
         void emitChangedValuePropagation(std::ostream &stream,
                                          const EmitModel &model,
@@ -410,17 +955,150 @@ namespace wolvrix::lib::emit
             return "UINT64_C(" + std::to_string((UINT64_C(1) << width) - UINT64_C(1)) + ")";
         }
 
+        bool hasSingleOuterParens(std::string_view expr) noexcept
+        {
+            if (expr.size() < 2 || expr.front() != '(' || expr.back() != ')')
+            {
+                return false;
+            }
+            std::size_t depth = 0;
+            for (std::size_t i = 0; i < expr.size(); ++i)
+            {
+                if (expr[i] == '(')
+                {
+                    ++depth;
+                }
+                else if (expr[i] == ')')
+                {
+                    if (depth == 0)
+                    {
+                        return false;
+                    }
+                    --depth;
+                    if (depth == 0 && i + 1u != expr.size())
+                    {
+                        return false;
+                    }
+                }
+            }
+            return depth == 0;
+        }
+
+        std::string stripRedundantOuterParens(std::string expr)
+        {
+            while (hasSingleOuterParens(expr))
+            {
+                expr = expr.substr(1, expr.size() - 2u);
+            }
+            return expr;
+        }
+
+        bool outerCallCoversWholeExpr(std::string_view expr, std::size_t openParenIndex) noexcept
+        {
+            if (openParenIndex >= expr.size() || expr[openParenIndex] != '(')
+            {
+                return false;
+            }
+            std::size_t depth = 0;
+            for (std::size_t i = openParenIndex; i < expr.size(); ++i)
+            {
+                if (expr[i] == '(')
+                {
+                    ++depth;
+                }
+                else if (expr[i] == ')')
+                {
+                    if (depth == 0)
+                    {
+                        return false;
+                    }
+                    --depth;
+                    if (depth == 0)
+                    {
+                        return i + 1u == expr.size();
+                    }
+                }
+            }
+            return false;
+        }
+
+        bool isWholeOuterCastToType(std::string_view expr, std::string_view cppType) noexcept
+        {
+            const std::string prefix = "static_cast<" + std::string(cppType) + ">(";
+            return expr.starts_with(prefix) &&
+                   expr.ends_with(")") &&
+                   outerCallCoversWholeExpr(expr, prefix.size() - 1u);
+        }
+
+        bool hasTopLevelTrailingMask(std::string_view expr, std::string_view mask) noexcept
+        {
+            const std::string suffix = " & " + std::string(mask);
+            if (!expr.ends_with(suffix))
+            {
+                return false;
+            }
+            const std::size_t ampIndex = expr.size() - suffix.size() + 1u;
+            std::size_t depth = 0;
+            for (std::size_t i = 0; i < ampIndex; ++i)
+            {
+                if (expr[i] == '(')
+                {
+                    ++depth;
+                }
+                else if (expr[i] == ')')
+                {
+                    if (depth == 0)
+                    {
+                        return false;
+                    }
+                    --depth;
+                }
+            }
+            return depth == 0 && expr[ampIndex] == '&';
+        }
+
+        bool isScalarZeroLiteral(std::string_view expr) noexcept
+        {
+            return expr == "UINT64_C(0)" || expr == "0";
+        }
+
+        std::string stripRedundantUint64Cast(std::string expr);
+
+        bool scalarExprAlreadyMaskedToWidth(const std::string &expr, std::size_t width)
+        {
+            if (width >= 64)
+            {
+                return true;
+            }
+            const std::string compact = stripRedundantOuterParens(expr);
+            return hasTopLevelTrailingMask(compact, scalarMaskExpr(width));
+        }
+
         std::string scalarTruncExpr(const std::string &expr, std::size_t width)
         {
+            const std::string compact = stripRedundantOuterParens(expr);
             if (width == 0)
             {
                 return "UINT64_C(0)";
             }
+            if (isScalarZeroLiteral(compact))
+            {
+                return "UINT64_C(0)";
+            }
+            const std::string uncast = stripRedundantUint64Cast(compact);
+            if (uncast != compact)
+            {
+                return scalarTruncExpr(uncast, width);
+            }
             if (width >= 64)
             {
-                return "(" + expr + ")";
+                return "(" + compact + ")";
             }
-            return "((" + expr + ") & " + scalarMaskExpr(width) + ")";
+            if (scalarExprAlreadyMaskedToWidth(compact, width))
+            {
+                return "(" + compact + ")";
+            }
+            return "((" + compact + ") & " + scalarMaskExpr(width) + ")";
         }
 
         std::string scalarConcatExpr(const std::string &lhs,
@@ -442,7 +1120,12 @@ namespace wolvrix::lib::emit
 
         std::string scalarShiftAmountExpr(const std::string &expr)
         {
-            return "static_cast<std::uint64_t>(" + expr + ")";
+            const std::string compact = stripRedundantOuterParens(expr);
+            if (compact.starts_with("UINT64_C(") && compact.ends_with(")"))
+            {
+                return compact;
+            }
+            return "static_cast<std::uint64_t>(" + compact + ")";
         }
 
         std::string scalarShlExpr(const std::string &valueExpr,
@@ -550,6 +1233,23 @@ namespace wolvrix::lib::emit
             }
         }
 
+        std::size_t parseScheduleBatchesPerCpp(const EmitOptions &options)
+        {
+            auto it = options.attributes.find("sched_batches_per_cpp");
+            if (it == options.attributes.end())
+            {
+                return 1;
+            }
+            try
+            {
+                return std::max<std::size_t>(1, static_cast<std::size_t>(std::stoull(it->second)));
+            }
+            catch (const std::exception &)
+            {
+                return 1;
+            }
+        }
+
         std::size_t parseEmitParallelism(const EmitOptions &options)
         {
             auto fallback = []() -> std::size_t
@@ -572,6 +1272,60 @@ namespace wolvrix::lib::emit
             {
                 return fallback();
             }
+        }
+
+        bool parseBooleanEmitOption(const EmitOptions &options,
+                                    std::string_view attributeName,
+                                    const char *envName,
+                                    bool defaultValue = false)
+        {
+            auto parse = [](std::string_view text, bool fallback) {
+                if (text.empty())
+                {
+                    return fallback;
+                }
+                if (text == "0" || text == "false" || text == "False" || text == "FALSE" ||
+                    text == "off" || text == "Off" || text == "OFF" ||
+                    text == "no" || text == "No" || text == "NO")
+                {
+                    return false;
+                }
+                return true;
+            };
+
+            if (auto it = options.attributes.find(std::string(attributeName)); it != options.attributes.end())
+            {
+                return parse(it->second, defaultValue);
+            }
+            if (const char *env = std::getenv(envName))
+            {
+                return parse(env, defaultValue);
+            }
+            return defaultValue;
+        }
+
+        bool emitStorageRefAliasesEnabled()
+        {
+            if (const char *env = std::getenv("WOLVRIX_GRHSIM_STORAGE_REF_ALIASES"))
+            {
+                const std::string_view value(env);
+                return !(value == "0" || value == "false" || value == "False" || value == "FALSE" ||
+                         value == "off" || value == "Off" || value == "OFF" ||
+                         value == "no" || value == "No" || value == "NO");
+            }
+            return true;
+        }
+
+        bool emitMaterializedValueStatsEnabled()
+        {
+            if (const char *env = std::getenv("WOLVRIX_GRHSIM_MATERIALIZED_VALUE_STATS"))
+            {
+                const std::string_view value(env);
+                return !(value == "0" || value == "false" || value == "False" || value == "FALSE" ||
+                         value == "off" || value == "Off" || value == "OFF" ||
+                         value == "no" || value == "No" || value == "NO");
+            }
+            return false;
         }
 
         enum class WaveformMode
@@ -942,8 +1696,8 @@ namespace wolvrix::lib::emit
 
         std::string localValueName(const Graph &graph, ValueId value)
         {
-            return "local_value_" + std::to_string(value.index) + "_" + std::to_string(value.generation) + "_" +
-                   valueDebugName(graph, value);
+            (void)graph;
+            return "grhsim_v" + std::to_string(value.index) + "_" + std::to_string(value.generation);
         }
 
         std::string materializedValueFieldName(const Graph &graph, ValueId value)
@@ -1415,7 +2169,43 @@ namespace wolvrix::lib::emit
             const ActivityScheduleTopoOrder &topoOrder;
             const ActivityScheduleStateReadSupernodes &stateReadSupernodes;
             const ActivityScheduleSupernodeKinds *supernodeKinds = nullptr;
+            const ActivityScheduleComputeNodesBySupernode *computeNodesBySupernode = nullptr;
         };
+
+        std::string persistentReasonSummary(uint32_t reasons)
+        {
+            struct ReasonName
+            {
+                uint32_t bit = 0;
+                std::string_view name;
+            };
+            constexpr std::array<ReasonName, 10> kReasonNames = {{
+                {1u << 0u, "output"},
+                {1u << 1u, "inout"},
+                {1u << 2u, "waveform"},
+                {1u << 3u, "event"},
+                {1u << 4u, "boundary"},
+                {1u << 5u, "commit_operand"},
+                {1u << 6u, "no_def"},
+                {1u << 7u, "non_logic"},
+                {1u << 8u, "side_effect_result"},
+                {1u << 9u, "phase_crossing"},
+            }};
+            std::string out;
+            for (const auto &entry : kReasonNames)
+            {
+                if ((reasons & entry.bit) == 0)
+                {
+                    continue;
+                }
+                if (!out.empty())
+                {
+                    out.push_back('+');
+                }
+                out += entry.name;
+            }
+            return out.empty() ? std::string("none") : out;
+        }
 
         bool isCommitPhaseOp(const Operation &op)
         {
@@ -1677,7 +2467,13 @@ namespace wolvrix::lib::emit
             std::vector<uint32_t> commitSupernodeIds;
             std::vector<uint8_t> supernodeHasComputePart;
             std::vector<uint8_t> supernodeHasCommitPart;
+            bool emitRuntimeProfile = false;
+            std::vector<std::size_t> runtimeProfileComputeNodesBySupernode;
+            std::vector<std::size_t> runtimeProfileSourceOpsBySupernode;
+            std::vector<std::size_t> runtimeProfileComputeOpsBySupernode;
+            std::vector<std::size_t> runtimeProfileSinkOpsBySupernode;
             std::vector<std::string> staticConstStringDecls;
+            std::vector<std::string> staticConstStringDefs;
             std::vector<std::string> valueFieldDecls;
             std::vector<std::string> stateFieldDecls;
             std::vector<std::string> shadowFieldDecls;
@@ -1796,6 +2592,83 @@ namespace wolvrix::lib::emit
                 return;
             }
             stream << indent << "perf_counters_ = PerfCounters{};\n";
+        }
+
+        enum class RuntimeProfileOpClass
+        {
+            Source,
+            Compute,
+            Sink,
+            Ignored,
+        };
+
+        RuntimeProfileOpClass classifyRuntimeProfileOp(OperationKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case OperationKind::kConstant:
+            case OperationKind::kRegisterReadPort:
+            case OperationKind::kLatchReadPort:
+                return RuntimeProfileOpClass::Source;
+            case OperationKind::kRegisterWritePort:
+            case OperationKind::kLatchWritePort:
+            case OperationKind::kMemoryWritePort:
+            case OperationKind::kMemoryFillPort:
+                return RuntimeProfileOpClass::Sink;
+            case OperationKind::kRegister:
+            case OperationKind::kMemory:
+            case OperationKind::kLatch:
+            case OperationKind::kDpicImport:
+            case OperationKind::kInstance:
+            case OperationKind::kBlackbox:
+                return RuntimeProfileOpClass::Ignored;
+            default:
+                return RuntimeProfileOpClass::Compute;
+            }
+        }
+
+        void buildRuntimeProfileWeights(const Graph &graph,
+                                        const ScheduleRefs &schedule,
+                                        EmitModel &model)
+        {
+            const std::size_t supernodeCount = schedule.supernodeToOps.size();
+            model.runtimeProfileComputeNodesBySupernode.assign(supernodeCount, 0);
+            model.runtimeProfileSourceOpsBySupernode.assign(supernodeCount, 0);
+            model.runtimeProfileComputeOpsBySupernode.assign(supernodeCount, 0);
+            model.runtimeProfileSinkOpsBySupernode.assign(supernodeCount, 0);
+            for (std::size_t supernodeId = 0; supernodeId < supernodeCount; ++supernodeId)
+            {
+                if (schedule.computeNodesBySupernode != nullptr &&
+                    supernodeId < schedule.computeNodesBySupernode->size())
+                {
+                    model.runtimeProfileComputeNodesBySupernode[supernodeId] =
+                        (*schedule.computeNodesBySupernode)[supernodeId].size();
+                }
+                else if (schedule.supernodeKinds != nullptr &&
+                         supernodeId < schedule.supernodeKinds->size() &&
+                         (*schedule.supernodeKinds)[supernodeId] == ActivityScheduleSupernodeKind::Compute)
+                {
+                    model.runtimeProfileComputeNodesBySupernode[supernodeId] = 1;
+                }
+                for (OperationId opId : schedule.supernodeToOps[supernodeId])
+                {
+                    const OperationKind kind = graph.opKind(opId);
+                    switch (classifyRuntimeProfileOp(kind))
+                    {
+                    case RuntimeProfileOpClass::Source:
+                        ++model.runtimeProfileSourceOpsBySupernode[supernodeId];
+                        break;
+                    case RuntimeProfileOpClass::Compute:
+                        ++model.runtimeProfileComputeOpsBySupernode[supernodeId];
+                        break;
+                    case RuntimeProfileOpClass::Sink:
+                        ++model.runtimeProfileSinkOpsBySupernode[supernodeId];
+                        break;
+                    case RuntimeProfileOpClass::Ignored:
+                        break;
+                    }
+                }
+            }
         }
 
         std::optional<std::string> staticConstStringExpr(const Graph &graph, ValueId valueId)
@@ -2069,6 +2942,7 @@ namespace wolvrix::lib::emit
             model.valueFieldByValue.clear();
             model.staticConstStringFieldByValue.clear();
             model.staticConstStringDecls.clear();
+            model.staticConstStringDefs.clear();
             model.valueFieldDecls.clear();
             model.valueScalarSlotByValue.clear();
             model.valueWideSlotByValue.clear();
@@ -2143,10 +3017,7 @@ namespace wolvrix::lib::emit
                 }
                 if (const auto staticExpr = staticConstStringExpr(graph, valueId))
                 {
-                    const std::string fieldName = materializedValueFieldName(graph, valueId);
-                    model.staticConstStringFieldByValue.emplace(valueId, fieldName);
-                    model.staticConstStringDecls.push_back("    inline static constexpr const char *" + fieldName +
-                                                           " = " + *staticExpr + ";");
+                    model.staticConstStringFieldByValue.emplace(valueId, *staticExpr);
                     continue;
                 }
                 switch (graph.valueType(valueId))
@@ -2217,6 +3088,7 @@ namespace wolvrix::lib::emit
             model.valueFieldByValue.clear();
             model.staticConstStringFieldByValue.clear();
             model.staticConstStringDecls.clear();
+            model.staticConstStringDefs.clear();
             model.valueFieldDecls.clear();
             model.valueScalarSlotByValue.clear();
             model.valueWideSlotByValue.clear();
@@ -2235,10 +3107,7 @@ namespace wolvrix::lib::emit
                 }
                 if (const auto staticExpr = staticConstStringExpr(graph, valueId))
                 {
-                    const std::string fieldName = materializedValueFieldName(graph, valueId);
-                    model.staticConstStringFieldByValue.emplace(valueId, fieldName);
-                    model.staticConstStringDecls.push_back("    inline static constexpr const char *" + fieldName +
-                                                           " = " + *staticExpr + ";");
+                    model.staticConstStringFieldByValue.emplace(valueId, *staticExpr);
                     continue;
                 }
                 switch (graph.valueType(valueId))
@@ -3127,8 +3996,15 @@ namespace wolvrix::lib::emit
                 {
                     continue;
                 }
+                const std::string aliasName =
+                    isWideLogicWidth(stateIt->second.width)
+                        ? ("grhsim_state_words_" + std::to_string(stateIt->second.wordCount) + "_slot_" +
+                           std::to_string(stateIt->second.slotIndex))
+                        : ("grhsim_state_scalar_" +
+                           std::to_string(static_cast<std::size_t>(stateIt->second.scalarKind)) + "_slot_" +
+                           std::to_string(stateIt->second.slotIndex));
                 aliases.push_back(SupernodeStorageRefAliasDecl{
-                    .aliasName = "grhsim_state_slot_" + std::to_string(stateIt->second.slotIndex),
+                    .aliasName = aliasName,
                     .initExpr = stateRef(stateIt->second),
                     .value = std::nullopt,
                     .stateSymbol = symbol,
@@ -3153,6 +4029,10 @@ namespace wolvrix::lib::emit
                                             std::string_view indent,
                                             SupernodeLocalExprContext &context)
         {
+            if (!emitStorageRefAliasesEnabled())
+            {
+                return;
+            }
             for (const auto &alias : aliases)
             {
                 stream << indent << "auto &" << alias.aliasName << " = " << alias.initExpr << ";\n";
@@ -3220,14 +4100,199 @@ namespace wolvrix::lib::emit
             stream << "\n";
         }
 
+        bool shouldEmitScheduleOpComment(const Graph &graph, const EmitModel &model, const Operation &op)
+        {
+            switch (op.kind())
+            {
+            case OperationKind::kRegisterReadPort:
+            case OperationKind::kLatchReadPort:
+            case OperationKind::kMemoryReadPort:
+            case OperationKind::kRegisterWritePort:
+            case OperationKind::kLatchWritePort:
+            case OperationKind::kMemoryWritePort:
+            case OperationKind::kMemoryFillPort:
+            case OperationKind::kDpicCall:
+            case OperationKind::kSystemTask:
+                return true;
+            default:
+                break;
+            }
+            for (ValueId result : op.results())
+            {
+                if (isMaterializedValue(model, result) || valueNeedsTrackedChange(model, result))
+                {
+                    return true;
+                }
+            }
+            (void)graph;
+            return false;
+        }
+
         std::string renderScalarLogicExpr(const Graph &graph, ValueId resultValue, const ScalarLogicExpr &rhs)
         {
+            const std::string cppType = cppTypeForValue(graph, resultValue);
+            const std::size_t width = static_cast<std::size_t>(graph.valueWidth(resultValue));
+            if (cppType == "std::uint64_t" && (rhs.alreadyBoundedToResultWidth || width >= 64u))
+            {
+                return "(" + rhs.expr + ")";
+            }
             if (rhs.alreadyBoundedToResultWidth)
             {
-                return "static_cast<" + cppTypeForValue(graph, resultValue) + ">(" + rhs.expr + ")";
+                return "static_cast<" + cppType + ">(" + rhs.expr + ")";
             }
-            return "static_cast<" + cppTypeForValue(graph, resultValue) + ">(" +
-                   scalarTruncExpr(rhs.expr, static_cast<std::size_t>(graph.valueWidth(resultValue))) + ")";
+            return "static_cast<" + cppType + ">(" + scalarTruncExpr(rhs.expr, width) + ")";
+        }
+
+        std::string renderScalarAssignedExpr(const Graph &graph,
+                                             ValueId resultValue,
+                                             const std::string &expr,
+                                             bool alreadyBoundedToResultWidth)
+        {
+            return renderScalarLogicExpr(
+                graph,
+                resultValue,
+                ScalarLogicExpr{
+                    .expr = expr,
+                    .alreadyBoundedToResultWidth = alreadyBoundedToResultWidth,
+                });
+        }
+
+        std::string stripOuterCastToType(std::string expr, const std::string &cppType)
+        {
+            expr = stripRedundantOuterParens(std::move(expr));
+            const std::string prefix = "static_cast<" + cppType + ">(";
+            if (isWholeOuterCastToType(expr, cppType))
+            {
+                return expr.substr(prefix.size(), expr.size() - prefix.size() - 1u);
+            }
+            return expr;
+        }
+
+        bool isScalarCppType(std::string_view cppType) noexcept
+        {
+            return cppType == "bool" ||
+                   cppType == "std::uint8_t" ||
+                   cppType == "std::uint16_t" ||
+                   cppType == "std::uint32_t" ||
+                   cppType == "std::uint64_t";
+        }
+
+        std::string stripOuterCastToTypeIfWidthBounded(std::string expr,
+                                                       const std::string &cppType,
+                                                       std::size_t width)
+        {
+            expr = stripRedundantOuterParens(std::move(expr));
+            const std::string prefix = "static_cast<" + cppType + ">(";
+            if (!isWholeOuterCastToType(expr, cppType))
+            {
+                return expr;
+            }
+            std::string inner = expr.substr(prefix.size(), expr.size() - prefix.size() - 1u);
+            inner = stripRedundantOuterParens(std::move(inner));
+            if (isScalarZeroLiteral(inner) || scalarExprAlreadyMaskedToWidth(inner, width))
+            {
+                return inner;
+            }
+            return expr;
+        }
+
+        std::string scalarTypedInitializerExpr(const Graph &graph, ValueId resultValue, const std::string &assignedExpr)
+        {
+            const std::string cppType = cppTypeForValue(graph, resultValue);
+            if (!isScalarCppType(cppType))
+            {
+                return stripOuterCastToType(assignedExpr, cppType);
+            }
+
+            std::string expr = stripOuterCastToType(assignedExpr, cppType);
+            while (true)
+            {
+                const std::string uncast = stripRedundantUint64Cast(expr);
+                if (uncast == expr)
+                {
+                    return expr;
+                }
+                expr = stripOuterCastToType(uncast, cppType);
+            }
+        }
+
+        std::string scalarCastOperandExpr(const std::string &expr)
+        {
+            const std::string compact = stripRedundantOuterParens(expr);
+            constexpr std::string_view prefix = "static_cast<std::uint64_t>(";
+            if (isWholeOuterCastToType(compact, "std::uint64_t"))
+            {
+                return compact;
+            }
+            if (compact.starts_with("UINT64_C(") && compact.ends_with(")"))
+            {
+                return compact;
+            }
+            return "static_cast<std::uint64_t>(" + compact + ")";
+        }
+
+        std::string scalarValueBitsExpr(const Graph &graph, ValueId value, const std::string &expr)
+        {
+            const std::string cppType = cppTypeForValue(graph, value);
+            if (cppType == "std::uint64_t")
+            {
+                return expr;
+            }
+            return scalarCastOperandExpr(stripOuterCastToTypeIfWidthBounded(
+                expr,
+                cppType,
+                static_cast<std::size_t>(graph.valueWidth(value))));
+        }
+
+        std::string stripOuterScalarCastForMaskedBits(std::string expr)
+        {
+            while (true)
+            {
+                expr = stripRedundantOuterParens(std::move(expr));
+                constexpr std::string_view prefix = "static_cast<";
+                if (!expr.starts_with(prefix) || !expr.ends_with(")"))
+                {
+                    return expr;
+                }
+                const std::size_t closeType = expr.find(">(");
+                if (closeType == std::string::npos)
+                {
+                    return expr;
+                }
+                if (!outerCallCoversWholeExpr(expr, closeType + 1u))
+                {
+                    return expr;
+                }
+                const std::string_view type(expr.data() + prefix.size(), closeType - prefix.size());
+                if (type != "bool" &&
+                    type != "std::uint8_t" &&
+                    type != "std::uint16_t" &&
+                    type != "std::uint32_t" &&
+                    type != "std::uint64_t")
+                {
+                    return expr;
+                }
+                expr = expr.substr(closeType + 2u, expr.size() - closeType - 3u);
+            }
+        }
+
+        std::string stripRedundantUint64Cast(std::string expr)
+        {
+            while (true)
+            {
+                expr = stripRedundantOuterParens(std::move(expr));
+                constexpr std::string_view prefix = "static_cast<std::uint64_t>(";
+                if (!isWholeOuterCastToType(expr, "std::uint64_t"))
+                {
+                    return expr;
+                }
+                expr = expr.substr(prefix.size(), expr.size() - prefix.size() - 1u);
+            }
+        }
+
+        std::string maskedScalarBitsExpr(const std::string &expr)
+        {
+            return stripOuterScalarCastForMaskedBits(expr);
         }
 
         bool valueNeedsChangeDetect(const EmitModel &model, ValueId resultValue)
@@ -3266,6 +4331,140 @@ namespace wolvrix::lib::emit
                 stream << indent << eventIt->second << " = grhsim_classify_edge(" << oldExpr << ", " << newExpr << ");\n";
             }
             emitChangedValuePropagation(stream, model, resultValue, indent, context);
+        }
+
+        void emitChangedValueEffectsForCondition(std::ostream &stream,
+                                                 const EmitModel &model,
+                                                 ValueId resultValue,
+                                                 std::string_view oldExpr,
+                                                 std::string_view newExpr,
+                                                 std::string_view conditionExpr,
+                                                 std::string_view indent,
+                                                 const ActivationEmitContext *context = nullptr,
+                                                 DeferredActivationEmitContext *deferredContext = nullptr)
+        {
+            if (const auto eventIt = model.eventEdgeFieldByValue.find(resultValue);
+                eventIt != model.eventEdgeFieldByValue.end())
+            {
+                stream << indent << eventIt->second << " = grhsim_classify_edge(" << oldExpr << ", " << newExpr << ");\n";
+                deferredContext = nullptr;
+            }
+            const auto fanoutIt = model.boundaryFanoutByValue.find(resultValue);
+            if (fanoutIt == model.boundaryFanoutByValue.end())
+            {
+                return;
+            }
+            if (deferredContext != nullptr && deferredContext->groups != nullptr)
+            {
+                for (auto &group : *deferredContext->groups)
+                {
+                    if (group.activeIds == fanoutIt->second)
+                    {
+                        stream << indent << group.changedExpr << " = static_cast<bool>(" << group.changedExpr
+                               << " | " << conditionExpr << ");\n";
+                        return;
+                    }
+                }
+            }
+            emitConditionalActivationStatements(stream,
+                                                "supernode_active_curr_",
+                                                "active_count_",
+                                                fanoutIt->second,
+                                                conditionExpr,
+                                                indent,
+                                                context);
+        }
+
+        DeferredActivationGroups buildDeferredActivationGroups(const Graph &graph,
+                                                               const EmitModel &model,
+                                                               const ActivityScheduleSupernodeToOps &supernodeToOps,
+                                                               uint32_t supernodeId)
+        {
+            constexpr std::size_t kMinDeferredGroupValues = 2;
+            constexpr std::size_t kMaxDeferredGroupsPerSupernode = 16;
+
+            DeferredActivationGroups groups;
+            if (supernodeId >= supernodeToOps.size())
+            {
+                return groups;
+            }
+
+            struct Candidate
+            {
+                std::vector<uint32_t> activeIds;
+                std::size_t count = 0;
+            };
+
+            std::unordered_map<std::string, Candidate> candidates;
+            for (OperationId opId : supernodeToOps[supernodeId])
+            {
+                const Operation op = graph.getOperation(opId);
+                if (op.results().size() != 1)
+                {
+                    continue;
+                }
+                const ValueId resultValue = op.results().front();
+                if (isEventValue(model, resultValue))
+                {
+                    continue;
+                }
+                const auto fanoutIt = model.boundaryFanoutByValue.find(resultValue);
+                if (fanoutIt == model.boundaryFanoutByValue.end() || fanoutIt->second.empty())
+                {
+                    continue;
+                }
+                const std::string key = activationGroupKey(fanoutIt->second);
+                auto &candidate = candidates[key];
+                if (candidate.activeIds.empty())
+                {
+                    candidate.activeIds = fanoutIt->second;
+                }
+                ++candidate.count;
+            }
+
+            groups.reserve(candidates.size());
+            for (auto &[_, candidate] : candidates)
+            {
+                if (candidate.count >= kMinDeferredGroupValues)
+                {
+                    groups.push_back(DeferredActivationGroup{.activeIds = std::move(candidate.activeIds)});
+                }
+            }
+            std::sort(groups.begin(),
+                      groups.end(),
+                      [](const DeferredActivationGroup &lhs, const DeferredActivationGroup &rhs)
+                      {
+                          if (lhs.activeIds.size() != rhs.activeIds.size())
+                          {
+                              return lhs.activeIds.size() > rhs.activeIds.size();
+                          }
+                          return lhs.activeIds < rhs.activeIds;
+                      });
+            if (groups.size() > kMaxDeferredGroupsPerSupernode)
+            {
+                groups.resize(kMaxDeferredGroupsPerSupernode);
+            }
+            for (std::size_t i = 0; i < groups.size(); ++i)
+            {
+                groups[i].changedExpr = "grhsim_any_changed_" + std::to_string(supernodeId) + "_" + std::to_string(i);
+            }
+            return groups;
+        }
+
+        void emitScalarChangedValueAssign(std::ostream &stream,
+                                          const EmitModel &model,
+                                          ValueId resultValue,
+                                          std::string_view lhs,
+                                          std::string_view nextExpr,
+                                          std::string_view indent,
+                                          const ActivationEmitContext *context = nullptr,
+                                          DeferredActivationEmitContext *deferredContext = nullptr)
+        {
+            const std::string changedName = "grhsim_changed_" + std::to_string(resultValue.index);
+            stream << indent << "const bool " << changedName << " = (" << lhs << " != " << nextExpr << ");\n";
+            emitChangedValueEffectsForCondition(
+                stream, model, resultValue, lhs, nextExpr, changedName, indent, context, deferredContext);
+            stream << indent << lhs << " = " << nextExpr << ";\n";
         }
 
         bool isMaterializedValue(const EmitModel &model, ValueId value)
@@ -3308,6 +4507,32 @@ namespace wolvrix::lib::emit
                 return std::nullopt;
             }
             return parsed;
+        }
+
+        std::optional<std::size_t> constLogicIndexValue(const Graph &graph, ValueId value, std::size_t cap)
+        {
+            const int32_t width = graph.valueWidth(value);
+            auto parsed = constLogicValue(graph, value, width);
+            if (!parsed)
+            {
+                return std::nullopt;
+            }
+            const std::uint64_t *rawWords = parsed->getRawPtr();
+            const std::size_t words = logicWordCount(width);
+            std::uint64_t raw = words == 0 ? UINT64_C(0) : rawWords[0];
+            for (std::size_t i = 1; i < words; ++i)
+            {
+                if (rawWords[i] != UINT64_C(0))
+                {
+                    return cap;
+                }
+            }
+            if (raw > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            {
+                return cap;
+            }
+            const std::size_t index = static_cast<std::size_t>(raw);
+            return std::min(index, cap);
         }
 
         bool isConstLogicAllZero(const Graph &graph, ValueId value, int32_t width)
@@ -3652,6 +4877,156 @@ namespace wolvrix::lib::emit
                                       ValueId value)
         {
             return systemTaskArgExpr(graph, model, value, nullptr);
+        }
+
+        std::string scalarSystemTaskArgExpr(const Graph &graph,
+                                            const EmitModel &model,
+                                            ValueId value,
+                                            const SupernodeLocalExprContext *context)
+        {
+            const std::string ref =
+                (model.inputFieldByValue.find(value) != model.inputFieldByValue.end())
+                    ? model.inputFieldByValue.at(value)
+                    : resolvedScheduleValueExpr(model, value, context);
+            std::ostringstream out;
+            out << "grhsim_scalar_task_arg{static_cast<std::uint64_t>(" << ref << "), "
+                << graph.valueWidth(value) << "u, "
+                << (graph.valueSigned(value) ? "true" : "false") << "}";
+            return out.str();
+        }
+
+        std::string scalarSystemTaskDirectArgExpr(const Graph &graph,
+                                                  const EmitModel &model,
+                                                  ValueId value,
+                                                  const SupernodeLocalExprContext *context)
+        {
+            const std::string ref =
+                (model.inputFieldByValue.find(value) != model.inputFieldByValue.end())
+                    ? model.inputFieldByValue.at(value)
+                    : resolvedScheduleValueExpr(model, value, context);
+            std::ostringstream out;
+            out << "static_cast<unsigned>(" << graph.valueWidth(value) << "u"
+                << (graph.valueSigned(value) ? " | 0x80000000u" : "") << "), "
+                << "static_cast<std::uint64_t>(" << ref << ")";
+            return out.str();
+        }
+
+        bool canUseScalarFormatSystemTask(const Graph &graph,
+                                          const EmitModel &model,
+                                          std::string_view name,
+                                          std::span<const ValueId> args,
+                                          bool requireStableValues)
+        {
+            const bool usesHandle = name == "fdisplay" || name == "fwrite";
+            const bool supportedName =
+                name == "display" || name == "write" || name == "strobe" || usesHandle;
+            if (!supportedName)
+            {
+                return false;
+            }
+            const std::size_t formatIndex = usesHandle ? 1u : 0u;
+            if (args.size() <= formatIndex)
+            {
+                return false;
+            }
+            if (usesHandle && !isScalarLogicValue(graph, args.front()))
+            {
+                return false;
+            }
+            if (graph.valueType(args[formatIndex]) != ValueType::String ||
+                !isStaticConstStringValue(model, args[formatIndex]))
+            {
+                return false;
+            }
+            for (std::size_t i = formatIndex + 1u; i < args.size(); ++i)
+            {
+                if (!isScalarLogicValue(graph, args[i]))
+                {
+                    return false;
+                }
+                if (requireStableValues && !stableValueExpr(graph, model, args[i]).has_value())
+                {
+                    return false;
+                }
+            }
+            return !requireStableValues ||
+                   (!usesHandle || stableValueExpr(graph, model, args.front()).has_value());
+        }
+
+        bool canUseDirectScalarFormatSystemTask(const Graph &graph,
+                                                const EmitModel &model,
+                                                std::string_view name,
+                                                std::span<const ValueId> args,
+                                                bool requireStableValues)
+        {
+            if (name == "strobe")
+            {
+                return false;
+            }
+            return canUseScalarFormatSystemTask(graph, model, name, args, requireStableValues);
+        }
+
+        void emitScalarFormatSystemTaskCall(std::ostream &stream,
+                                            const Graph &graph,
+                                            const EmitModel &model,
+                                            std::string_view indent,
+                                            std::string_view name,
+                                            std::span<const ValueId> args,
+                                            const SupernodeLocalExprContext *context)
+        {
+            const bool usesHandle = name == "fdisplay" || name == "fwrite";
+            const std::size_t formatIndex = usesHandle ? 1u : 0u;
+            const std::string handleExpr =
+                usesHandle
+                    ? ("static_cast<std::uint64_t>(" + resolvedScheduleValueExpr(model, args.front(), context) + ")")
+                    : "UINT64_C(0)";
+            const std::string formatExpr = model.staticConstStringFieldByValue.at(args[formatIndex]);
+            emitScalarFormatSystemTaskCall(stream,
+                                           indent,
+                                           name,
+                                           handleExpr,
+                                           formatExpr,
+                                           args.size() - formatIndex - 1u,
+                                           [&](std::size_t argIndex)
+                                           {
+                                               return scalarSystemTaskArgExpr(graph,
+                                                                              model,
+                                                                              args[formatIndex + 1u + argIndex],
+                                                                              context);
+                                           });
+        }
+
+        void emitDirectScalarFormatSystemTaskCall(std::ostream &stream,
+                                                  const Graph &graph,
+                                                  const EmitModel &model,
+                                                  std::string_view indent,
+                                                  std::string_view name,
+                                                  std::span<const ValueId> args,
+                                                  const SupernodeLocalExprContext *context)
+        {
+            const bool usesHandle = name == "fdisplay" || name == "fwrite";
+            const bool newline = name == "display" || name == "fdisplay";
+            const std::size_t formatIndex = usesHandle ? 1u : 0u;
+            const std::string handleExpr =
+                usesHandle
+                    ? ("static_cast<std::uint64_t>(" + resolvedScheduleValueExpr(model, args.front(), context) + ")")
+                    : "UINT64_C(0)";
+            const std::string formatExpr = model.staticConstStringFieldByValue.at(args[formatIndex]);
+            emitDirectScalarFormatSystemTaskCall(stream,
+                                                 indent,
+                                                 usesHandle,
+                                                 newline,
+                                                 handleExpr,
+                                                 formatExpr,
+                                                 args.size() - formatIndex - 1u,
+                                                 [&](std::size_t argIndex)
+                                                 {
+                                                     return scalarSystemTaskDirectArgExpr(
+                                                         graph,
+                                                         model,
+                                                         args[formatIndex + 1u + argIndex],
+                                                         context);
+                                                 });
         }
 
         std::string stableSystemTaskArgExpr(const Graph &graph,
@@ -4193,10 +5568,10 @@ namespace wolvrix::lib::emit
                         else
                         {
                             state.scalarKind = valueScalarSlotKindForWidth(state.width);
-                            model.stateLogicScalarSlotCounts[static_cast<std::size_t>(state.scalarKind)]++;
                             stateLogicStorageOffset =
                                 alignTo(stateLogicStorageOffset, valuePackedScalarSlotAlignment(state.scalarKind));
                             state.slotIndex = stateLogicStorageOffset;
+                            model.stateLogicScalarSlotCounts[static_cast<std::size_t>(state.scalarKind)]++;
                             stateLogicStorageOffset += valuePackedScalarSlotByteSize(state.scalarKind);
                         }
                         if (auto initValue = getAttribute<std::string>(op, "initValue"))
@@ -4647,6 +6022,21 @@ namespace wolvrix::lib::emit
 
             std::unordered_set<ValueId, ValueIdHash> persistentValues;
             persistentValues.reserve(graph.values().size());
+            enum PersistentValueReason : uint32_t
+            {
+                kPersistentOutput = 1u << 0u,
+                kPersistentInout = 1u << 1u,
+                kPersistentWaveform = 1u << 2u,
+                kPersistentEvent = 1u << 3u,
+                kPersistentBoundaryFanout = 1u << 4u,
+                kPersistentCommitOperand = 1u << 5u,
+                kPersistentNoDef = 1u << 6u,
+                kPersistentNonLogic = 1u << 7u,
+                kPersistentSideEffectResult = 1u << 8u,
+                kPersistentPhaseCrossing = 1u << 9u,
+            };
+            std::unordered_map<ValueId, uint32_t, ValueIdHash> persistentReasonByValue;
+            persistentReasonByValue.reserve(graph.values().size());
             std::unordered_set<OperationId, OperationIdHash> validOperationIds;
             validOperationIds.reserve(graph.operations().size());
             for (OperationId opId : graph.operations())
@@ -4654,36 +6044,37 @@ namespace wolvrix::lib::emit
                 validOperationIds.insert(opId);
             }
 
-            auto markPersistent = [&](ValueId valueId) {
+            auto markPersistent = [&](ValueId valueId, uint32_t reason) {
                 if (!valueId.valid() || model.inputFieldByValue.contains(valueId))
                 {
                     return;
                 }
                 persistentValues.insert(valueId);
+                persistentReasonByValue[valueId] |= reason;
             };
 
             for (const auto &port : graph.outputPorts())
             {
-                markPersistent(port.value);
+                markPersistent(port.value, kPersistentOutput);
             }
             for (const auto &port : graph.inoutPorts())
             {
-                markPersistent(port.out);
-                markPersistent(port.oe);
+                markPersistent(port.out, kPersistentInout);
+                markPersistent(port.oe, kPersistentInout);
             }
             for (ValueId valueId : waveformValueIds)
             {
-                markPersistent(valueId);
+                markPersistent(valueId, kPersistentWaveform);
             }
             for (const auto &[valueId, _] : model.eventEdgeFieldByValue)
             {
                 (void)_;
-                markPersistent(valueId);
+                markPersistent(valueId, kPersistentEvent);
             }
             for (const auto &[valueId, _] : model.boundaryFanoutByValue)
             {
                 (void)_;
-                markPersistent(valueId);
+                markPersistent(valueId, kPersistentBoundaryFanout);
             }
             for (OperationId opId : graph.operations())
             {
@@ -4694,7 +6085,7 @@ namespace wolvrix::lib::emit
                 }
                 for (ValueId operand : op.operands())
                 {
-                    markPersistent(operand);
+                    markPersistent(operand, kPersistentCommitOperand);
                 }
             }
 
@@ -4708,18 +6099,18 @@ namespace wolvrix::lib::emit
                 const OperationId defOpId = graph.valueDef(valueId);
                 if (!defOpId.valid())
                 {
-                    markPersistent(valueId);
+                    markPersistent(valueId, kPersistentNoDef);
                 }
                 if (graph.valueType(valueId) != ValueType::Logic)
                 {
-                    markPersistent(valueId);
+                    markPersistent(valueId, kPersistentNonLogic);
                 }
                 if (defOpId.valid())
                 {
                     const OperationKind defKind = graph.getOperation(defOpId).kind();
                     if (defKind == OperationKind::kDpicCall || defKind == OperationKind::kSystemFunction)
                     {
-                        markPersistent(valueId);
+                        markPersistent(valueId, kPersistentSideEffectResult);
                     }
                     const bool defCommitPhase = isCommitPhaseOp(graph.getOperation(defOpId));
                     for (const auto &user : graph.getValue(valueId).users())
@@ -4732,7 +6123,7 @@ namespace wolvrix::lib::emit
                         const bool userCommitPhase = isCommitPhaseOp(graph.getOperation(userOpId));
                         if (userCommitPhase != defCommitPhase)
                         {
-                            markPersistent(valueId);
+                            markPersistent(valueId, kPersistentPhaseCrossing);
                             break;
                         }
                     }
@@ -4801,6 +6192,96 @@ namespace wolvrix::lib::emit
             for (ValueId valueId : materializedValueOrder)
             {
                 model.materializedValues.insert(valueId);
+            }
+            if (emitMaterializedValueStatsEnabled())
+            {
+                std::map<std::string, std::size_t> reasonCounts;
+                std::map<std::string, std::size_t> sourceKindCounts;
+                std::size_t materializedBoundaryValues = 0;
+                std::size_t materializedBoundaryEdges = 0;
+                std::size_t materializedTrackedChangeValues = 0;
+                std::size_t localValueCount = 0;
+                std::size_t localScalarLogicValues = 0;
+                std::size_t localWideLogicValues = 0;
+                for (ValueId valueId : graph.values())
+                {
+                    if (model.inputFieldByValue.contains(valueId))
+                    {
+                        continue;
+                    }
+                    if (!persistentValues.contains(valueId))
+                    {
+                        ++localValueCount;
+                        if (graph.valueType(valueId) == ValueType::Logic)
+                        {
+                            if (isWideLogicValue(graph, valueId))
+                            {
+                                ++localWideLogicValues;
+                            }
+                            else
+                            {
+                                ++localScalarLogicValues;
+                            }
+                        }
+                        continue;
+                    }
+                    const uint32_t reasons = persistentReasonByValue[valueId];
+                    ++reasonCounts[persistentReasonSummary(reasons)];
+                    const OperationId defOpId = graph.valueDef(valueId);
+                    const std::string sourceKind =
+                        defOpId.valid() ? std::string(toString(graph.opKind(defOpId))) : std::string("<no_def>");
+                    ++sourceKindCounts[sourceKind];
+                    if ((reasons & kPersistentBoundaryFanout) != 0)
+                    {
+                        ++materializedBoundaryValues;
+                        if (const auto it = model.boundaryFanoutByValue.find(valueId);
+                            it != model.boundaryFanoutByValue.end())
+                        {
+                            materializedBoundaryEdges += it->second.size();
+                        }
+                    }
+                    if (valueNeedsTrackedChange(model, valueId))
+                    {
+                        ++materializedTrackedChangeValues;
+                    }
+                }
+                auto emitTopCounts = [](const char *label, const std::map<std::string, std::size_t> &counts) {
+                    std::vector<std::pair<std::string, std::size_t>> ordered(counts.begin(), counts.end());
+                    std::sort(ordered.begin(),
+                              ordered.end(),
+                              [](const auto &lhs, const auto &rhs)
+                              {
+                                  if (lhs.second != rhs.second)
+                                  {
+                                      return lhs.second > rhs.second;
+                                  }
+                                  return lhs.first < rhs.first;
+                              });
+                    const std::size_t limit = std::min<std::size_t>(ordered.size(), 16);
+                    for (std::size_t i = 0; i < limit; ++i)
+                    {
+                        std::fprintf(stderr,
+                                     "[GRHSIM_MATERIALIZED_VALUE_STATS] %s[%zu]=%s:%zu\n",
+                                     label,
+                                     i,
+                                     ordered[i].first.c_str(),
+                                     ordered[i].second);
+                    }
+                };
+                std::fprintf(stderr,
+                             "[GRHSIM_MATERIALIZED_VALUE_STATS] graph_values=%zu inputs=%zu materialized=%zu persistent=%zu local=%zu local_scalar_logic=%zu local_wide_logic=%zu boundary_values=%zu boundary_edges=%zu tracked_change=%zu\n",
+                             graph.values().size(),
+                             model.inputFieldByValue.size(),
+                             materializedValueOrder.size(),
+                             persistentValues.size(),
+                             localValueCount,
+                             localScalarLogicValues,
+                             localWideLogicValues,
+                             materializedBoundaryValues,
+                             materializedBoundaryEdges,
+                             materializedTrackedChangeValues);
+                emitTopCounts("reason", reasonCounts);
+                emitTopCounts("source_kind", sourceKindCounts);
             }
             rebuildMaterializedValueStorage(graph, materializedValueOrder, model);
 
@@ -4944,11 +6425,7 @@ namespace wolvrix::lib::emit
 
         bool isCheapScalarInlineExpr(std::string_view expr) noexcept
         {
-            if (expr.size() > 160)
-            {
-                return false;
-            }
-            if (expr.find('?') != std::string_view::npos)
+            if (expr.size() > 1024)
             {
                 return false;
             }
@@ -4976,9 +6453,22 @@ namespace wolvrix::lib::emit
                                            const EmitModel &model,
                                            ValueId value,
                                            std::string_view expr,
-                                           SupernodeLocalExprKind kind)
+                                           SupernodeLocalExprKind kind,
+                                           const SupernodeLocalExprContext *context = nullptr)
         {
-            if (isMaterializedValue(model, value) || graph.getValue(value).users().size() != 1)
+            if (isMaterializedValue(model, value))
+            {
+                return false;
+            }
+            std::size_t useCount = graph.getValue(value).users().size();
+            if (context != nullptr)
+            {
+                if (auto it = context->useCountByValue.find(value); it != context->useCountByValue.end())
+                {
+                    useCount = it->second;
+                }
+            }
+            if (useCount != 1)
             {
                 return false;
             }
@@ -5013,6 +6503,10 @@ namespace wolvrix::lib::emit
                                         ValueId value,
                                         std::string_view indent)
         {
+            if (!isMaterializedValue(model, value))
+            {
+                return;
+            }
             stream << indent << "// " << valueDebugText(graph, model, value) << "\n";
         }
 
@@ -5585,15 +7079,21 @@ namespace wolvrix::lib::emit
                                                              std::to_string(signal.waveformPrevStorageOffset))
                            << ";\n";
                     stream << indent << "    if (force) {\n";
-                    stream << indent << "        grhsim_assign_words(prev_value, "
-                           << waveformWideExprForSignal(graph, model, signal) << ", "
-                           << (signal.width <= 0 ? 1 : signal.width) << "u);\n";
+                    stream << indent << "        "
+                           << assignWordsInlineExpr(
+                                  "prev_value",
+                                  waveformWideExprForSignal(graph, model, signal),
+                                  (signal.width <= 0 ? 1 : signal.width))
+                           << ";\n";
                     stream << indent << "        waveform_writer_->emit_logic_words(waveform_handles_["
                            << signalIndex << "], " << (signal.width <= 0 ? 1 : signal.width)
                            << "u, prev_value);\n";
-                    stream << indent << "    } else if (grhsim_assign_words(prev_value, "
-                           << waveformWideExprForSignal(graph, model, signal) << ", "
-                           << (signal.width <= 0 ? 1 : signal.width) << "u)) {\n";
+                    stream << indent << "    } else if ("
+                           << assignWordsInlineExpr(
+                                  "prev_value",
+                                  waveformWideExprForSignal(graph, model, signal),
+                                  (signal.width <= 0 ? 1 : signal.width))
+                           << ") {\n";
                     stream << indent << "        waveform_writer_->emit_logic_words(waveform_handles_["
                            << signalIndex << "], " << (signal.width <= 0 ? 1 : signal.width)
                            << "u, prev_value);\n";
@@ -5838,6 +7338,93 @@ namespace wolvrix::lib::emit
             return out.str();
         }
 
+        std::string stableScalarSystemTaskArgExpr(const Graph &graph,
+                                                  const EmitModel &model,
+                                                  ValueId value)
+        {
+            const std::string ref =
+                stableValueExpr(graph, model, value).value_or(std::string("/*missing_stable_scalar_system_task_arg*/"));
+            std::ostringstream out;
+            out << "grhsim_scalar_task_arg{static_cast<std::uint64_t>(" << ref << "), "
+                << graph.valueWidth(value) << "u, "
+                << (graph.valueSigned(value) ? "true" : "false") << "}";
+            return out.str();
+        }
+
+        std::string stableScalarSystemTaskDirectArgExpr(const Graph &graph,
+                                                        const EmitModel &model,
+                                                        ValueId value)
+        {
+            const std::string ref =
+                stableValueExpr(graph, model, value).value_or(std::string("/*missing_stable_scalar_system_task_arg*/"));
+            std::ostringstream out;
+            out << "static_cast<unsigned>(" << graph.valueWidth(value) << "u"
+                << (graph.valueSigned(value) ? " | 0x80000000u" : "") << "), "
+                << "static_cast<std::uint64_t>(" << ref << ")";
+            return out.str();
+        }
+
+        void emitStableScalarFormatSystemTaskCall(std::ostream &stream,
+                                                  const Graph &graph,
+                                                  const EmitModel &model,
+                                                  std::string_view indent,
+                                                  std::string_view name,
+                                                  std::span<const ValueId> args)
+        {
+            const bool usesHandle = name == "fdisplay" || name == "fwrite";
+            const std::size_t formatIndex = usesHandle ? 1u : 0u;
+            const std::string handleExpr =
+                usesHandle
+                    ? ("static_cast<std::uint64_t>(" +
+                       stableValueExpr(graph, model, args.front()).value_or(std::string("UINT64_C(0)")) + ")")
+                    : "UINT64_C(0)";
+            const std::string formatExpr = model.staticConstStringFieldByValue.at(args[formatIndex]);
+            emitScalarFormatSystemTaskCall(stream,
+                                           indent,
+                                           name,
+                                           handleExpr,
+                                           formatExpr,
+                                           args.size() - formatIndex - 1u,
+                                           [&](std::size_t argIndex)
+                                           {
+                                               return stableScalarSystemTaskArgExpr(graph,
+                                                                                   model,
+                                                                                   args[formatIndex + 1u + argIndex]);
+                                           });
+        }
+
+        void emitStableDirectScalarFormatSystemTaskCall(std::ostream &stream,
+                                                        const Graph &graph,
+                                                        const EmitModel &model,
+                                                        std::string_view indent,
+                                                        std::string_view name,
+                                                        std::span<const ValueId> args)
+        {
+            const bool usesHandle = name == "fdisplay" || name == "fwrite";
+            const bool newline = name == "display" || name == "fdisplay";
+            const std::size_t formatIndex = usesHandle ? 1u : 0u;
+            const std::string handleExpr =
+                usesHandle
+                    ? ("static_cast<std::uint64_t>(" +
+                       stableValueExpr(graph, model, args.front()).value_or(std::string("UINT64_C(0)")) + ")")
+                    : "UINT64_C(0)";
+            const std::string formatExpr = model.staticConstStringFieldByValue.at(args[formatIndex]);
+            emitDirectScalarFormatSystemTaskCall(stream,
+                                                 indent,
+                                                 usesHandle,
+                                                 newline,
+                                                 handleExpr,
+                                                 formatExpr,
+                                                 args.size() - formatIndex - 1u,
+                                                 [&](std::size_t argIndex)
+                                                 {
+                                                     return stableScalarSystemTaskDirectArgExpr(
+                                                         graph,
+                                                         model,
+                                                         args[formatIndex + 1u + argIndex]);
+                                                 });
+        }
+
         std::string boolLiteral(bool value)
         {
             return value ? "true" : "false";
@@ -5926,6 +7513,10 @@ namespace wolvrix::lib::emit
                                        const std::string &rhsExpr,
                                        int32_t resultWidth)
         {
+            if (logicWordCount(resultWidth) == 2)
+            {
+                return "grhsim_add_words_2<" + std::to_string(resultWidth) + ">((" + lhsExpr + "), (" + rhsExpr + "))";
+            }
             return "grhsim_add_words((" + lhsExpr + "), (" + rhsExpr + "), " + std::to_string(resultWidth) + ")";
         }
 
@@ -5936,6 +7527,26 @@ namespace wolvrix::lib::emit
                                              int32_t resultWidth)
         {
             const std::size_t destWords = logicWordCount(resultWidth);
+            const std::size_t lhsWords = logicWordCount(lhsWidth);
+            const std::size_t rhsWords = logicWordCount(rhsWidth);
+            if (destWords == 2 && lhsWords == 1 && rhsWords == 1)
+            {
+                std::ostringstream out;
+                out << "grhsim_concat_words_2_1_1<" << lhsWidth << ", "
+                    << rhsWidth << ", "
+                    << resultWidth << ">((" << lhsExpr << "), ("
+                    << rhsExpr << "))";
+                return out.str();
+            }
+            if (destWords == 2 && lhsWords == 1 && rhsWords == 2)
+            {
+                std::ostringstream out;
+                out << "grhsim_concat_words_2_1_2<" << lhsWidth << ", "
+                    << rhsWidth << ", "
+                    << resultWidth << ">((" << lhsExpr << "), ("
+                    << rhsExpr << "))";
+                return out.str();
+            }
             std::ostringstream out;
             out << "grhsim_concat_words<" << destWords << ">((" << lhsExpr << "), "
                 << lhsWidth << ", "
@@ -5943,6 +7554,17 @@ namespace wolvrix::lib::emit
                 << rhsWidth << ", "
                 << resultWidth << ")";
             return out.str();
+        }
+
+        std::string assignWordsInlineExpr(const std::string &lhsExpr,
+                                          const std::string &rhsExpr,
+                                          int32_t width)
+        {
+            if (logicWordCount(width) == 2)
+            {
+                return "grhsim_assign_words_2<" + std::to_string(width) + ">(" + lhsExpr + ", " + rhsExpr + ")";
+            }
+            return "grhsim_assign_words(" + lhsExpr + ", " + rhsExpr + ", " + std::to_string(width) + ")";
         }
 
         std::size_t estimateChangedValueEffectLines(const ActivityScheduleValueFanout &valueFanout,
@@ -6484,8 +8106,16 @@ namespace wolvrix::lib::emit
         std::string replicateWordsExpr(const std::string &valueExpr,
                                        int32_t operandWidth,
                                        int32_t resultWidth,
-                                       std::size_t rep)
+            std::size_t rep)
         {
+            if (logicWordCount(resultWidth) == 2 && logicWordCount(operandWidth) == 1)
+            {
+                std::ostringstream out;
+                out << "grhsim_replicate_words_2_1<" << operandWidth << ", "
+                    << rep << ", "
+                    << resultWidth << ">(" << valueExpr << ")";
+                return out.str();
+            }
             std::ostringstream out;
             out << "grhsim_replicate_words<" << logicWordCount(resultWidth) << ">("
                 << valueExpr << ", "
@@ -6502,7 +8132,7 @@ namespace wolvrix::lib::emit
                                           SupernodeLocalExprKind kind,
                                           SupernodeLocalExprContext *context)
         {
-            if (context == nullptr || !canInlineSingleUserLocalValue(graph, model, resultValue, expr, kind))
+            if (context == nullptr || !canInlineSingleUserLocalValue(graph, model, resultValue, expr, kind, context))
             {
                 return false;
             }
@@ -6537,7 +8167,8 @@ namespace wolvrix::lib::emit
                                           ValueId resultValue,
                                           const std::string &wordsExpr,
                                           const SupernodeLocalExprContext *context = nullptr,
-                                          const ActivationEmitContext *activationContext = nullptr)
+                                          const ActivationEmitContext *activationContext = nullptr,
+                                          DeferredActivationEmitContext *deferredContext = nullptr)
         {
             const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             const int32_t resultWidth = graph.valueWidth(resultValue);
@@ -6566,7 +8197,7 @@ namespace wolvrix::lib::emit
             {
                 if (needChangeDetect)
                 {
-                    stream << "            if (grhsim_assign_words(" << lhs << ", next_words, " << resultWidth << ")) {\n";
+                    stream << "            if (" << assignWordsInlineExpr(lhs, "next_words", resultWidth) << ") {\n";
                     emitChangedValuePropagation(stream, model, resultValue, "                ", activationContext);
                     stream << "            }\n";
                 }
@@ -6581,11 +8212,8 @@ namespace wolvrix::lib::emit
                        << ">(grhsim_trunc_u64(next_words[0], " << resultWidth << "));\n";
                 if (needChangeDetect)
                 {
-                    stream << "            if (" << lhs << " != next_value) {\n";
-                    emitChangedValueEffects(
-                        stream, model, resultValue, lhs, "next_value", "                ", activationContext);
-                    stream << "                " << lhs << " = next_value;\n";
-                    stream << "            }\n";
+                    emitScalarChangedValueAssign(
+                        stream, model, resultValue, lhs, "next_value", "            ", activationContext, deferredContext);
                 }
                 else
                 {
@@ -6601,7 +8229,8 @@ namespace wolvrix::lib::emit
                                              ValueId resultValue,
                                              const std::string &wordsExpr,
                                              SupernodeLocalExprContext *context,
-                                             const ActivationEmitContext *activationContext = nullptr)
+                                             const ActivationEmitContext *activationContext = nullptr,
+                                             DeferredActivationEmitContext *deferredContext = nullptr)
         {
             if (!isMaterializedValue(model, resultValue))
             {
@@ -6616,7 +8245,8 @@ namespace wolvrix::lib::emit
                 recordSupernodeLocalExprRef(graph, resultValue, lhs, SupernodeLocalExprKind::kWideWords, context);
                 return;
             }
-            emitLogicAssignFromWordsExpr(stream, graph, model, resultValue, wordsExpr, context, activationContext);
+            emitLogicAssignFromWordsExpr(
+                stream, graph, model, resultValue, wordsExpr, context, activationContext, deferredContext);
         }
 
         void emitLogicAssignFromBoolExpr(std::ostream &stream,
@@ -6625,7 +8255,8 @@ namespace wolvrix::lib::emit
                                          ValueId resultValue,
                                          const std::string &boolExpr,
                                          SupernodeLocalExprContext *context = nullptr,
-                                         const ActivationEmitContext *activationContext = nullptr)
+                                         const ActivationEmitContext *activationContext = nullptr,
+                                         DeferredActivationEmitContext *deferredContext = nullptr)
         {
             const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
             if (!isMaterializedValue(model, resultValue))
@@ -6651,11 +8282,8 @@ namespace wolvrix::lib::emit
                    << ">(" << boolExpr << ");\n";
             if (needChangeDetect)
             {
-                stream << "            if (" << lhs << " != next_value) {\n";
-                emitChangedValueEffects(
-                    stream, model, resultValue, lhs, "next_value", "                ", activationContext);
-                stream << "                " << lhs << " = next_value;\n";
-                stream << "            }\n";
+                emitScalarChangedValueAssign(
+                    stream, model, resultValue, lhs, "next_value", "            ", activationContext, deferredContext);
             }
             else
             {
@@ -6671,15 +8299,14 @@ namespace wolvrix::lib::emit
                                            const std::string &expr,
                                            bool alreadyBoundedToResultWidth,
                                            SupernodeLocalExprContext *context = nullptr,
-                                           const ActivationEmitContext *activationContext = nullptr)
+                                           const ActivationEmitContext *activationContext = nullptr,
+                                           DeferredActivationEmitContext *deferredContext = nullptr)
         {
             const std::string lhs = resolvedStoredValueRefExpr(model, resultValue, context);
-            const std::string cppType = cppTypeForValue(graph, resultValue);
             const std::string assignedExpr =
-                alreadyBoundedToResultWidth
-                    ? ("static_cast<" + cppType + ">(" + expr + ")")
-                    : ("static_cast<" + cppType + ">(grhsim_trunc_u64(" + expr + ", " +
-                       std::to_string(graph.valueWidth(resultValue)) + "))");
+                renderScalarAssignedExpr(graph, resultValue, expr, alreadyBoundedToResultWidth);
+            const std::string cppType = cppTypeForValue(graph, resultValue);
+            const std::string initializerExpr = scalarTypedInitializerExpr(graph, resultValue, assignedExpr);
             const bool materialized = isMaterializedValue(model, resultValue);
             if (!materialized)
             {
@@ -6693,21 +8320,18 @@ namespace wolvrix::lib::emit
                     return;
                 }
                 emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
-                stream << "        const auto " << lhs << " = " << assignedExpr << ";\n";
+                stream << "        const " << cppType << " " << lhs << " = " << initializerExpr << ";\n";
                 return;
             }
 
             const bool needChangeDetect = valueNeedsTrackedChange(model, resultValue);
             emitValueAssignmentComment(stream, graph, model, resultValue, "        ");
             stream << "        {\n";
-            stream << "            const auto next_value = " << assignedExpr << ";\n";
+            stream << "            const " << cppType << " next_value = " << initializerExpr << ";\n";
             if (needChangeDetect)
             {
-                stream << "            if (" << lhs << " != next_value) {\n";
-                emitChangedValueEffects(
-                    stream, model, resultValue, lhs, "next_value", "                ", activationContext);
-                stream << "                " << lhs << " = next_value;\n";
-                stream << "            }\n";
+                emitScalarChangedValueAssign(
+                    stream, model, resultValue, lhs, "next_value", "            ", activationContext, deferredContext);
             }
             else
             {
@@ -6776,7 +8400,7 @@ namespace wolvrix::lib::emit
             items.reserve(operands.size());
             for (const auto &operand : operands)
             {
-                items.push_back("static_cast<std::uint64_t>(" + operand + ")");
+                items.push_back(scalarCastOperandExpr(operand));
             }
             return "std::array<std::uint64_t, " + std::to_string(operands.size()) + ">{" +
                    joinStrings(items, ", ") + "}";
@@ -6813,11 +8437,10 @@ namespace wolvrix::lib::emit
                 {
                     continue;
                 }
-                std::string term =
-                    scalarTruncExpr("static_cast<std::uint64_t>(" + operands[operandIndex] + ")", width);
+                std::string term = scalarTruncExpr(maskedScalarBitsExpr(operands[operandIndex]), width);
                 if (lsbOffset != 0)
                 {
-                    term = "(" + term + " << " + std::to_string(lsbOffset) + ")";
+                    term = "((" + scalarCastOperandExpr(term) + ") << " + std::to_string(lsbOffset) + ")";
                 }
                 lsbOffset += width;
                 terms.push_back(std::move(term));
@@ -6858,7 +8481,7 @@ namespace wolvrix::lib::emit
             {
                 return "UINT64_C(0)";
             }
-            const std::string elem = scalarTruncExpr("static_cast<std::uint64_t>(" + operand + ")", elemWidth);
+            const std::string elem = scalarTruncExpr(maskedScalarBitsExpr(operand), elemWidth);
             if (elemWidth == 1)
             {
                 return "((" + elem + ") ? " + scalarMaskExpr(resultWidth) + " : UINT64_C(0))";
@@ -6978,8 +8601,7 @@ namespace wolvrix::lib::emit
             const std::string bitsName =
                 "concat_" + std::to_string(tempScopeId) + "_" + std::to_string(operandIndex) + "_bits_0";
             stream << indent << "const std::uint64_t " << bitsName << " = "
-                   << scalarTruncExpr("static_cast<std::uint64_t>(" + operandExpr + ")",
-                                      static_cast<std::size_t>(operandWidth))
+                   << scalarTruncExpr(scalarCastOperandExpr(operandExpr), static_cast<std::size_t>(operandWidth))
                    << ";\n";
             stream << indent << dstName << "[" << baseWord << "] |= ";
             if (bitShift == 0u)
@@ -7002,7 +8624,9 @@ namespace wolvrix::lib::emit
                                            const Graph &graph,
                                            const EmitModel &model,
                                            const Operation &op,
-                                           SupernodeLocalExprContext *context = nullptr)
+                                           SupernodeLocalExprContext *context = nullptr,
+                                           const ActivationEmitContext *activationContext = nullptr,
+                                           DeferredActivationEmitContext *deferredContext = nullptr)
         {
             if (op.results().empty())
             {
@@ -7066,7 +8690,7 @@ namespace wolvrix::lib::emit
             {
                 if (needsActivation)
                 {
-                    emitChangedValuePropagation(stream, model, resultValue, "        ");
+                    emitChangedValuePropagation(stream, model, resultValue, "        ", activationContext);
                 }
             }
             else
@@ -7207,13 +8831,15 @@ namespace wolvrix::lib::emit
                                     const EmitModel &model,
                                     const Operation &op,
                                     std::string &error,
-                                    SupernodeLocalExprContext *context = nullptr)
+                                    SupernodeLocalExprContext *context = nullptr,
+                                    const ActivationEmitContext *activationContext = nullptr,
+                                    DeferredActivationEmitContext *deferredContext = nullptr)
         {
             if (op.results().empty())
             {
                 return true;
             }
-            if (emitDirectWideConcatOperation(stream, graph, model, op, context))
+            if (emitDirectWideConcatOperation(stream, graph, model, op, context, activationContext, deferredContext))
             {
                 return true;
             }
@@ -7234,12 +8860,12 @@ namespace wolvrix::lib::emit
             if (isWideLogicValue(graph, resultValue))
             {
                 emitLogicAssignFromWideWordsExpr(
-                    stream, graph, model, resultValue, *expr, context, nullptr);
+                    stream, graph, model, resultValue, *expr, context, activationContext, deferredContext);
             }
             else
             {
                 emitLogicAssignFromScalarExpr(
-                    stream, graph, model, resultValue, *expr, true, context, nullptr);
+                    stream, graph, model, resultValue, *expr, true, context, activationContext, deferredContext);
             }
             return true;
         }
@@ -7544,6 +9170,22 @@ namespace wolvrix::lib::emit
             }
             case OperationKind::kSliceDynamic:
             {
+                if (const auto constStart = constLogicIndexValue(graph, operands[1], static_cast<std::size_t>(graph.valueWidth(operands[0]))))
+                {
+                    if (!isWideLogicValue(graph, resultValue) && resultWidth == 1)
+                    {
+                        return logicBoolExpr("grhsim_get_bit_words(" +
+                                             operandWords(0, graph.valueWidth(operands[0])) + ", " +
+                                             std::to_string(*constStart) + ")");
+                    }
+                    return eventLogicExprFromWordsExpr(
+                        graph,
+                        resultValue,
+                        sliceWordsExpr(operandWords(0, graph.valueWidth(operands[0])),
+                                       graph.valueWidth(operands[0]),
+                                       std::to_string(*constStart),
+                                       resultWidth));
+                }
                 return eventLogicExprFromWordsExpr(
                     graph,
                     resultValue,
@@ -8116,9 +9758,9 @@ namespace wolvrix::lib::emit
                     {
                         return operands[index];
                     }
-                    return "static_cast<std::uint64_t>(" + operands[index] + ")";
+                    return scalarValueBitsExpr(graph, value, operands[index]);
                 }
-                return "grhsim_cast_u64(static_cast<std::uint64_t>(" + operands[index] + "), " +
+                return "grhsim_cast_u64(" + scalarValueBitsExpr(graph, value, operands[index]) + ", " +
                        std::to_string(srcWidth) + ", " + std::to_string(width) + ", " +
                        boolLiteral(graph.valueSigned(value)) + ")";
             };
@@ -8318,6 +9960,19 @@ namespace wolvrix::lib::emit
             case OperationKind::kSliceDynamic:
             {
                 const auto sliceWidth = getAttribute<int64_t>(op, "sliceWidth").value_or(1);
+                if (const auto constStart =
+                        constLogicIndexValue(graph, op.operands()[1], static_cast<std::size_t>(graph.valueWidth(op.operands()[0]))))
+                {
+                    if (sliceWidth >= 64)
+                    {
+                        return ScalarLogicExpr{"((" + operands[0] + ") >> " + std::to_string(*constStart) + ")", true};
+                    }
+                    const std::uint64_t mask = sliceWidth <= 0 ? UINT64_C(0) : ((UINT64_C(1) << sliceWidth) - 1u);
+                    return ScalarLogicExpr{
+                        "(((" + operands[0] + ") >> " + std::to_string(*constStart) + ") & UINT64_C(" +
+                            std::to_string(mask) + "))",
+                        true};
+                }
                 return ScalarLogicExpr{
                     scalarSliceDynamicExpr(operands[0],
                                            static_cast<std::size_t>(graph.valueWidth(op.operands()[0])),
@@ -9030,9 +10685,12 @@ namespace wolvrix::lib::emit
                            << "u; ++fill_row) {\n";
                     if (isWideLogicWidth(state.width))
                     {
-                        stream << innerIndent << "    if (grhsim_assign_words(" << stateRef << "[fill_row], "
-                               << wordsExprForValue(graph, model, operands[1], state.width, context) << ", "
-                               << state.width << ")) {\n";
+                        stream << innerIndent << "    if ("
+                               << assignWordsInlineExpr(
+                                      stateRef + "[fill_row]",
+                                      wordsExprForValue(graph, model, operands[1], state.width, context),
+                                      state.width)
+                               << ") {\n";
                     }
                     else
                     {
@@ -9069,9 +10727,11 @@ namespace wolvrix::lib::emit
                             {
                                 stream << rowAccess.inRangeExpr << " && ";
                             }
-                            stream << "grhsim_assign_words(" << rowRef << ", "
-                                   << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
-                                   << state.width << ")) {\n";
+                            stream << assignWordsInlineExpr(
+                                          rowRef,
+                                          wordsExprForValue(graph, model, operands[2], state.width, context),
+                                          state.width)
+                                   << ") {\n";
                             emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                             emitReaderActivations(innerIndent + "    ");
                             stream << innerIndent << "}\n";
@@ -9145,8 +10805,9 @@ namespace wolvrix::lib::emit
                            << wordsExprForValue(graph, model, operands[1], state.width, context) << ", "
                            << wordsExprForValue(graph, model, operands[2], state.width, context) << ", "
                            << state.width << ");\n";
-                    stream << innerIndent << "if (grhsim_assign_words(" << resolvedStateRefExpr(state, context)
-                           << ", next_value, " << state.width << ")) {\n";
+                    stream << innerIndent << "if ("
+                           << assignWordsInlineExpr(resolvedStateRefExpr(state, context), "next_value", state.width)
+                           << ") {\n";
                     emitPerfCounterIncrement(stream, model, innerIndent + "    ", "touchedWriteCount");
                     emitReaderActivations(innerIndent + "    ");
                     stream << innerIndent << "}\n";
@@ -9186,7 +10847,7 @@ namespace wolvrix::lib::emit
                                                       const Graph &graph,
                                                       const EmitModel &model,
                                                       const ScheduleRefs &schedule,
-                                                      const ScheduleBatch &batch,
+                                                      std::span<const ScheduleBatch> batches,
                                                       std::size_t waveformBatchCount,
                                                       std::uint64_t maxOutputFileBytes)
         {
@@ -9221,6 +10882,8 @@ namespace wolvrix::lib::emit
                 stream << '\n';
             }
 
+            for (const ScheduleBatch &batch : batches)
+            {
             const auto emitWordBody = [&](const ScheduleBatch::Word &word) -> std::optional<std::string>
             {
                 const std::uint8_t dispatchMask = scheduleBatchWordDispatchMask(model, word);
@@ -9253,6 +10916,28 @@ namespace wolvrix::lib::emit
                     stream << "        activeWordFlags = static_cast<std::uint8_t>(\n";
                     stream << "            activeWordFlags & static_cast<std::uint8_t>(~UINT8_C("
                            << static_cast<unsigned>(supernodeMask) << ")));\n";
+                    if (model.emitRuntimeProfile)
+                    {
+                        stream << "        if (runtime_profile_enabled_) {\n";
+                        stream << "            ++runtime_profile_active_supernodes_;\n";
+                        if (batch.phase == ScheduleBatch::Phase::kCompute)
+                        {
+                            stream << "            ++runtime_profile_compute_supernodes_;\n";
+                        }
+                        else
+                        {
+                            stream << "            ++runtime_profile_commit_supernodes_;\n";
+                        }
+                        stream << "            runtime_profile_compute_nodes_ += UINT64_C("
+                               << model.runtimeProfileComputeNodesBySupernode[supernodeId] << ");\n";
+                        stream << "            runtime_profile_source_ops_ += UINT64_C("
+                               << model.runtimeProfileSourceOpsBySupernode[supernodeId] << ");\n";
+                        stream << "            runtime_profile_compute_ops_ += UINT64_C("
+                               << model.runtimeProfileComputeOpsBySupernode[supernodeId] << ");\n";
+                        stream << "            runtime_profile_sink_ops_ += UINT64_C("
+                               << model.runtimeProfileSinkOpsBySupernode[supernodeId] << ");\n";
+                        stream << "        }\n";
+                    }
                     stream << "        {\n";
                 const std::vector<ScalarConcatPrefixCacheDecl> concatPrefixCacheDecls =
                     collectScalarConcatPrefixCaches(graph, schedule.supernodeToOps[supernodeId]);
@@ -9273,6 +10958,32 @@ namespace wolvrix::lib::emit
                 std::size_t opIndex = 0;
                 std::size_t nextConcatPrefixDecl = 0;
                 const auto &supernodeOps = schedule.supernodeToOps[supernodeId];
+                DeferredActivationGroups deferredActivationGroups;
+                if (batch.phase == ScheduleBatch::Phase::kCompute)
+                {
+                    deferredActivationGroups =
+                        buildDeferredActivationGroups(graph, model, schedule.supernodeToOps, supernodeId);
+                    for (const auto &group : deferredActivationGroups)
+                    {
+                        stream << "            bool " << group.changedExpr << " = false;\n";
+                    }
+                }
+                DeferredActivationEmitContext deferredActivationContext{
+                    .groups = deferredActivationGroups.empty() ? nullptr : &deferredActivationGroups};
+                for (OperationId useOpId : supernodeOps)
+                {
+                    const Operation useOp = graph.getOperation(useOpId);
+                    const bool useOpCommitPhase = isCommitPhaseOp(useOp);
+                    if ((batch.phase == ScheduleBatch::Phase::kCompute && useOpCommitPhase) ||
+                        (batch.phase == ScheduleBatch::Phase::kCommit && !useOpCommitPhase))
+                    {
+                        continue;
+                    }
+                    for (ValueId operand : useOp.operands())
+                    {
+                        ++localExprContext.useCountByValue[operand];
+                    }
+                }
                 std::optional<std::string> outerCommitEventExpr;
                 if (batch.phase == ScheduleBatch::Phase::kCommit)
                 {
@@ -9515,7 +11226,11 @@ namespace wolvrix::lib::emit
                         continue;
                     }
                     const auto operands = op.operands();
-                    emitOpComment(stream, op, "            ");
+                    const bool emitScheduleComment = shouldEmitScheduleOpComment(graph, model, op);
+                    if (emitScheduleComment)
+                    {
+                        emitOpComment(stream, op, "            ");
+                    }
                     switch (op.kind())
                     {
                     case OperationKind::kConstant:
@@ -9545,7 +11260,8 @@ namespace wolvrix::lib::emit
                                                                      resultValue,
                                                                      *expr,
                                                                      &localExprContext,
-                                                                     &activationContext);
+                                                                     &activationContext,
+                                                                     &deferredActivationContext);
                                 }
                                 else
                                 {
@@ -9556,7 +11272,8 @@ namespace wolvrix::lib::emit
                                                                   "static_cast<std::uint64_t>(" + *expr + ")",
                                                                   false,
                                                                   &localExprContext,
-                                                                  &activationContext);
+                                                                  &activationContext,
+                                                                  &deferredActivationContext);
                                 }
                             }
                             else
@@ -9600,8 +11317,14 @@ namespace wolvrix::lib::emit
                         {
                             if (isWideLogicValue(graph, resultValue))
                             {
-                                emitLogicAssignFromWideWordsExpr(
-                                    stream, graph, model, resultValue, stateExpr, &localExprContext, &activationContext);
+                                emitLogicAssignFromWideWordsExpr(stream,
+                                                                 graph,
+                                                                 model,
+                                                                 resultValue,
+                                                                 stateExpr,
+                                                                 &localExprContext,
+                                                                 &activationContext,
+                                                                 &deferredActivationContext);
                             }
                             else
                             {
@@ -9612,7 +11335,8 @@ namespace wolvrix::lib::emit
                                                               "static_cast<std::uint64_t>(" + stateExpr + ")",
                                                               true,
                                                               &localExprContext,
-                                                              &activationContext);
+                                                              &activationContext,
+                                                              &deferredActivationContext);
                             }
                             break;
                         }
@@ -9620,16 +11344,28 @@ namespace wolvrix::lib::emit
                         if (isWideLogicValue(graph, op.results().front()))
                         {
                             emitLogicAssignFromWordsExpr(
-                                stream, graph, model, resultValue, stateExpr, &localExprContext, &activationContext);
+                                    stream,
+                                    graph,
+                                    model,
+                                    resultValue,
+                                    stateExpr,
+                                    &localExprContext,
+                                    &activationContext,
+                                    &deferredActivationContext);
                         }
                         else
                         {
                             if (needChangeDetect)
                             {
-                                stream << "            if (" << lhs << " != " << stateExpr << ") {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, stateExpr, "            ", &activationContext);
-                                stream << "                " << lhs << " = " << stateExpr << ";\n";
-                                stream << "            }\n";
+                                emitScalarChangedValueAssign(
+                                    stream,
+                                    model,
+                                    resultValue,
+                                    lhs,
+                                    stateExpr,
+                                    "            ",
+                                    &activationContext,
+                                    &deferredActivationContext);
                             }
                             else
                             {
@@ -9677,8 +11413,9 @@ namespace wolvrix::lib::emit
                                          ? stateExpr + "[" + rowAccess.rowExpr + "]"
                                          : "((" + rowAccess.inRangeExpr + ") ? " + stateExpr + "[" + rowAccess.rowExpr +
                                                "] : " + wordsArrayTypeForWidth(graph.valueWidth(resultValue)) + "{})"),
-                                    &localExprContext,
-                                    &activationContext);
+	                                    &localExprContext,
+	                                    &activationContext,
+	                                    &deferredActivationContext);
                             }
                             else
                             {
@@ -9691,9 +11428,10 @@ namespace wolvrix::lib::emit
                                          ? "static_cast<std::uint64_t>(" + stateExpr + "[" + rowAccess.rowExpr + "])"
                                          : "((" + rowAccess.inRangeExpr + ") ? static_cast<std::uint64_t>(" + stateExpr +
                                                "[" + rowAccess.rowExpr + "]) : UINT64_C(0))"),
-                                    true,
-                                    &localExprContext,
-                                    &activationContext);
+	                                    true,
+	                                    &localExprContext,
+	                                    &activationContext,
+	                                    &deferredActivationContext);
                             }
                             break;
                         }
@@ -9931,7 +11669,14 @@ namespace wolvrix::lib::emit
                         if (opNeedsWordLogicEmit(graph, op))
                         {
                             std::string emitErrorText;
-                            if (!emitWordLogicOperation(stream, graph, model, op, emitErrorText, &localExprContext))
+                            if (!emitWordLogicOperation(stream,
+                                                        graph,
+                                                        model,
+                                                        op,
+                                                        emitErrorText,
+                                                        &localExprContext,
+                                                        &activationContext,
+                                                        &deferredActivationContext))
                             {
                                 return emitError(emitErrorText, std::string(op.symbolText()));
                             }
@@ -9955,7 +11700,9 @@ namespace wolvrix::lib::emit
                                                       resultValue,
                                                       rhs.expr,
                                                       rhs.alreadyBoundedToResultWidth,
-                                                      &localExprContext);
+                                                      &localExprContext,
+                                                      &activationContext,
+                                                      &deferredActivationContext);
                         break;
                     }
                     case OperationKind::kSystemTask:
@@ -9996,22 +11743,43 @@ namespace wolvrix::lib::emit
                             stream << "(" << *eventExpr << ") && ";
                         }
                         stream << "(" << procGuard << ")) {\n";
-                        if (argEnd <= 1)
+                        const auto taskArgs =
+                            argEnd <= 1
+                                ? std::span<const ValueId>()
+                                : std::span<const ValueId>(operands.data() + 1, argEnd - 1);
+                        if (canUseDirectScalarFormatSystemTask(graph, model, name, taskArgs, false))
                         {
-                            stream << "                execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
+                            emitDirectScalarFormatSystemTaskCall(stream,
+                                                                 graph,
+                                                                 model,
+                                                                 "                ",
+                                                                 name,
+                                                                 taskArgs,
+                                                                 &localExprContext);
+                        }
+                        else if (canUseScalarFormatSystemTask(graph, model, name, taskArgs, false))
+                        {
+                            emitScalarFormatSystemTaskCall(stream,
+                                                           graph,
+                                                           model,
+                                                           "                ",
+                                                           name,
+                                                           taskArgs,
+                                                           &localExprContext);
                         }
                         else
                         {
-                            stream << "                execute_system_task(\"" << escapeCppString(name) << "\", {";
-                            for (std::size_t i = 1; i < argEnd; ++i)
-                            {
-                                if (i != 1)
-                                {
-                                    stream << "    , ";
-                                }
-                                stream << systemTaskArgExpr(graph, model, operands[i], &localExprContext);
-                            }
-                            stream << "    });\n";
+                            emitSystemTaskCall(stream,
+                                               "                ",
+                                               name,
+                                               taskArgs.size(),
+                                               [&](std::size_t argIndex)
+                                               {
+                                                   return systemTaskArgExpr(graph,
+                                                                            model,
+                                                                            taskArgs[argIndex],
+                                                                            &localExprContext);
+                                               });
                         }
                         if (sampleIt != model.eventSamplesByOp.end() && !sampleIt->second.completedFieldName.empty())
                         {
@@ -10170,27 +11938,21 @@ namespace wolvrix::lib::emit
                         break;
                     default:
                         return emitError("unsupported op kind in grhsim-cpp emit", std::string(op.symbolText()));
+	                    }
+	                    ++opIndex;
+	                }
+                    emitDeferredActivationFlushStatements(stream,
+                                                          "supernode_active_curr_",
+                                                          "active_count_",
+                                                          deferredActivationGroups,
+                                                          "            ",
+                                                          &activationContext);
+	                    if (outerCommitEventExpr.has_value())
+	                    {
+	                        stream << "            }\n";
                     }
-                    ++opIndex;
-                }
-                    if (outerCommitEventExpr.has_value())
-                    {
-                        stream << "            }\n";
-                    }
-                    if (batch.phase == ScheduleBatch::Phase::kCompute)
-                    {
-                        stream << "        const std::uint8_t newlyActivatedWordFlags = static_cast<std::uint8_t>(\n";
-                        stream << "            supernode_active_curr_[" << word.activeFlagWordIndex
-                               << "u] & dispatchMask);\n";
-                        stream << "        activeWordFlags = static_cast<std::uint8_t>(\n";
-                        stream << "            activeWordFlags | newlyActivatedWordFlags);\n";
-                        stream << "        supernode_active_curr_[" << word.activeFlagWordIndex
-                               << "u] = static_cast<std::uint8_t>(supernode_active_curr_["
-                               << word.activeFlagWordIndex
-                               << "u] & static_cast<std::uint8_t>(~dispatchMask));\n";
-                    }
-                    stream << "        }\n";
-                    stream << "        }\n";
+                        stream << "        }\n";
+                        stream << "        }\n";
                 }
                 stream << "                supernode_active_curr_[" << word.activeFlagWordIndex
                        << "u] = static_cast<std::uint8_t>(supernode_active_curr_["
@@ -10359,6 +12121,7 @@ namespace wolvrix::lib::emit
                     stream << "}\n";
                 }
             }
+            }
             if (auto error = finalizeOutputFile(stream, schedPath))
             {
                 return *error + ": " + schedPath.string();
@@ -10404,6 +12167,9 @@ namespace wolvrix::lib::emit
             getSessionValue<ActivityScheduleStateReadSupernodes>(options, sessionPrefix + "state_read_supernodes");
         const auto *supernodeKinds =
             getSessionValue<ActivityScheduleSupernodeKinds>(options, sessionPrefix + "supernode_kind");
+        const auto *computeNodesBySupernode =
+            getSessionValue<ActivityScheduleComputeNodesBySupernode>(options,
+                                                                     sessionPrefix + "compute_nodes_by_supernode");
         if (supernodeToOps == nullptr || valueFanout == nullptr || topoOrder == nullptr || stateReadSupernodes == nullptr)
         {
             reportError("missing activity-schedule session data", sessionPrefix);
@@ -10416,6 +12182,7 @@ namespace wolvrix::lib::emit
             .topoOrder = *topoOrder,
             .stateReadSupernodes = *stateReadSupernodes,
             .supernodeKinds = supernodeKinds,
+            .computeNodesBySupernode = computeNodesBySupernode,
         };
 
         const std::size_t schedBatchMaxOps = parseScheduleBatchMaxOps(options);
@@ -10423,6 +12190,9 @@ namespace wolvrix::lib::emit
         const std::size_t schedBatchTargetCount = parseScheduleBatchTargetCount(options);
         const WaveformMode waveformMode = parseWaveformMode(options);
         const PerfMode perfMode = parsePerfMode(options);
+        const bool emitRuntimeProfile =
+            parseBooleanEmitOption(options, "emit_runtime_profile", "GRHSIM_EMIT_RUNTIME_PROFILE");
+        const std::size_t schedBatchesPerCpp = parseScheduleBatchesPerCpp(options);
         const std::unordered_set<ValueId, ValueIdHash> waveformValueIds =
             waveformMode == WaveformMode::kDeclaredSymbols ? collectDeclaredSymbolWaveformValueIds(graph)
                                                            : std::unordered_set<ValueId, ValueIdHash>{};
@@ -10446,6 +12216,11 @@ namespace wolvrix::lib::emit
         }
         model.emitWaveform = waveformMode != WaveformMode::kOff;
         model.emitPerf = perfMode != PerfMode::kOff;
+        model.emitRuntimeProfile = emitRuntimeProfile;
+        if (model.emitRuntimeProfile)
+        {
+            buildRuntimeProfileWeights(graph, schedule, model);
+        }
         std::vector<ScheduleBatch> computeScheduleBatches =
             buildScheduleBatches(graph,
                                  model,
@@ -10521,9 +12296,24 @@ namespace wolvrix::lib::emit
         const std::filesystem::path evalPath = outDir / (prefix + "_eval.cpp");
         std::vector<std::filesystem::path> schedPaths;
         schedPaths.reserve(scheduleBatches.size());
+        const std::size_t schedGroupCount =
+            (scheduleBatches.size() + schedBatchesPerCpp - 1u) / schedBatchesPerCpp;
+        std::vector<std::filesystem::path> schedOutputPaths;
+        schedOutputPaths.reserve(schedGroupCount);
+        for (std::size_t groupIndex = 0; groupIndex < schedGroupCount; ++groupIndex)
+        {
+            if (schedBatchesPerCpp == 1)
+            {
+                schedOutputPaths.push_back(outDir / (prefix + "_sched_" + std::to_string(groupIndex) + ".cpp"));
+            }
+            else
+            {
+                schedOutputPaths.push_back(outDir / (prefix + "_sched_group_" + std::to_string(groupIndex) + ".cpp"));
+            }
+        }
         for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
         {
-            schedPaths.push_back(outDir / (prefix + "_sched_" + std::to_string(batchIndex) + ".cpp"));
+            schedPaths.push_back(schedOutputPaths[batchIndex / schedBatchesPerCpp]);
         }
         const std::filesystem::path makefilePath = outDir / "Makefile";
         const std::uint64_t maxOutputFileBytes = effectiveMaxOutputFileBytes(options);
@@ -10965,6 +12755,8 @@ namespace wolvrix::lib::emit
             *stream << "#include <cstddef>\n";
             *stream << "#include <cstdlib>\n";
             *stream << "#include <cstdint>\n";
+            *stream << "#include <cstdarg>\n";
+            *stream << "#include <cstring>\n";
             *stream << "#include <limits>\n";
             *stream << "#include <string>\n";
             *stream << "#include <vector>\n\n";
@@ -11266,6 +13058,37 @@ namespace wolvrix::lib::emit
             *stream << "            value[liveWords - 1u] = grhsim_trunc_u64(value[liveWords - 1u], tailWidth);\n";
             *stream << "        }\n";
             *stream << "    }\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t Bits>\n";
+            *stream << "inline constexpr std::uint64_t grhsim_const_mask()\n{\n";
+            *stream << "    if constexpr (Bits == 0) {\n";
+            *stream << "        return UINT64_C(0);\n";
+            *stream << "    }\n";
+            *stream << "    else if constexpr (Bits >= 64) {\n";
+            *stream << "        return ~UINT64_C(0);\n";
+            *stream << "    }\n";
+            *stream << "    else {\n";
+            *stream << "        return (UINT64_C(1) << Bits) - UINT64_C(1);\n";
+            *stream << "    }\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t Width>\n";
+            *stream << "inline std::array<std::uint64_t, 2> grhsim_trunc_words_2(std::array<std::uint64_t, 2> value)\n{\n";
+            *stream << "    static_assert(Width > 64 && Width <= 128);\n";
+            *stream << "    if constexpr (Width < 128) {\n";
+            *stream << "        value[1] &= grhsim_const_mask<Width - 64u>();\n";
+            *stream << "    }\n";
+            *stream << "    return value;\n";
+            *stream << "}\n\n";
+            *stream << "template <std::size_t Width>\n";
+            *stream << "inline bool grhsim_assign_words_2(std::array<std::uint64_t, 2> &dst,\n";
+            *stream << "                                  const std::array<std::uint64_t, 2> &src)\n{\n";
+            *stream << "    static_assert(Width > 64 && Width <= 128);\n";
+            *stream << "    const std::uint64_t next0 = src[0];\n";
+            *stream << "    const std::uint64_t next1 = src[1] & grhsim_const_mask<Width - 64u>();\n";
+            *stream << "    const bool changed = (dst[0] != next0) | (dst[1] != next1);\n";
+            *stream << "    dst[0] = next0;\n";
+            *stream << "    dst[1] = next1;\n";
+            *stream << "    return changed;\n";
             *stream << "}\n\n";
             *stream << "template <std::size_t N>\n";
             *stream << "inline bool grhsim_equal_words(const std::array<std::uint64_t, N> &lhs, const std::array<std::uint64_t, N> &rhs)\n{\n";
@@ -12103,6 +13926,57 @@ inline void grhsim_insert_words(std::array<std::uint64_t, DestN> &dest,
     }
 }
 
+template <std::size_t DestLsb, std::size_t SrcWidth>
+inline void grhsim_insert_words_2_1(std::array<std::uint64_t, 2> &dest,
+                                    const std::array<std::uint64_t, 1> &src)
+{
+    static_assert(SrcWidth <= 64);
+    static_assert(DestLsb < 128);
+    constexpr std::size_t bitShift = DestLsb & 63u;
+    constexpr std::size_t destWord = DestLsb / 64u;
+    constexpr std::uint64_t bitsMask = grhsim_const_mask<SrcWidth>();
+    const std::uint64_t bits = src[0] & bitsMask;
+    if constexpr (destWord < 2) {
+        if constexpr (bitShift == 0) {
+            dest[destWord] |= bits;
+        }
+        else {
+            dest[destWord] |= bits << bitShift;
+        }
+    }
+    if constexpr (bitShift != 0 && destWord + 1u < 2 && SrcWidth + bitShift > 64u) {
+        dest[destWord + 1u] |= bits >> (64u - bitShift);
+    }
+}
+
+template <std::size_t DestLsb, std::size_t SrcWidth>
+inline void grhsim_insert_words_2_2(std::array<std::uint64_t, 2> &dest,
+                                    const std::array<std::uint64_t, 2> &src)
+{
+    static_assert(SrcWidth > 64 && SrcWidth <= 128);
+    static_assert(DestLsb < 128);
+    constexpr std::size_t bitShift = DestLsb & 63u;
+    constexpr std::size_t destWord = DestLsb / 64u;
+    const std::uint64_t word0 = src[0];
+    const std::uint64_t word1 = src[1] & grhsim_const_mask<SrcWidth - 64u>();
+    if constexpr (destWord < 2) {
+        if constexpr (bitShift == 0) {
+            dest[destWord] |= word0;
+        }
+        else {
+            dest[destWord] |= word0 << bitShift;
+        }
+    }
+    if constexpr (destWord + 1u < 2) {
+        if constexpr (bitShift == 0) {
+            dest[destWord + 1u] |= word1;
+        }
+        else {
+            dest[destWord + 1u] |= (word0 >> (64u - bitShift)) | (word1 << bitShift);
+        }
+    }
+}
+
 template <std::size_t DestN>
 inline void grhsim_insert_scalar_words(std::array<std::uint64_t, DestN> &dest,
                                        std::size_t destLsb,
@@ -12170,6 +14044,53 @@ inline std::array<std::uint64_t, DestN> grhsim_concat_uniform_scalars_words(cons
     return out;
 }
 
+template <std::size_t LhsWidth, std::size_t RhsWidth, std::size_t TotalWidth>
+inline std::array<std::uint64_t, 2> grhsim_concat_words_2_1_1(const std::array<std::uint64_t, 1> &lhs,
+                                                              const std::array<std::uint64_t, 1> &rhs)
+{
+    static_assert(LhsWidth <= 64 && RhsWidth <= 64);
+    static_assert(TotalWidth > 64 && TotalWidth <= 128);
+    std::array<std::uint64_t, 2> out{};
+    grhsim_insert_words_2_1<0, (RhsWidth < TotalWidth ? RhsWidth : TotalWidth)>(out, rhs);
+    if constexpr (RhsWidth < TotalWidth) {
+        grhsim_insert_words_2_1<RhsWidth, (LhsWidth < TotalWidth - RhsWidth ? LhsWidth : TotalWidth - RhsWidth)>(
+            out,
+            lhs);
+    }
+    return grhsim_trunc_words_2<TotalWidth>(out);
+}
+
+template <std::size_t LhsWidth, std::size_t RhsWidth, std::size_t TotalWidth>
+inline std::array<std::uint64_t, 2> grhsim_concat_words_2_1_2(const std::array<std::uint64_t, 1> &lhs,
+                                                              const std::array<std::uint64_t, 2> &rhs)
+{
+    static_assert(LhsWidth <= 64 && RhsWidth > 64 && RhsWidth <= 128);
+    static_assert(TotalWidth > 64 && TotalWidth <= 128);
+    std::array<std::uint64_t, 2> out{};
+    grhsim_insert_words_2_2<0, (RhsWidth < TotalWidth ? RhsWidth : TotalWidth)>(out, rhs);
+    if constexpr (RhsWidth < TotalWidth) {
+        grhsim_insert_words_2_1<RhsWidth, (LhsWidth < TotalWidth - RhsWidth ? LhsWidth : TotalWidth - RhsWidth)>(
+            out,
+            lhs);
+    }
+    return grhsim_trunc_words_2<TotalWidth>(out);
+}
+
+template <std::size_t Index,
+          std::size_t EmitRep,
+          std::size_t ElemWidth,
+          std::size_t TotalWidth>
+inline void grhsim_replicate_words_2_1_impl(std::array<std::uint64_t, 2> &out,
+                                            const std::array<std::uint64_t, 1> &value)
+{
+    if constexpr (Index < EmitRep) {
+        constexpr std::size_t offset = Index * ElemWidth;
+        constexpr std::size_t width = ElemWidth < TotalWidth - offset ? ElemWidth : TotalWidth - offset;
+        grhsim_insert_words_2_1<offset, width>(out, value);
+        grhsim_replicate_words_2_1_impl<Index + 1u, EmitRep, ElemWidth, TotalWidth>(out, value);
+    }
+}
+
 template <std::size_t DestN, std::size_t LhsN, std::size_t RhsN>
 inline std::array<std::uint64_t, DestN> grhsim_concat_words(const std::array<std::uint64_t, LhsN> &lhs,
                                                             std::size_t lhsWidth,
@@ -12185,6 +14106,20 @@ inline std::array<std::uint64_t, DestN> grhsim_concat_words(const std::array<std
     }
     grhsim_trunc_words(out, totalWidth);
     return out;
+}
+
+template <std::size_t ElemWidth, std::size_t Rep, std::size_t TotalWidth>
+inline std::array<std::uint64_t, 2> grhsim_replicate_words_2_1(const std::array<std::uint64_t, 1> &value)
+{
+    static_assert(ElemWidth <= 64);
+    static_assert(TotalWidth > 64 && TotalWidth <= 128);
+    std::array<std::uint64_t, 2> out{};
+    if constexpr (ElemWidth != 0) {
+        constexpr std::size_t liveRep = (TotalWidth + ElemWidth - 1u) / ElemWidth;
+        constexpr std::size_t emitRep = liveRep < Rep ? liveRep : Rep;
+        grhsim_replicate_words_2_1_impl<0, emitRep, ElemWidth, TotalWidth>(out, value);
+    }
+    return grhsim_trunc_words_2<TotalWidth>(out);
 }
 
 template <std::size_t DestN, std::size_t SrcN>
@@ -12548,6 +14483,23 @@ inline std::array<std::uint64_t, N> grhsim_add_words(const std::array<std::uint6
     }
     grhsim_trunc_words(out, width);
     return out;
+}
+
+template <std::size_t Width>
+inline std::array<std::uint64_t, 2> grhsim_add_words_2(const std::array<std::uint64_t, 2> &lhs,
+                                                       const std::array<std::uint64_t, 2> &rhs)
+{
+    static_assert(Width > 64 && Width <= 128);
+    const unsigned __int128 lhs128 =
+        static_cast<unsigned __int128>(lhs[0]) |
+        (static_cast<unsigned __int128>(lhs[1] & grhsim_const_mask<Width - 64u>()) << 64u);
+    const unsigned __int128 rhs128 =
+        static_cast<unsigned __int128>(rhs[0]) |
+        (static_cast<unsigned __int128>(rhs[1] & grhsim_const_mask<Width - 64u>()) << 64u);
+    const unsigned __int128 sum = lhs128 + rhs128;
+    return grhsim_trunc_words_2<Width>(std::array<std::uint64_t, 2>{
+        static_cast<std::uint64_t>(sum),
+        static_cast<std::uint64_t>(sum >> 64u)});
 }
 
 template <std::size_t N>
@@ -12921,6 +14873,24 @@ inline std::array<std::uint64_t, N> grhsim_ashr_words(const std::array<std::uint
             *stream << "    std::uint32_t word_index;\n";
             *stream << "    std::uint8_t mask;\n";
             *stream << "};\n\n";
+            *stream << "inline void grhsim_or_active_u16(std::uint8_t *activeFlags, std::size_t index, std::uint16_t mask)\n{\n";
+            *stream << "    std::uint16_t value = 0;\n";
+            *stream << "    std::memcpy(&value, activeFlags + index, sizeof(value));\n";
+            *stream << "    value = static_cast<std::uint16_t>(value | mask);\n";
+            *stream << "    std::memcpy(activeFlags + index, &value, sizeof(value));\n";
+            *stream << "}\n\n";
+            *stream << "inline void grhsim_or_active_u32(std::uint8_t *activeFlags, std::size_t index, std::uint32_t mask)\n{\n";
+            *stream << "    std::uint32_t value = 0;\n";
+            *stream << "    std::memcpy(&value, activeFlags + index, sizeof(value));\n";
+            *stream << "    value |= mask;\n";
+            *stream << "    std::memcpy(activeFlags + index, &value, sizeof(value));\n";
+            *stream << "}\n\n";
+            *stream << "inline void grhsim_or_active_u64(std::uint8_t *activeFlags, std::size_t index, std::uint64_t mask)\n{\n";
+            *stream << "    std::uint64_t value = 0;\n";
+            *stream << "    std::memcpy(&value, activeFlags + index, sizeof(value));\n";
+            *stream << "    value |= mask;\n";
+            *stream << "    std::memcpy(activeFlags + index, &value, sizeof(value));\n";
+            *stream << "}\n\n";
             *stream << "inline std::uint8_t grhsim_popcount_u8(std::uint8_t value)\n{\n";
             *stream << "    return static_cast<std::uint8_t>(__builtin_popcount(static_cast<unsigned>(value)));\n";
             *stream << "}\n\n";
@@ -13016,6 +14986,12 @@ struct grhsim_task_arg {
     std::vector<std::uint64_t> words;
     double realValue = 0.0;
     std::string stringValue;
+};
+
+struct grhsim_scalar_task_arg {
+    std::uint64_t value = 0;
+    std::size_t width = 0;
+    bool isSigned = false;
 };
 
 inline grhsim_task_arg grhsim_make_task_arg(std::uint64_t value, std::size_t width, bool isSigned)
@@ -13375,25 +15351,29 @@ inline std::string grhsim_task_format_one(const grhsim_task_arg &arg,
     return grhsim_task_apply_width(std::move(text), width, leftJustify, zeroPad);
 }
 
-inline std::string grhsim_format_task_message(std::span<const grhsim_task_arg> items)
+inline std::string grhsim_task_format_one(grhsim_scalar_task_arg arg,
+                                          char spec,
+                                          int width,
+                                          int precision,
+                                          bool leftJustify,
+                                          bool zeroPad)
 {
-    if (items.empty()) {
-        return {};
-    }
-    if (items.front().kind != grhsim_task_arg_kind::String) {
-        std::string out;
-        for (std::size_t i = 0; i < items.size(); ++i) {
-            if (i != 0) {
-                out.push_back(' ');
-            }
-            out += grhsim_task_default_arg_text(items[i]);
-        }
-        return out;
-    }
+    grhsim_task_arg full;
+    full.kind = grhsim_task_arg_kind::Logic;
+    full.width = arg.width;
+    full.isSigned = arg.isSigned;
+    full.isWide = false;
+    full.scalarValue = grhsim_trunc_u64(arg.value, arg.width == 0 ? 64u : arg.width);
+    return grhsim_task_format_one(full, spec, width, precision, leftJustify, zeroPad);
+}
 
+template <typename FormatOne>
+inline std::string grhsim_format_task_message_impl(std::string_view fmt,
+                                                   std::size_t argCount,
+                                                   FormatOne formatOne)
+{
     std::string out;
-    const std::string &fmt = items.front().stringValue;
-    std::size_t argIndex = 1;
+    std::size_t argIndex = 0;
     for (std::size_t i = 0; i < fmt.size(); ++i) {
         if (fmt[i] != '%') {
             out.push_back(fmt[i]);
@@ -13449,24 +15429,148 @@ inline std::string grhsim_format_task_message(std::span<const grhsim_task_arg> i
             out += "top";
             continue;
         }
-        if (argIndex >= items.size()) {
+        if (argIndex >= argCount) {
             out.push_back('%');
             out.push_back(spec);
             continue;
         }
-        out += grhsim_task_format_one(items[argIndex++],
-                                      spec,
-                                      fieldWidth,
-                                      precision,
-                                      leftJustify,
-                                      zeroPad);
+        out += formatOne(argIndex++, spec, fieldWidth, precision, leftJustify, zeroPad);
     }
     return out;
+}
+
+inline std::string grhsim_format_task_message(std::span<const grhsim_task_arg> items)
+{
+    if (items.empty()) {
+        return {};
+    }
+    if (items.front().kind != grhsim_task_arg_kind::String) {
+        std::string out;
+        for (std::size_t i = 0; i < items.size(); ++i) {
+            if (i != 0) {
+                out.push_back(' ');
+            }
+            out += grhsim_task_default_arg_text(items[i]);
+        }
+        return out;
+    }
+
+    const std::string &fmt = items.front().stringValue;
+    return grhsim_format_task_message_impl(fmt,
+                                           items.size() - 1u,
+                                           [&](std::size_t argIndex,
+                                               char spec,
+                                               int fieldWidth,
+                                               int precision,
+                                               bool leftJustify,
+                                               bool zeroPad)
+                                           {
+                                               return grhsim_task_format_one(items[argIndex + 1u],
+                                                                             spec,
+                                                                             fieldWidth,
+                                                                             precision,
+                                                                             leftJustify,
+                                                                             zeroPad);
+                                           });
 }
 
 inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_arg> args)
 {
     return grhsim_format_task_message(std::span<const grhsim_task_arg>(args.begin(), args.size()));
+}
+
+inline std::string grhsim_format_task_message(std::string_view fmt,
+                                              std::span<const grhsim_scalar_task_arg> items)
+{
+    return grhsim_format_task_message_impl(fmt,
+                                           items.size(),
+                                           [&](std::size_t argIndex,
+                                               char spec,
+                                               int fieldWidth,
+                                               int precision,
+                                               bool leftJustify,
+                                               bool zeroPad)
+                                           {
+                                               return grhsim_task_format_one(items[argIndex],
+                                                                             spec,
+                                                                             fieldWidth,
+                                                                             precision,
+                                                                             leftJustify,
+                                                                             zeroPad);
+                                           });
+}
+
+inline std::string grhsim_format_task_message(std::string_view fmt,
+                                              std::initializer_list<grhsim_scalar_task_arg> args)
+{
+    return grhsim_format_task_message(fmt, std::span<const grhsim_scalar_task_arg>(args.begin(), args.size()));
+}
+
+inline void grhsim_format_scalar_task_message_direct(std::ostream &out, std::string_view fmt, va_list args)
+{
+    for (std::size_t i = 0; i < fmt.size(); ++i) {
+        if (fmt[i] != '%') {
+            out.put(fmt[i]);
+            continue;
+        }
+        if (i + 1u >= fmt.size()) {
+            out.put('%');
+            break;
+        }
+        if (fmt[i + 1u] == '%') {
+            out.put('%');
+            ++i;
+            continue;
+        }
+        ++i;
+        bool leftJustify = false;
+        bool zeroPad = false;
+        while (i < fmt.size()) {
+            if (fmt[i] == '-') {
+                leftJustify = true;
+                ++i;
+                continue;
+            }
+            if (fmt[i] == '0') {
+                zeroPad = true;
+                ++i;
+                continue;
+            }
+            break;
+        }
+        int fieldWidth = 0;
+        while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9') {
+            fieldWidth = fieldWidth * 10 + static_cast<int>(fmt[i] - '0');
+            ++i;
+        }
+        int precision = -1;
+        if (i < fmt.size() && fmt[i] == '.') {
+            ++i;
+            precision = 0;
+            while (i < fmt.size() && fmt[i] >= '0' && fmt[i] <= '9') {
+                precision = precision * 10 + static_cast<int>(fmt[i] - '0');
+                ++i;
+            }
+        }
+        while (i < fmt.size() && (fmt[i] == 'l' || fmt[i] == 'L' || fmt[i] == 'z')) {
+            ++i;
+        }
+        if (i >= fmt.size()) {
+            break;
+        }
+        const char spec = fmt[i];
+        if (spec == 'm') {
+            out << "top";
+            continue;
+        }
+        const unsigned widthAndSign = va_arg(args, unsigned);
+        const std::uint64_t value = va_arg(args, std::uint64_t);
+        const grhsim_scalar_task_arg arg{
+            value,
+            static_cast<std::size_t>(widthAndSign & 0x7fffffffu),
+            (widthAndSign & 0x80000000u) != 0};
+        out << grhsim_task_format_one(arg, spec, fieldWidth, precision, leftJustify, zeroPad);
+    }
 }
 )CPP";
             }
@@ -13536,6 +15640,11 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    [[nodiscard]] PerfCounters perf_counters() const;\n";
                 *stream << "    void reset_perf_counters();\n";
             }
+            *stream << "    void set_runtime_profile_enabled(bool enabled);\n";
+            *stream << "    [[nodiscard]] bool runtime_profile_enabled() const;\n";
+            *stream << "    void dump_runtime_profile() const;\n";
+            *stream << "    static constexpr bool kRuntimeProfileCompiled = "
+                    << (model.emitRuntimeProfile ? "true" : "false") << ";\n";
             if (model.emitWaveform)
             {
                 *stream << "    void configure_waveform(bool enabled, std::string path = {});\n";
@@ -13812,7 +15921,17 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    void close_file_handle(std::uint64_t handle);\n";
                 *stream << "    void clear_file_error(std::uint64_t handle);\n";
                 *stream << "    void set_file_error(std::uint64_t handle, int errorCode);\n";
+                *stream << "    void execute_system_task(std::string_view name, std::span<const grhsim_task_arg> items);\n";
                 *stream << "    void execute_system_task(std::string_view name, std::initializer_list<grhsim_task_arg> args);\n";
+                *stream << "    void execute_scalar_format_system_task(std::string_view name,\n";
+                *stream << "                                           std::uint64_t handle,\n";
+                *stream << "                                           std::string_view format,\n";
+                *stream << "                                           std::initializer_list<grhsim_scalar_task_arg> args);\n";
+                *stream << "    void emit_scalar_format_system_task_direct(bool useHandle,\n";
+                *stream << "                                               bool newline,\n";
+                *stream << "                                               std::uint64_t handle,\n";
+                *stream << "                                               std::string_view format,\n";
+                *stream << "                                               ...);\n";
                 *stream << "    void flush_deferred_system_task_texts();\n";
                 *stream << "    void finalize();\n";
                 *stream << "    [[noreturn]] void terminate_host_process(int exitCode);\n";
@@ -13841,6 +15960,17 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             if (model.emitPerf)
             {
                 *stream << "    PerfCounters perf_counters_{};\n";
+            }
+            if (model.emitRuntimeProfile)
+            {
+                *stream << "    bool runtime_profile_enabled_ = false;\n";
+                *stream << "    std::uint64_t runtime_profile_active_supernodes_ = UINT64_C(0);\n";
+                *stream << "    std::uint64_t runtime_profile_compute_supernodes_ = UINT64_C(0);\n";
+                *stream << "    std::uint64_t runtime_profile_commit_supernodes_ = UINT64_C(0);\n";
+                *stream << "    std::uint64_t runtime_profile_compute_nodes_ = UINT64_C(0);\n";
+                *stream << "    std::uint64_t runtime_profile_source_ops_ = UINT64_C(0);\n";
+                *stream << "    std::uint64_t runtime_profile_compute_ops_ = UINT64_C(0);\n";
+                *stream << "    std::uint64_t runtime_profile_sink_ops_ = UINT64_C(0);\n";
             }
             *stream << "    bool register_write_conflict_ = false;\n";
             *stream << "    std::uint64_t random_seed_ = UINT64_C(0);\n";
@@ -13888,14 +16018,6 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << decl << '\n';
             }
             if (!model.inputFieldDecls.empty())
-            {
-                *stream << '\n';
-            }
-            for (const auto &decl : model.staticConstStringDecls)
-            {
-                *stream << decl << '\n';
-            }
-            if (!model.staticConstStringDecls.empty())
             {
                 *stream << '\n';
             }
@@ -14133,8 +16255,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             const bool hasReaders = headIt != model.stateHeadSupernodesBySymbol.end() && !headIt->second.empty();
             if (isWideLogicWidth(state.width))
             {
-                stream << indent << "if (grhsim_assign_words(" << stateExpr << ", " << shadowDataRef << ", "
-                       << state.width << ")) {\n";
+                stream << indent << "if ("
+                       << assignWordsInlineExpr(stateExpr, shadowDataRef, state.width)
+                       << ") {\n";
                 if (hasReaders)
                 {
                     stream << indent << "    activatedReaders = true;\n";
@@ -14185,8 +16308,9 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 {
                     if (isWideLogicWidth(state.width))
                     {
-                        stream << indent << "if (" << writeAddrRef << " < " << state.rowCount << "u && grhsim_assign_words(" << rowRef << ", "
-                               << writeDataRef << ", " << state.width << ")) {\n";
+                        stream << indent << "if (" << writeAddrRef << " < " << state.rowCount << "u && "
+                               << assignWordsInlineExpr(rowRef, writeDataRef, state.width)
+                               << ") {\n";
                         if (hasReaders)
                         {
                             stream << indent << "    activatedReaders = true;\n";
@@ -14433,6 +16557,43 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    perf_counters_ = PerfCounters{};\n";
                 *stream << "}\n\n";
             }
+            *stream << "void " << className << "::set_runtime_profile_enabled(bool enabled)\n{\n";
+            if (model.emitRuntimeProfile)
+            {
+                *stream << "    runtime_profile_enabled_ = enabled;\n";
+            }
+            else
+            {
+                *stream << "    (void)enabled;\n";
+            }
+            *stream << "}\n\n";
+            *stream << "bool " << className << "::runtime_profile_enabled() const\n{\n";
+            if (model.emitRuntimeProfile)
+            {
+                *stream << "    return runtime_profile_enabled_;\n";
+            }
+            else
+            {
+                *stream << "    return false;\n";
+            }
+            *stream << "}\n\n";
+            *stream << "void " << className << "::dump_runtime_profile() const\n{\n";
+            if (model.emitRuntimeProfile)
+            {
+                *stream << "    if (!runtime_profile_enabled_) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    std::printf(\"[GRHSIM_RUNTIME_PROFILE] active_supernodes=%llu compute_supernodes=%llu commit_supernodes=%llu compute_nodes=%llu source_ops=%llu compute_ops=%llu sink_ops=%llu total_ops=%llu\\n\",\n";
+                *stream << "                static_cast<unsigned long long>(runtime_profile_active_supernodes_),\n";
+                *stream << "                static_cast<unsigned long long>(runtime_profile_compute_supernodes_),\n";
+                *stream << "                static_cast<unsigned long long>(runtime_profile_commit_supernodes_),\n";
+                *stream << "                static_cast<unsigned long long>(runtime_profile_compute_nodes_),\n";
+                *stream << "                static_cast<unsigned long long>(runtime_profile_source_ops_),\n";
+                *stream << "                static_cast<unsigned long long>(runtime_profile_compute_ops_),\n";
+                *stream << "                static_cast<unsigned long long>(runtime_profile_sink_ops_),\n";
+                *stream << "                static_cast<unsigned long long>(runtime_profile_source_ops_ + runtime_profile_compute_ops_ + runtime_profile_sink_ops_));\n";
+            }
+            *stream << "}\n\n";
             const bool useCommitBoolRange = modelUsesCommitScalarStateWriteKind(model, ValueSlotScalarKind::kBool);
             const bool useCommitU8Range = modelUsesCommitScalarStateWriteKind(model, ValueSlotScalarKind::kU8);
             const bool useCommitU16Range = modelUsesCommitScalarStateWriteKind(model, ValueSlotScalarKind::kU16);
@@ -15478,8 +17639,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "    deferred_system_task_texts_.clear();\n";
                 *stream << "}\n\n";
                 *stream << "void " << className << "::execute_system_task(std::string_view name,\n";
-                *stream << "                               std::initializer_list<grhsim_task_arg> args)\n{\n";
-                *stream << "    const std::span<const grhsim_task_arg> items(args.begin(), args.size());\n";
+                *stream << "                               std::span<const grhsim_task_arg> items)\n{\n";
                 *stream << "    if (name == \"display\" || name == \"write\" || name == \"strobe\") {\n";
                 *stream << "        emit_system_task_text(false,\n";
                 *stream << "                              0,\n";
@@ -15609,6 +17769,47 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                 *stream << "        terminate_host_process(exitCode);\n";
                 *stream << "    }\n";
                 *stream << "}\n\n";
+                *stream << "void " << className << "::execute_system_task(std::string_view name,\n";
+                *stream << "                               std::initializer_list<grhsim_task_arg> args)\n{\n";
+                *stream << "    execute_system_task(name, std::span<const grhsim_task_arg>(args.begin(), args.size()));\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::execute_scalar_format_system_task(\n";
+                *stream << "    std::string_view name,\n";
+                *stream << "    std::uint64_t handle,\n";
+                *stream << "    std::string_view format,\n";
+                *stream << "    std::initializer_list<grhsim_scalar_task_arg> args)\n{\n";
+                *stream << "    const auto items = std::span<const grhsim_scalar_task_arg>(args.begin(), args.size());\n";
+                *stream << "    const std::string text = grhsim_format_task_message(format, items);\n";
+                *stream << "    if (name == \"display\" || name == \"write\" || name == \"strobe\") {\n";
+                *stream << "        emit_system_task_text(false, 0, false, name != \"write\", text, name == \"strobe\");\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    if (name == \"fdisplay\" || name == \"fwrite\") {\n";
+                *stream << "        emit_system_task_text(true, handle, false, name == \"fdisplay\", text, false);\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
+                *stream << "void " << className << "::emit_scalar_format_system_task_direct(\n";
+                *stream << "    bool useHandle,\n";
+                *stream << "    bool newline,\n";
+                *stream << "    std::uint64_t handle,\n";
+                *stream << "    std::string_view format,\n";
+                *stream << "    ...)\n{\n";
+                *stream << "    std::ostream *out = useHandle ? resolve_output_stream(handle, false) : &std::cout;\n";
+                *stream << "    if (out == nullptr) {\n";
+                *stream << "        return;\n";
+                *stream << "    }\n";
+                *stream << "    va_list args;\n";
+                *stream << "    va_start(args, format);\n";
+                *stream << "    grhsim_format_scalar_task_message_direct(*out, format, args);\n";
+                *stream << "    va_end(args);\n";
+                *stream << "    if (newline) {\n";
+                *stream << "        (*out) << '\\n';\n";
+                *stream << "    }\n";
+                *stream << "    if (useHandle && handle > UINT64_C(2)) {\n";
+                *stream << "        clear_file_error(handle);\n";
+                *stream << "    }\n";
+                *stream << "}\n\n";
                 *stream << "void " << className << "::finalize()\n{\n";
                 *stream << "    if (finalized_) {\n";
                 *stream << "        return;\n";
@@ -15626,22 +17827,38 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
                     const std::size_t argEnd = operands.size() >= eventCount ? operands.size() - eventCount : operands.size();
                     const std::string name = getAttribute<std::string>(op, "name").value_or(std::string("display"));
                     *stream << "    if (" << stableTruthyLogicValueExpr(graph, model, operands[0]) << ") {\n";
-                    if (argEnd <= 1)
+                    const auto taskArgs =
+                        argEnd <= 1
+                            ? std::span<const ValueId>()
+                            : std::span<const ValueId>(operands.data() + 1, argEnd - 1);
+                    if (canUseDirectScalarFormatSystemTask(graph, model, name, taskArgs, true))
                     {
-                        *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {});\n";
+                        emitStableDirectScalarFormatSystemTaskCall(*stream,
+                                                                   graph,
+                                                                   model,
+                                                                   "        ",
+                                                                   name,
+                                                                   taskArgs);
+                    }
+                    else if (canUseScalarFormatSystemTask(graph, model, name, taskArgs, true))
+                    {
+                        emitStableScalarFormatSystemTaskCall(*stream,
+                                                             graph,
+                                                             model,
+                                                             "        ",
+                                                             name,
+                                                             taskArgs);
                     }
                     else
                     {
-                        *stream << "        execute_system_task(\"" << escapeCppString(name) << "\", {";
-                        for (std::size_t i = 1; i < argEnd; ++i)
-                        {
-                            if (i != 1)
-                            {
-                                *stream << ", ";
-                            }
-                            *stream << stableSystemTaskArgExpr(graph, model, operands[i]);
-                        }
-                        *stream << "});\n";
+                        emitSystemTaskCall(*stream,
+                                           "        ",
+                                           name,
+                                           taskArgs.size(),
+                                           [&](std::size_t argIndex)
+                                           {
+                                               return stableSystemTaskArgExpr(graph, model, taskArgs[argIndex]);
+                                           });
                     }
                     *stream << "    }\n";
                 }
@@ -16389,20 +18606,27 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
         }
 
         const std::size_t emitParallelism =
-            std::min(parseEmitParallelism(options), scheduleBatches.empty() ? std::size_t{1} : scheduleBatches.size());
-        if (emitParallelism <= 1 || scheduleBatches.size() <= 1)
+            std::min(parseEmitParallelism(options), schedOutputPaths.empty() ? std::size_t{1} : schedOutputPaths.size());
+        const auto emitSchedGroup = [&](std::size_t groupIndex) -> std::optional<std::string>
         {
-            for (std::size_t batchIndex = 0; batchIndex < scheduleBatches.size(); ++batchIndex)
+            const std::size_t beginBatch = groupIndex * schedBatchesPerCpp;
+            const std::size_t endBatch = std::min(scheduleBatches.size(), beginBatch + schedBatchesPerCpp);
+            return emitSchedBatchFile(schedOutputPaths[groupIndex],
+                                      headerPath,
+                                      className,
+                                      graph,
+                                      model,
+                                      schedule,
+                                      std::span<const ScheduleBatch>(scheduleBatches.data() + beginBatch,
+                                                                     endBatch - beginBatch),
+                                      scheduleBatches.size(),
+                                      maxOutputFileBytes);
+        };
+        if (emitParallelism <= 1 || schedOutputPaths.size() <= 1)
+        {
+            for (std::size_t groupIndex = 0; groupIndex < schedOutputPaths.size(); ++groupIndex)
             {
-                if (auto error = emitSchedBatchFile(schedPaths[batchIndex],
-                                                    headerPath,
-                                                    className,
-                                                    graph,
-                                                    model,
-                                                    schedule,
-                                                    scheduleBatches[batchIndex],
-                                                    scheduleBatches.size(),
-                                                    maxOutputFileBytes))
+                if (auto error = emitSchedGroup(groupIndex))
                 {
                     reportError(*error, graph.symbol());
                     result.success = false;
@@ -16414,39 +18638,31 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
         {
             struct PendingSchedEmit
             {
-                std::size_t batchIndex = 0;
+                std::size_t groupIndex = 0;
                 std::future<std::optional<std::string>> future;
             };
 
             std::vector<PendingSchedEmit> pending;
             pending.reserve(emitParallelism);
 
-            auto launchBatch = [&](std::size_t batchIndex)
+            auto launchGroup = [&](std::size_t groupIndex)
             {
                 pending.push_back(PendingSchedEmit{
-                    .batchIndex = batchIndex,
+                    .groupIndex = groupIndex,
                     .future = std::async(std::launch::async,
-                                         [&, batchIndex]() -> std::optional<std::string>
+                                         [&, groupIndex]() -> std::optional<std::string>
                                          {
-                                             return emitSchedBatchFile(schedPaths[batchIndex],
-                                                                       headerPath,
-                                                                       className,
-                                                                       graph,
-                                                                       model,
-                                                                       schedule,
-                                                                       scheduleBatches[batchIndex],
-                                                                       scheduleBatches.size(),
-                                                                       maxOutputFileBytes);
+                                             return emitSchedGroup(groupIndex);
                                          }),
                 });
             };
 
             std::size_t launched = 0;
-            while (launched < scheduleBatches.size() || !pending.empty())
+            while (launched < schedOutputPaths.size() || !pending.empty())
             {
-                while (launched < scheduleBatches.size() && pending.size() < emitParallelism)
+                while (launched < schedOutputPaths.size() && pending.size() < emitParallelism)
                 {
-                    launchBatch(launched++);
+                    launchGroup(launched++);
                 }
 
                 PendingSchedEmit task = std::move(pending.front());
@@ -16498,7 +18714,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
             {
                 *stream << ' ' << stateCommitPath.filename().string();
             }
-            for (const auto &schedPath : schedPaths)
+            for (const auto &schedPath : schedOutputPaths)
             {
                 *stream << ' ' << schedPath.filename().string();
             }
@@ -16569,7 +18785,7 @@ inline std::string grhsim_format_task_message(std::initializer_list<grhsim_task_
         {
             result.artifacts.push_back(stateCommitPath.string());
         }
-        for (const auto &schedPath : schedPaths)
+        for (const auto &schedPath : schedOutputPaths)
         {
             result.artifacts.push_back(schedPath.string());
         }

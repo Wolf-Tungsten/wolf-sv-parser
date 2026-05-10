@@ -294,6 +294,7 @@ class Session:
         sched_batch_max_ops: int | None = None,
         sched_batch_max_estimated_lines: int | None = None,
         sched_batch_target_count: int | None = None,
+        sched_batches_per_cpp: int | None = None,
         emit_parallelism: int | None = None,
         perf: str | None = None,
         **named_args,
@@ -301,7 +302,7 @@ class Session:
         self._ensure_open()
         if (max_cpp_file_bytes is not None or sched_batch_max_ops is not None or
                 sched_batch_max_estimated_lines is not None or sched_batch_target_count is not None or
-                emit_parallelism is not None or perf is not None):
+                sched_batches_per_cpp is not None or emit_parallelism is not None or perf is not None):
             named_args = dict(named_args)
         if max_cpp_file_bytes is not None:
             named_args["max_cpp_file_bytes"] = max_cpp_file_bytes
@@ -311,6 +312,8 @@ class Session:
             named_args["sched_batch_max_estimated_lines"] = sched_batch_max_estimated_lines
         if sched_batch_target_count is not None:
             named_args["sched_batch_target_count"] = sched_batch_target_count
+        if sched_batches_per_cpp is not None:
+            named_args["sched_batches_per_cpp"] = sched_batches_per_cpp
         if emit_parallelism is not None:
             named_args["emit_parallelism"] = emit_parallelism
         if perf is not None:
@@ -601,10 +604,13 @@ def _compile_activity_schedule_kwargs(named: dict[str, Any]) -> list[str]:
         ("max_compute_node_in_compute_supernode", "-max-compute-node-in-compute-supernode"),
         ("max_op_in_compute_node", "-max-op-in-compute-node"),
         ("max_op_in_commit_supernode", "-max-op-in-commit-supernode"),
+        ("local_shared_compute_max_fanout", "-local-shared-compute-max-fanout"),
+        ("local_shared_compute_max_width", "-local-shared-compute-max-width"),
     ]
     bool_options = [
         ("enable_coarsen", "-enable-coarsen"),
         ("enable_chain_merge", "-enable-chain-merge"),
+        ("enable_local_shared_compute", "-enable-local-shared-compute"),
     ]
 
     for key, arg in string_options:
@@ -656,6 +662,10 @@ def _compile_emit_grhsim_cpp_kwargs(named: dict[str, Any]) -> None:
     if sched_batch_target_count is not None:
         if not isinstance(sched_batch_target_count, int) or sched_batch_target_count < 0:
             raise ValueError("emit_grhsim_cpp sched_batch_target_count must be a non-negative integer")
+    sched_batches_per_cpp = local.pop("sched_batches_per_cpp", None)
+    if sched_batches_per_cpp is not None:
+        if not isinstance(sched_batches_per_cpp, int) or sched_batches_per_cpp < 0:
+            raise ValueError("emit_grhsim_cpp sched_batches_per_cpp must be a non-negative integer")
     emit_parallelism = local.pop("emit_parallelism", None)
     if emit_parallelism is not None:
         if not isinstance(emit_parallelism, int) or emit_parallelism < 0:

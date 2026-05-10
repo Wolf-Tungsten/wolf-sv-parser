@@ -287,6 +287,7 @@ namespace wolvrix::lib::transform
             ActivityScheduleTopoOrder topoOrder;
             ActivityScheduleStateReadSupernodes stateReadSupernodes;
             ActivityScheduleSupernodeKinds supernodeKinds;
+            ActivityScheduleComputeNodesBySupernode computeNodesBySupernode;
         };
 
         std::string encodeActivityScheduleSummaryStatsJson(const ActivityScheduleSummaryStats &stats)
@@ -333,9 +334,26 @@ namespace wolvrix::lib::transform
             out << ",\"compute_nodes\":" << stats.computeNodes;
             out << ",\"compute_node_ops_total\":" << stats.computeNodeOpsTotal;
             out << ",\"source_clones_in_compute_nodes\":" << stats.sourceClonesInComputeNodes;
+            out << ",\"local_shared_compute_clones_in_compute_nodes\":"
+                << stats.localSharedComputeClonesInComputeNodes;
             out << ",\"direct_source_inputs_to_commit_supernodes\":"
                 << stats.directSourceInputsToCommitSupernodes;
             out << ",\"common_expr_compute_nodes\":" << stats.commonExprComputeNodes;
+            out << ",\"compute_node_boundary_inputs_total\":" << stats.computeNodeBoundaryInputsTotal;
+            out << ",\"compute_node_boundary_input_no_def\":" << stats.computeNodeBoundaryInputNoDef;
+            out << ",\"compute_node_boundary_input_def_out_of_range\":"
+                << stats.computeNodeBoundaryInputDefOutOfRange;
+            out << ",\"compute_node_boundary_input_declared\":" << stats.computeNodeBoundaryInputDeclared;
+            out << ",\"compute_node_boundary_input_source_spill\":"
+                << stats.computeNodeBoundaryInputSourceSpill;
+            out << ",\"compute_node_boundary_input_unsupported\":"
+                << stats.computeNodeBoundaryInputUnsupported;
+            out << ",\"compute_node_boundary_input_existing_owner\":"
+                << stats.computeNodeBoundaryInputExistingOwner;
+            out << ",\"compute_node_boundary_input_existing_common_owner\":"
+                << stats.computeNodeBoundaryInputExistingCommonOwner;
+            out << ",\"compute_node_boundary_input_shared\":" << stats.computeNodeBoundaryInputShared;
+            out << ",\"compute_node_boundary_input_capacity\":" << stats.computeNodeBoundaryInputCapacity;
             out << ",\"compute_node_boundary_values\":" << stats.computeNodeBoundaryValues;
             out << ",\"commit_input_root_values\":" << stats.commitInputRootValues;
             out << ",\"topo_edges\":" << stats.topoEdges;
@@ -343,14 +361,24 @@ namespace wolvrix::lib::transform
             out << ",\"graph_values\":" << stats.graphValues;
             emitCountMap(out, "activation_edges_by_source_kind", stats.activationEdgesBySourceKind);
             emitCountMap(out, "activation_source_values_by_source_kind", stats.activationSourceValuesBySourceKind);
+            emitCountMap(out,
+                         "compute_node_boundary_existing_common_owner_by_kind",
+                         stats.computeNodeBoundaryExistingCommonOwnerByKind);
+            emitCountMap(out,
+                         "compute_node_boundary_existing_common_owner_by_width_bucket",
+                         stats.computeNodeBoundaryExistingCommonOwnerByWidthBucket);
+            emitCountMap(out,
+                         "compute_node_boundary_existing_common_owner_by_fanout_bucket",
+                         stats.computeNodeBoundaryExistingCommonOwnerByFanoutBucket);
             out << "}";
             return out.str();
         }
 
+        template <typename RewriteBuildT, typename OpDataT>
         ActivityScheduleSummaryStats buildActivityScheduleSummaryStats(const ActivityScheduleBuild &build,
-                                                                      const ActivityScheduleRewriteResult &rewrite,
-                                                                      const ActivityOpData &opData,
-                                                                      const wolvrix::lib::grh::Graph &graph)
+                                                                       const RewriteBuildT &rewrite,
+                                                                       const OpDataT &opData,
+                                                                       const wolvrix::lib::grh::Graph &graph)
         {
             ActivityScheduleSummaryStats stats;
             std::unordered_set<uint64_t> otherComputeUniquePairs;
@@ -358,10 +386,28 @@ namespace wolvrix::lib::transform
             stats.computeNodes = rewrite.stats.computeNodes;
             stats.computeNodeOpsTotal = rewrite.stats.computeNodeOpsTotal;
             stats.sourceClonesInComputeNodes = rewrite.stats.sourceClonesInComputeNodes;
+            stats.localSharedComputeClonesInComputeNodes =
+                rewrite.stats.localSharedComputeClonesInComputeNodes;
             stats.directSourceInputsToCommitSupernodes = rewrite.stats.directSourceInputsToCommitSupernodes;
             stats.commonExprComputeNodes = rewrite.stats.commonExprComputeNodes;
+            stats.computeNodeBoundaryInputsTotal = rewrite.stats.computeNodeBoundaryInputsTotal;
+            stats.computeNodeBoundaryInputNoDef = rewrite.stats.computeNodeBoundaryInputNoDef;
+            stats.computeNodeBoundaryInputDefOutOfRange = rewrite.stats.computeNodeBoundaryInputDefOutOfRange;
+            stats.computeNodeBoundaryInputDeclared = rewrite.stats.computeNodeBoundaryInputDeclared;
+            stats.computeNodeBoundaryInputSourceSpill = rewrite.stats.computeNodeBoundaryInputSourceSpill;
+            stats.computeNodeBoundaryInputUnsupported = rewrite.stats.computeNodeBoundaryInputUnsupported;
+            stats.computeNodeBoundaryInputExistingOwner = rewrite.stats.computeNodeBoundaryInputExistingOwner;
+            stats.computeNodeBoundaryInputExistingCommonOwner = rewrite.stats.computeNodeBoundaryInputExistingCommonOwner;
+            stats.computeNodeBoundaryInputShared = rewrite.stats.computeNodeBoundaryInputShared;
+            stats.computeNodeBoundaryInputCapacity = rewrite.stats.computeNodeBoundaryInputCapacity;
             stats.computeNodeBoundaryValues = rewrite.stats.computeNodeBoundaryValues;
             stats.commitInputRootValues = rewrite.stats.commitInputRootValues;
+            stats.computeNodeBoundaryExistingCommonOwnerByKind =
+                rewrite.stats.computeNodeBoundaryExistingCommonOwnerByKind;
+            stats.computeNodeBoundaryExistingCommonOwnerByWidthBucket =
+                rewrite.stats.computeNodeBoundaryExistingCommonOwnerByWidthBucket;
+            stats.computeNodeBoundaryExistingCommonOwnerByFanoutBucket =
+                rewrite.stats.computeNodeBoundaryExistingCommonOwnerByFanoutBucket;
             stats.topoEdges = opData.topoEdges.size();
             stats.graphOps = graph.operations().size();
             stats.graphValues = graph.values().size();
@@ -2569,13 +2615,29 @@ namespace wolvrix::lib::transform
 
         struct ComputeNodeRewriteStats
         {
+            using KindCountMap = ActivityScheduleSummaryStats::KindCountMap;
+
             std::size_t computeNodes = 0;
             std::size_t computeNodeOpsTotal = 0;
             std::size_t sourceClonesInComputeNodes = 0;
+            std::size_t localSharedComputeClonesInComputeNodes = 0;
             std::size_t directSourceInputsToCommitSupernodes = 0;
             std::size_t commonExprComputeNodes = 0;
+            std::size_t computeNodeBoundaryInputsTotal = 0;
+            std::size_t computeNodeBoundaryInputNoDef = 0;
+            std::size_t computeNodeBoundaryInputDefOutOfRange = 0;
+            std::size_t computeNodeBoundaryInputDeclared = 0;
+            std::size_t computeNodeBoundaryInputSourceSpill = 0;
+            std::size_t computeNodeBoundaryInputUnsupported = 0;
+            std::size_t computeNodeBoundaryInputExistingOwner = 0;
+            std::size_t computeNodeBoundaryInputExistingCommonOwner = 0;
+            std::size_t computeNodeBoundaryInputShared = 0;
+            std::size_t computeNodeBoundaryInputCapacity = 0;
             std::size_t computeNodeBoundaryValues = 0;
             std::size_t commitInputRootValues = 0;
+            KindCountMap computeNodeBoundaryExistingCommonOwnerByKind;
+            KindCountMap computeNodeBoundaryExistingCommonOwnerByWidthBucket;
+            KindCountMap computeNodeBoundaryExistingCommonOwnerByFanoutBucket;
         };
 
         struct ComputeNode
@@ -2860,6 +2922,17 @@ namespace wolvrix::lib::transform
             return std::find(values.begin(), values.end(), value) != values.end();
         }
 
+        bool isDeclaredValue(const wolvrix::lib::grh::Graph &graph,
+                             wolvrix::lib::grh::ValueId value) noexcept
+        {
+            if (!value.valid())
+            {
+                return false;
+            }
+            const auto symbol = graph.valueSymbol(value);
+            return symbol.valid() && graph.isDeclaredSymbol(symbol);
+        }
+
         wolvrix::lib::grh::OperationId cloneSingleResultSourceOp(wolvrix::lib::grh::Graph &graph,
                                                                  wolvrix::lib::grh::OperationId sourceOpId,
                                                                  wolvrix::lib::grh::ValueId sourceValue,
@@ -2902,6 +2975,32 @@ namespace wolvrix::lib::transform
             }
         }
 
+        bool isLocalSharedComputeOpKind(wolvrix::lib::grh::OperationKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case wolvrix::lib::grh::OperationKind::kConstant:
+            case wolvrix::lib::grh::OperationKind::kRegisterReadPort:
+            case wolvrix::lib::grh::OperationKind::kLatchReadPort:
+            case wolvrix::lib::grh::OperationKind::kMemoryReadPort:
+            case wolvrix::lib::grh::OperationKind::kRegisterWritePort:
+            case wolvrix::lib::grh::OperationKind::kLatchWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryWritePort:
+            case wolvrix::lib::grh::OperationKind::kMemoryFillPort:
+            case wolvrix::lib::grh::OperationKind::kSystemFunction:
+            case wolvrix::lib::grh::OperationKind::kSystemTask:
+            case wolvrix::lib::grh::OperationKind::kDpicCall:
+            case wolvrix::lib::grh::OperationKind::kInstance:
+            case wolvrix::lib::grh::OperationKind::kBlackbox:
+            case wolvrix::lib::grh::OperationKind::kDpicImport:
+            case wolvrix::lib::grh::OperationKind::kXMRRead:
+            case wolvrix::lib::grh::OperationKind::kXMRWrite:
+                return false;
+            default:
+                return true;
+            }
+        }
+
         std::size_t semanticConsumerCount(const wolvrix::lib::grh::Graph &graph,
                                           wolvrix::lib::grh::ValueId value,
                                           const std::vector<ActivityOpClass> &opClasses,
@@ -2930,6 +3029,62 @@ namespace wolvrix::lib::transform
                 consumers.insert(static_cast<uint64_t>(user.operation.index));
             }
             return consumers.size();
+        }
+
+        std::string widthBucketForValue(const wolvrix::lib::grh::Graph &graph,
+                                        wolvrix::lib::grh::ValueId value)
+        {
+            const int32_t width = graph.getValue(value).width();
+            if (width <= 0)
+            {
+                return "<=0";
+            }
+            if (width == 1)
+            {
+                return "1";
+            }
+            if (width <= 8)
+            {
+                return "2-8";
+            }
+            if (width <= 32)
+            {
+                return "9-32";
+            }
+            if (width <= 64)
+            {
+                return "33-64";
+            }
+            if (width <= 256)
+            {
+                return "65-256";
+            }
+            return ">256";
+        }
+
+        std::string fanoutBucketForCount(std::size_t fanout)
+        {
+            if (fanout <= 1)
+            {
+                return "0-1";
+            }
+            if (fanout == 2)
+            {
+                return "2";
+            }
+            if (fanout <= 4)
+            {
+                return "3-4";
+            }
+            if (fanout <= 8)
+            {
+                return "5-8";
+            }
+            if (fanout <= 16)
+            {
+                return "9-16";
+            }
+            return ">16";
         }
 
         class ComputeNodeBuilder
@@ -3016,6 +3171,107 @@ namespace wolvrix::lib::transform
                 }
             }
 
+            void addBoundaryNoDef(uint32_t nodeId, wolvrix::lib::grh::ValueId value)
+            {
+                ++build_.stats.computeNodeBoundaryInputsTotal;
+                ++build_.stats.computeNodeBoundaryInputNoDef;
+                addBoundary(nodeId, value);
+            }
+
+            void addBoundaryDefOutOfRange(uint32_t nodeId, wolvrix::lib::grh::ValueId value)
+            {
+                ++build_.stats.computeNodeBoundaryInputsTotal;
+                ++build_.stats.computeNodeBoundaryInputDefOutOfRange;
+                addBoundary(nodeId, value);
+            }
+
+            void addBoundaryDeclared(uint32_t nodeId, wolvrix::lib::grh::ValueId value)
+            {
+                ++build_.stats.computeNodeBoundaryInputsTotal;
+                ++build_.stats.computeNodeBoundaryInputDeclared;
+                addBoundary(nodeId, value);
+            }
+
+            void addBoundarySourceSpill(uint32_t nodeId, wolvrix::lib::grh::ValueId value)
+            {
+                ++build_.stats.computeNodeBoundaryInputsTotal;
+                ++build_.stats.computeNodeBoundaryInputSourceSpill;
+                addBoundary(nodeId, value);
+            }
+
+            void addBoundaryUnsupported(uint32_t nodeId, wolvrix::lib::grh::ValueId value)
+            {
+                ++build_.stats.computeNodeBoundaryInputsTotal;
+                ++build_.stats.computeNodeBoundaryInputUnsupported;
+                addBoundary(nodeId, value);
+            }
+
+            void addBoundaryExistingOwner(uint32_t nodeId, wolvrix::lib::grh::ValueId value, uint32_t owner)
+            {
+                ++build_.stats.computeNodeBoundaryInputsTotal;
+                ++build_.stats.computeNodeBoundaryInputExistingOwner;
+                if (owner < build_.computeNodes.size() && build_.computeNodes[owner].commonExpr)
+                {
+                    ++build_.stats.computeNodeBoundaryInputExistingCommonOwner;
+                    const auto defOp = graph_.valueDef(value);
+                    if (defOp.valid())
+                    {
+                        build_.stats.computeNodeBoundaryExistingCommonOwnerByKind
+                            [std::string(wolvrix::lib::grh::toString(graph_.opKind(defOp)))] += 1;
+                        build_.stats.computeNodeBoundaryExistingCommonOwnerByWidthBucket
+                            [widthBucketForValue(graph_, value)] += 1;
+                        const std::size_t consumers =
+                            semanticConsumerCount(graph_,
+                                                  value,
+                                                  opClasses_,
+                                                  nodeId,
+                                                  build_.computeNodeOfOp);
+                        build_.stats.computeNodeBoundaryExistingCommonOwnerByFanoutBucket
+                            [fanoutBucketForCount(consumers)] += 1;
+                    }
+                }
+                addBoundary(nodeId, value);
+            }
+
+            void addBoundaryShared(uint32_t nodeId, wolvrix::lib::grh::ValueId value)
+            {
+                ++build_.stats.computeNodeBoundaryInputsTotal;
+                ++build_.stats.computeNodeBoundaryInputShared;
+                addBoundary(nodeId, value);
+            }
+
+            void addBoundaryCapacity(uint32_t nodeId, wolvrix::lib::grh::ValueId value)
+            {
+                ++build_.stats.computeNodeBoundaryInputsTotal;
+                ++build_.stats.computeNodeBoundaryInputCapacity;
+                addBoundary(nodeId, value);
+            }
+
+            bool shouldOwnLocalSharedCompute(uint32_t nodeId,
+                                             wolvrix::lib::grh::OperationId opId,
+                                             wolvrix::lib::grh::ValueId result,
+                                             std::size_t consumers) const
+            {
+                if (!options_.enableLocalSharedCompute || !canAddRawOp(nodeId) || consumers == 0 ||
+                    consumers > options_.localSharedComputeMaxFanout)
+                {
+                    return false;
+                }
+                const auto op = graph_.getOperation(opId);
+                if (!isLocalSharedComputeOpKind(op.kind()) || op.results().size() != 1 || op.results().front() != result)
+                {
+                    return false;
+                }
+                const auto valueInfo = graph_.getValue(result);
+                if (valueInfo.width() <= 0 ||
+                    static_cast<std::size_t>(valueInfo.width()) > options_.localSharedComputeMaxWidth ||
+                    valueInfo.type() != wolvrix::lib::grh::ValueType::Logic)
+                {
+                    return false;
+                }
+                return true;
+            }
+
             void absorbComputeOp(uint32_t nodeId, wolvrix::lib::grh::OperationId opId)
             {
                 if (nodeId >= build_.computeNodes.size() || !opId.valid())
@@ -3044,21 +3300,43 @@ namespace wolvrix::lib::transform
                     const auto defOp = graph_.valueDef(operand);
                     if (!defOp.valid())
                     {
-                        addBoundary(nodeId, operand);
+                        addBoundaryNoDef(nodeId, operand);
                         continue;
                     }
                     if (defOp.index >= opClasses_.size())
                     {
-                        addBoundary(nodeId, operand);
+                        addBoundaryDefOutOfRange(nodeId, operand);
                         continue;
                     }
                     const ActivityOpClass defClass = opClasses_[defOp.index];
+                    if (isDeclaredValue(graph_, operand) &&
+                        (defClass != ActivityOpClass::Compute || isObservableRootValue(graph_, operand)))
+                    {
+                        if (defClass == ActivityOpClass::Source)
+                        {
+                            ensureSourceOwnerNode(defOp);
+                        }
+                        else if (defClass == ActivityOpClass::Sink)
+                        {
+                            error_ = "activity-schedule compute-node builder encountered sink predecessor source=" +
+                                     describeOp(graph_, defOp) + " user=" + describeOp(graph_, opId);
+                            return;
+                        }
+                        else if (defClass == ActivityOpClass::Compute)
+                        {
+                            const std::size_t consumers =
+                                semanticConsumerCount(graph_, operand, opClasses_, nodeId, build_.computeNodeOfOp);
+                            ensureComputeNodeForOp(defOp, consumers > 1);
+                        }
+                        addBoundaryDeclared(nodeId, operand);
+                        continue;
+                    }
                     if (defClass == ActivityOpClass::Source)
                     {
                         if (!canAddRawOp(nodeId))
                         {
                             ensureSourceOwnerNode(defOp);
-                            addBoundary(nodeId, operand);
+                            addBoundarySourceSpill(nodeId, operand);
                             continue;
                         }
                         wolvrix::lib::grh::ValueId cloneValue;
@@ -3096,7 +3374,7 @@ namespace wolvrix::lib::transform
                     }
                     if (defClass != ActivityOpClass::Compute)
                     {
-                        addBoundary(nodeId, operand);
+                        addBoundaryUnsupported(nodeId, operand);
                         continue;
                     }
                     if (defOp.index < build_.computeNodeOfOp.size())
@@ -3106,7 +3384,7 @@ namespace wolvrix::lib::transform
                         {
                             if (existingOwner != nodeId)
                             {
-                                addBoundary(nodeId, operand);
+                                addBoundaryExistingOwner(nodeId, operand, existingOwner);
                             }
                             continue;
                         }
@@ -3117,8 +3395,24 @@ namespace wolvrix::lib::transform
                     const bool shared = consumers > 1;
                     if (shared || !canAddRawOp(nodeId))
                     {
+                        if (shared && shouldOwnLocalSharedCompute(nodeId, defOp, operand, consumers))
+                        {
+                            absorbComputeOp(nodeId, defOp);
+                            if (!error_.empty())
+                            {
+                                return;
+                            }
+                            continue;
+                        }
                         ensureComputeNodeForOp(defOp, shared);
-                        addBoundary(nodeId, operand);
+                        if (shared)
+                        {
+                            addBoundaryShared(nodeId, operand);
+                        }
+                        else
+                        {
+                            addBoundaryCapacity(nodeId, operand);
+                        }
                         continue;
                     }
                     absorbComputeOp(nodeId, defOp);
@@ -3296,6 +3590,32 @@ namespace wolvrix::lib::transform
                           return lhs < rhs;
                       });
             return clusters;
+        }
+
+        std::string formatTopCounts(const ActivityScheduleSummaryStats::KindCountMap &counts,
+                                    std::size_t limit)
+        {
+            std::vector<std::pair<std::string, std::size_t>> ordered(counts.begin(), counts.end());
+            std::sort(ordered.begin(),
+                      ordered.end(),
+                      [](const auto &lhs, const auto &rhs)
+                      {
+                          if (lhs.second != rhs.second)
+                          {
+                              return lhs.second > rhs.second;
+                          }
+                          return lhs.first < rhs.first;
+                      });
+            std::ostringstream oss;
+            for (std::size_t i = 0; i < ordered.size() && i < limit; ++i)
+            {
+                if (i != 0)
+                {
+                    oss << ",";
+                }
+                oss << ordered[i].first << ":" << ordered[i].second;
+            }
+            return oss.str();
         }
 
         bool orderNodeClustersTopologically(std::vector<std::vector<uint32_t>> &clusters,
@@ -3911,13 +4231,12 @@ namespace wolvrix::lib::transform
             build = ActivityScheduleBuild{};
             build.supernodeToOps.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
             build.supernodeKinds.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
-            std::vector<std::vector<uint32_t>> computeNodesBySupernode;
-            computeNodesBySupernode.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
+            build.computeNodesBySupernode.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
             std::vector<uint32_t> finalSupernodeByComputeNode(rewrite.computeNodes.size(), kInvalidActivitySupernodeId);
             for (uint32_t supernodeId = 0; supernodeId < computeSupernodes.size(); ++supernodeId)
             {
                 std::vector<wolvrix::lib::grh::OperationId> ops;
-                computeNodesBySupernode.push_back(computeSupernodes[supernodeId]);
+                build.computeNodesBySupernode.push_back(computeSupernodes[supernodeId]);
                 for (const auto computeNodeId : computeSupernodes[supernodeId])
                 {
                     if (computeNodeId >= rewrite.computeNodes.size())
@@ -3941,7 +4260,7 @@ namespace wolvrix::lib::transform
             {
                 build.supernodeToOps.push_back(commit.ops);
                 build.supernodeKinds.push_back(ActivityScheduleSupernodeKind::Commit);
-                computeNodesBySupernode.push_back({});
+                build.computeNodesBySupernode.push_back({});
             }
             if (perf)
             {
@@ -4082,7 +4401,7 @@ namespace wolvrix::lib::transform
                         describeFinalScheduleCycle(graph,
                                                    rewrite,
                                                    build,
-                                                   computeNodesBySupernode,
+                                                   build.computeNodesBySupernode,
                                                    supernodeOfOp);
                 return false;
             }
@@ -4259,6 +4578,9 @@ namespace wolvrix::lib::transform
         setSessionValue(keyPrefix + "supernode_kind",
                         build.supernodeKinds,
                         "activity-schedule.supernode-kind");
+        setSessionValue(keyPrefix + "compute_nodes_by_supernode",
+                        build.computeNodesBySupernode,
+                        "activity-schedule.compute-nodes-by-supernode");
         setSessionValue(keyPrefix + "value_fanout", build.valueFanout, "activity-schedule.value-fanout");
         setSessionValue(keyPrefix + "topo_order", build.topoOrder, "activity-schedule.topo-order");
         setSessionValue(keyPrefix + "state_read_supernodes",
@@ -4324,9 +4646,27 @@ namespace wolvrix::lib::transform
                 " compute_node_ops_total=" + std::to_string(rewrite.stats.computeNodeOpsTotal) +
                 " source_clones_in_compute_nodes=" +
                 std::to_string(rewrite.stats.sourceClonesInComputeNodes) +
+                " local_shared_compute_clones_in_compute_nodes=" +
+                std::to_string(rewrite.stats.localSharedComputeClonesInComputeNodes) +
                 " direct_source_inputs_to_commit_supernodes=" +
                 std::to_string(rewrite.stats.directSourceInputsToCommitSupernodes) +
                 " common_expr_compute_nodes=" + std::to_string(rewrite.stats.commonExprComputeNodes) +
+                " compute_node_boundary_inputs_total=" +
+                std::to_string(rewrite.stats.computeNodeBoundaryInputsTotal) +
+                " boundary_no_def=" + std::to_string(rewrite.stats.computeNodeBoundaryInputNoDef) +
+                " boundary_def_out_of_range=" +
+                std::to_string(rewrite.stats.computeNodeBoundaryInputDefOutOfRange) +
+                " boundary_declared=" + std::to_string(rewrite.stats.computeNodeBoundaryInputDeclared) +
+                " boundary_source_spill=" +
+                std::to_string(rewrite.stats.computeNodeBoundaryInputSourceSpill) +
+                " boundary_unsupported=" +
+                std::to_string(rewrite.stats.computeNodeBoundaryInputUnsupported) +
+                " boundary_existing_owner=" +
+                std::to_string(rewrite.stats.computeNodeBoundaryInputExistingOwner) +
+                " boundary_existing_common_owner=" +
+                std::to_string(rewrite.stats.computeNodeBoundaryInputExistingCommonOwner) +
+                " boundary_shared=" + std::to_string(rewrite.stats.computeNodeBoundaryInputShared) +
+                " boundary_capacity=" + std::to_string(rewrite.stats.computeNodeBoundaryInputCapacity) +
                 " compute_node_boundary_values=" +
                 std::to_string(rewrite.stats.computeNodeBoundaryValues) +
                 " commit_input_root_values=" + std::to_string(rewrite.stats.commitInputRootValues) +
@@ -4335,6 +4675,12 @@ namespace wolvrix::lib::transform
                 " topo_edges=" + std::to_string(opData.topoEdges.size()) +
                 " graph_ops=" + std::to_string(graph->operations().size()) +
                 " graph_values=" + std::to_string(graph->values().size()));
+        logInfo("activity-schedule compute-node existing common owner detail: by_kind_top=" +
+                formatTopCounts(rewrite.stats.computeNodeBoundaryExistingCommonOwnerByKind, 10) +
+                " by_width=" +
+                formatTopCounts(rewrite.stats.computeNodeBoundaryExistingCommonOwnerByWidthBucket, 10) +
+                " by_fanout=" +
+                formatTopCounts(rewrite.stats.computeNodeBoundaryExistingCommonOwnerByFanoutBucket, 10));
 
         std::ostringstream summary;
         summary << "activity-schedule: path=" << options_.path
@@ -4344,6 +4690,7 @@ namespace wolvrix::lib::transform
                 << " commit_supernodes=" << commitSupernodes
                 << " compute_nodes=" << rewrite.stats.computeNodes
                 << " source_clones=" << rewrite.stats.sourceClonesInComputeNodes
+                << " local_shared_compute_clones=" << rewrite.stats.localSharedComputeClonesInComputeNodes
                 << " eligible_ops=" << opData.topoOps.size()
                 << " state_read_sets=" << build.stateReadSupernodes.size()
                 << " graph_changed=" << (graphChanged ? "true" : "false");

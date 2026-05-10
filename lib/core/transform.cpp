@@ -969,6 +969,48 @@ namespace wolvrix::lib::transform
                         return nullptr;
                     }
                 }
+                else if (arg == "-local-shared-compute-max-fanout")
+                {
+                    if (!parseSizeArg("-local-shared-compute-max-fanout",
+                                      options.localSharedComputeMaxFanout))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-local-shared-compute-max-fanout="))
+                {
+                    try
+                    {
+                        options.localSharedComputeMaxFanout = static_cast<std::size_t>(std::stoull(std::string(
+                            arg.substr(std::string_view("-local-shared-compute-max-fanout=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -local-shared-compute-max-fanout value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-local-shared-compute-max-width")
+                {
+                    if (!parseSizeArg("-local-shared-compute-max-width",
+                                      options.localSharedComputeMaxWidth))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-local-shared-compute-max-width="))
+                {
+                    try
+                    {
+                        options.localSharedComputeMaxWidth = static_cast<std::size_t>(std::stoull(std::string(
+                            arg.substr(std::string_view("-local-shared-compute-max-width=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -local-shared-compute-max-width value";
+                        return nullptr;
+                    }
+                }
                 else if (arg == "-enable-coarsen")
                 {
                     if (!parseBoolArg("-enable-coarsen", options.enableCoarsen))
@@ -1014,6 +1056,30 @@ namespace wolvrix::lib::transform
                     else
                     {
                         error = "invalid -enable-chain-merge value";
+                        return nullptr;
+                    }
+                }
+                else if (arg == "-enable-local-shared-compute")
+                {
+                    if (!parseBoolArg("-enable-local-shared-compute", options.enableLocalSharedCompute))
+                    {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-enable-local-shared-compute="))
+                {
+                    const std::string_view text = arg.substr(std::string_view("-enable-local-shared-compute=").size());
+                    if (text == "true" || text == "1" || text == "on")
+                    {
+                        options.enableLocalSharedCompute = true;
+                    }
+                    else if (text == "false" || text == "0" || text == "off")
+                    {
+                        options.enableLocalSharedCompute = false;
+                    }
+                    else
+                    {
+                        error = "invalid -enable-local-shared-compute value";
                         return nullptr;
                     }
                 }

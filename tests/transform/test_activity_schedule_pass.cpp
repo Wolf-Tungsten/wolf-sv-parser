@@ -450,6 +450,74 @@ int main()
     }
 
     {
+        currentCase = "declared_value_local_compute";
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("declared_value_local_compute");
+        design.markAsTop("declared_value_local_compute");
+
+        const auto a = makeValue(graph, "a", 8);
+        const auto b = makeValue(graph, "b", 8);
+        const auto c = makeValue(graph, "c", 8);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+
+        const auto wireSym = graph.internSymbol("declared_wire");
+        graph.addDeclaredSymbol(wireSym);
+        const auto declaredWire = graph.createValue(wireSym, 8, false);
+        const auto declaredProducer = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                            graph.internSymbol("declared_producer"));
+        graph.addOperand(declaredProducer, a);
+        graph.addOperand(declaredProducer, b);
+        graph.addResult(declaredProducer, declaredWire);
+
+        const auto y = makeValue(graph, "y", 8);
+        const auto consumer = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                    graph.internSymbol("declared_consumer"));
+        graph.addOperand(consumer, declaredWire);
+        graph.addOperand(consumer, c);
+        graph.addResult(consumer, y);
+        graph.bindOutputPort("y", y);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "declared_value_local_compute",
+            .maxComputeNodeInComputeSupernode = 2,
+            .enableCoarsen = false,
+            .enableChainMerge = false,
+        }));
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected declared-value-local-compute schedule to succeed");
+        }
+        const auto schedule = loadSchedule(session, "declared_value_local_compute");
+        if (const int rc = validateCommonScheduleShape(graph, schedule); rc != 0)
+        {
+            return rc;
+        }
+        const uint32_t producerSupernode = (*schedule.opToSupernode)[declaredProducer.index - 1];
+        const uint32_t consumerSupernode = (*schedule.opToSupernode)[consumer.index - 1];
+        if (producerSupernode == kInvalidActivitySupernodeId ||
+            consumerSupernode == kInvalidActivitySupernodeId ||
+            producerSupernode != consumerSupernode)
+        {
+            return fail("Expected declared compute value producer and single consumer to stay local");
+        }
+        if (hasFanoutTo(*schedule.valueFanout, declaredWire, consumerSupernode))
+        {
+            return fail("Expected local declared compute value to avoid cross-supernode fanout");
+        }
+        if (schedule.summaryStats->find("\"compute_compute_value_pairs\":0") == std::string::npos)
+        {
+            return fail("Expected declared_value_local_compute case to report zero compute->compute value pairs");
+        }
+    }
+
+    {
         currentCase = "commit_chunk";
         wolvrix::lib::grh::Design design;
         auto &graph = design.createGraph("commit_chunk");

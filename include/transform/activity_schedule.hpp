@@ -34,8 +34,11 @@ namespace wolvrix::lib::transform
         std::size_t maxComputeNodeInComputeSupernode = 72;
         std::size_t maxOpInComputeNode = 8192;
         std::size_t maxOpInCommitSupernode = 4096;
+        std::size_t localSharedComputeMaxFanout = 4;
+        std::size_t localSharedComputeMaxWidth = 256;
         bool enableCoarsen = true;
         bool enableChainMerge = true;
+        bool enableLocalSharedCompute = false;
         std::string costModel = "edge-cut";
     };
 
@@ -54,6 +57,7 @@ namespace wolvrix::lib::transform
     using ActivityScheduleTopoOrder = std::vector<uint32_t>;
     using ActivityScheduleStateReadSupernodes = std::unordered_map<std::string, std::vector<uint32_t>>;
     using ActivityScheduleSupernodeKinds = std::vector<ActivityScheduleSupernodeKind>;
+    using ActivityScheduleComputeNodesBySupernode = std::vector<std::vector<uint32_t>>;
 
     struct ActivityScheduleSummaryStats
     {
@@ -80,8 +84,19 @@ namespace wolvrix::lib::transform
         std::size_t computeNodes = 0;
         std::size_t computeNodeOpsTotal = 0;
         std::size_t sourceClonesInComputeNodes = 0;
+        std::size_t localSharedComputeClonesInComputeNodes = 0;
         std::size_t directSourceInputsToCommitSupernodes = 0;
         std::size_t commonExprComputeNodes = 0;
+        std::size_t computeNodeBoundaryInputsTotal = 0;
+        std::size_t computeNodeBoundaryInputNoDef = 0;
+        std::size_t computeNodeBoundaryInputDefOutOfRange = 0;
+        std::size_t computeNodeBoundaryInputDeclared = 0;
+        std::size_t computeNodeBoundaryInputSourceSpill = 0;
+        std::size_t computeNodeBoundaryInputUnsupported = 0;
+        std::size_t computeNodeBoundaryInputExistingOwner = 0;
+        std::size_t computeNodeBoundaryInputExistingCommonOwner = 0;
+        std::size_t computeNodeBoundaryInputShared = 0;
+        std::size_t computeNodeBoundaryInputCapacity = 0;
         std::size_t computeNodeBoundaryValues = 0;
         std::size_t commitInputRootValues = 0;
         std::size_t topoEdges = 0;
@@ -89,6 +104,9 @@ namespace wolvrix::lib::transform
         std::size_t graphValues = 0;
         KindCountMap activationEdgesBySourceKind;
         KindCountMap activationSourceValuesBySourceKind;
+        KindCountMap computeNodeBoundaryExistingCommonOwnerByKind;
+        KindCountMap computeNodeBoundaryExistingCommonOwnerByWidthBucket;
+        KindCountMap computeNodeBoundaryExistingCommonOwnerByFanoutBucket;
     };
 
     inline constexpr uint32_t kInvalidActivitySupernodeId = std::numeric_limits<uint32_t>::max();

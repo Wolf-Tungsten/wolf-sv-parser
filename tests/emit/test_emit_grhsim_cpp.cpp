@@ -950,6 +950,97 @@ namespace
         return design;
     }
 
+    Design buildTwoWordHelperDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId clk = makeLogicValue(graph, "clk", 1);
+        ValueId a64 = makeLogicValue(graph, "a64", 64);
+        ValueId b64 = makeLogicValue(graph, "b64", 64);
+        ValueId wide96 = makeLogicValue(graph, "wide96", 96);
+        ValueId tag8 = makeLogicValue(graph, "tag8", 8);
+        graph.bindInputPort("clk", clk);
+        graph.bindInputPort("a64", a64);
+        graph.bindInputPort("b64", b64);
+        graph.bindInputPort("wide96", wide96);
+        graph.bindInputPort("tag8", tag8);
+
+        ValueId concat128 = makeLogicValue(graph, "concat128", 128);
+        OperationId concat11 =
+            graph.createOperation(OperationKind::kConcat, graph.internSymbol("two_word_concat_1_1"));
+        graph.addOperand(concat11, a64);
+        graph.addOperand(concat11, b64);
+        graph.addResult(concat11, concat128);
+        graph.bindOutputPort("concat128", concat128);
+
+        ValueId concat104 = makeLogicValue(graph, "concat104", 104);
+        OperationId concat12 =
+            graph.createOperation(OperationKind::kConcat, graph.internSymbol("two_word_concat_1_2"));
+        graph.addOperand(concat12, tag8);
+        graph.addOperand(concat12, wide96);
+        graph.addResult(concat12, concat104);
+        graph.bindOutputPort("concat104", concat104);
+
+        ValueId rep96 = makeLogicValue(graph, "rep96", 96);
+        OperationId rep = graph.createOperation(OperationKind::kReplicate, graph.internSymbol("two_word_rep"));
+        graph.addOperand(rep, tag8);
+        graph.addResult(rep, rep96);
+        graph.setAttr(rep, "rep", static_cast<int64_t>(12));
+        graph.bindOutputPort("rep96", rep96);
+
+        OperationId reg = graph.createOperation(OperationKind::kRegister, graph.internSymbol("two_word_reg"));
+        graph.setAttr(reg, "width", static_cast<int64_t>(96));
+        graph.setAttr(reg, "isSigned", false);
+        graph.setAttr(reg, "initValue", std::string("96'h0"));
+
+        ValueId regQ = makeLogicValue(graph, "reg_q", 96);
+        OperationId read = graph.createOperation(OperationKind::kRegisterReadPort,
+                                                 graph.internSymbol("two_word_reg_read"));
+        graph.addResult(read, regQ);
+        graph.setAttr(read, "regSymbol", std::string("two_word_reg"));
+        graph.bindOutputPort("reg_q", regQ);
+
+        ValueId one = addConstant(graph, "two_word_one", "two_word_one_value", 1, "1'b1");
+        ValueId mask = addConstant(graph, "two_word_mask", "two_word_mask_value", 96, allOnesLiteral(96));
+        OperationId write = graph.createOperation(OperationKind::kRegisterWritePort,
+                                                  graph.internSymbol("two_word_reg_write"));
+        graph.addOperand(write, one);
+        graph.addOperand(write, wide96);
+        graph.addOperand(write, mask);
+        graph.addOperand(write, clk);
+        graph.setAttr(write, "regSymbol", std::string("two_word_reg"));
+        graph.setAttr(write, "eventEdge", std::vector<std::string>{"posedge"});
+
+        return design;
+    }
+
+    Design buildPackedActivationDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId trigger = makeLogicValue(graph, "trigger", 8);
+        graph.bindInputPort("trigger", trigger);
+        ValueId one = addConstant(graph, "packed_activation_one", "packed_activation_one_value", 8, "8'h1");
+
+        for (std::size_t i = 0; i < 16u; ++i)
+        {
+            const std::string index = std::to_string(i);
+            ValueId out = makeLogicValue(graph, "packed_activation_out_" + index, 8);
+            OperationId add = graph.createOperation(OperationKind::kAdd,
+                                                    graph.internSymbol("packed_activation_add_" + index));
+            graph.addOperand(add, trigger);
+            graph.addOperand(add, one);
+            graph.addResult(add, out);
+            graph.bindOutputPort("packed_activation_out_" + index, out);
+        }
+
+        return design;
+    }
+
     Design buildRegisterWriteInteractionDesign()
     {
         Design design;
@@ -1753,24 +1844,31 @@ int main()
     {
         return fail("default grhsim emit should define perf feature macro as disabled");
     }
+    if (header.find("static constexpr bool kRuntimeProfileCompiled = false;") == std::string::npos ||
+        header.find("runtime_profile_active_supernodes_") != std::string::npos ||
+        sched.find("runtime_profile_enabled_") != std::string::npos ||
+        sched.find("runtime_profile_compute_ops_") != std::string::npos)
+    {
+        return fail("default grhsim emit should omit runtime profile hot-path storage and updates");
+    }
     if (header.find("struct PerfCounters") != std::string::npos ||
         header.find("PerfCounters perf_counters() const") != std::string::npos ||
         header.find("void reset_perf_counters()") != std::string::npos)
     {
         return fail("default grhsim emit should not generate perf counter APIs");
     }
-    if (sched.find("// op reg_q_read_op [kRegisterReadPort] reg=reg_q") == std::string::npos ||
-        sched.find("// op reg_q_write [kRegisterWritePort] reg=reg_q") == std::string::npos ||
+    if (sched.find("// op reg_q_write [kRegisterWritePort] reg=reg_q") == std::string::npos ||
         sched.find("// op wide_mem_read [kMemoryReadPort] mem=wide_mem") == std::string::npos ||
         sched.find("// op wide_mem_write [kMemoryWritePort] mem=wide_mem") == std::string::npos ||
         sched.find("// op sum_add [kAdd]") == std::string::npos)
     {
         return fail("schedule comments should include operation kind and storage target annotations");
     }
-    if (header.find("inline static constexpr const char *value_") == std::string::npos ||
-        header.find("= \"q=%0d\";") == std::string::npos)
+    if (header.find("static const char value_") != std::string::npos ||
+        state.find("const char GrhSIM_top::value_") != std::string::npos ||
+        sched.find("\"q=%0d\"") == std::string::npos)
     {
-        return fail("String constants should emit as static constexpr char pointers");
+        return fail("String constants should emit directly at their use sites");
     }
     if (runtime.find("inline std::uint64_t grhsim_mask") == std::string::npos)
     {
@@ -1789,6 +1887,10 @@ int main()
     }
     if (runtime.find("grhsim_concat_words") == std::string::npos ||
         runtime.find("grhsim_replicate_words") == std::string::npos ||
+        runtime.find("grhsim_add_words_2") == std::string::npos ||
+        runtime.find("grhsim_concat_words_2_1_1") == std::string::npos ||
+        runtime.find("grhsim_replicate_words_2_1") == std::string::npos ||
+        runtime.find("grhsim_assign_words_2") == std::string::npos ||
         runtime.find("grhsim_clog2_words") == std::string::npos)
     {
         return fail("Missing pure words runtime helpers");
@@ -1837,7 +1939,7 @@ int main()
         sched.find("grhsim_index_words(wide_addr, 130)") != std::string::npos;
     const bool hasWideHelperCoverage =
         sched.find("grhsim_cast_words<") != std::string::npos &&
-        sched.find("grhsim_add_words(") != std::string::npos &&
+        sched.find("grhsim_add_words_2<") != std::string::npos &&
         sched.find("grhsim_concat_words<") != std::string::npos;
     if (sched.find("grhsim_udiv_words") == std::string::npos ||
         sched.find("grhsim_shl_words") == std::string::npos ||
@@ -1976,6 +2078,10 @@ int main()
     if (sched.find("activeWordFlags") == std::string::npos || sched.find("supernode_") == std::string::npos)
     {
         return fail("Missing emitted supernode scheduling code");
+    }
+    if (sched.find("newlyActivatedWordFlags") != std::string::npos)
+    {
+        return fail("Compute batch emit should keep same-word activations in local activeWordFlags");
     }
     if (sched.find("display_task") == std::string::npos || sched.find("trace_dpi_call") == std::string::npos)
     {
@@ -2848,6 +2954,136 @@ int main()
             return fail("wide-concat-fast harness failed to run");
         }
 
+        const std::filesystem::path packedActivationDir =
+            std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_packed_activation";
+        std::filesystem::remove_all(packedActivationDir);
+        Design packedActivationDesign = buildPackedActivationDesign();
+        EmitDiagnostics packedActivationDiag;
+        EmitResult packedActivationResult;
+        ActivityScheduleOptions packedActivationSchedule;
+        packedActivationSchedule.maxComputeNodeInComputeSupernode = 1;
+        packedActivationSchedule.enableCoarsen = false;
+        if (!emitWithActivitySchedule(packedActivationDesign,
+                                      packedActivationDir,
+                                      packedActivationDiag,
+                                      packedActivationResult,
+                                      packedActivationSchedule))
+        {
+            return fail("packed-activation activity-schedule pass failed");
+        }
+        if (!packedActivationResult.success || packedActivationDiag.hasError())
+        {
+            return fail("packed-activation emit failed");
+        }
+        const std::vector<std::filesystem::path> packedActivationSchedFiles =
+            collectSchedFiles(packedActivationDir, "grhsim_top_sched_");
+        if (packedActivationSchedFiles.empty())
+        {
+            return fail("packed-activation schedule files missing");
+        }
+        const std::string packedActivationEval = readFile(packedActivationDir / "grhsim_top_eval.cpp");
+        if (packedActivationEval.find("grhsim_or_active_u16(supernode_active_curr_.data()") == std::string::npos)
+        {
+            return fail("packed-activation fanout should emit packed active flag ORs");
+        }
+
+        const std::filesystem::path twoWordDir =
+            std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_two_word_helpers";
+        std::filesystem::remove_all(twoWordDir);
+        Design twoWordDesign = buildTwoWordHelperDesign();
+        EmitDiagnostics twoWordDiag;
+        EmitResult twoWordResult;
+        if (!emitWithActivitySchedule(twoWordDesign, twoWordDir, twoWordDiag, twoWordResult))
+        {
+            return fail("two-word-helper activity-schedule pass failed");
+        }
+        if (!twoWordResult.success || twoWordDiag.hasError())
+        {
+            return fail("two-word-helper emit failed");
+        }
+        const std::vector<std::filesystem::path> twoWordStateFiles =
+            collectSchedFiles(twoWordDir, "grhsim_top_state");
+        const std::vector<std::filesystem::path> twoWordSchedFiles =
+            collectSchedFiles(twoWordDir, "grhsim_top_sched_");
+        if (twoWordStateFiles.empty() || twoWordSchedFiles.empty())
+        {
+            return fail("two-word-helper state/schedule files missing");
+        }
+        const std::string twoWordSched = readFiles(twoWordSchedFiles);
+        if (twoWordSched.find("grhsim_concat_words_2_1_1<") == std::string::npos ||
+            twoWordSched.find("grhsim_concat_words_2_1_2<") == std::string::npos ||
+            twoWordSched.find("grhsim_replicate_words_2_1<") == std::string::npos ||
+            twoWordSched.find("grhsim_assign_words_2<") == std::string::npos)
+        {
+            return fail("two-word-helper should instantiate fixed two-word helpers");
+        }
+        const std::filesystem::path twoWordHarnessPath = twoWordDir / "grhsim_top_harness.cpp";
+        {
+            std::ofstream harness(twoWordHarnessPath);
+            if (!harness.is_open())
+            {
+                return fail("Failed to create two-word-helper harness");
+            }
+            harness << "#include \"grhsim_top.hpp\"\n";
+            harness << "#include <array>\n";
+            harness << "#include <cstdint>\n\n";
+            harness << "template <std::size_t N>\n";
+            harness << "static bool same_words(const std::array<std::uint64_t, N>& lhs,\n";
+            harness << "                       const std::array<std::uint64_t, N>& rhs)\n";
+            harness << "{\n";
+            harness << "    for (std::size_t i = 0; i < N; ++i)\n";
+            harness << "        if (lhs[i] != rhs[i]) return false;\n";
+            harness << "    return true;\n";
+            harness << "}\n\n";
+            harness << "int main()\n";
+            harness << "{\n";
+            harness << "    GrhSIM_top sim;\n";
+            harness << "    sim.init();\n";
+            harness << "    sim.clk = false;\n";
+            harness << "    sim.a64 = UINT64_C(0x1122334455667788);\n";
+            harness << "    sim.b64 = UINT64_C(0x99AABBCCDDEEFF00);\n";
+            harness << "    sim.wide96 = std::array<std::uint64_t, 2>{UINT64_C(0x0123456789ABCDEF), UINT64_C(0x0000000012345678)};\n";
+            harness << "    sim.tag8 = static_cast<std::uint8_t>(0x5A);\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (!same_words(sim.concat128, std::array<std::uint64_t, 2>{UINT64_C(0x99AABBCCDDEEFF00), UINT64_C(0x1122334455667788)})) return 1;\n";
+            harness << "    if (!same_words(sim.concat104, std::array<std::uint64_t, 2>{UINT64_C(0x0123456789ABCDEF), UINT64_C(0x0000005A12345678)})) return 2;\n";
+            harness << "    if (!same_words(sim.rep96, std::array<std::uint64_t, 2>{UINT64_C(0x5A5A5A5A5A5A5A5A), UINT64_C(0x000000005A5A5A5A)})) return 3;\n";
+            harness << "    if (!same_words(sim.reg_q, std::array<std::uint64_t, 2>{UINT64_C(0), UINT64_C(0)})) return 4;\n";
+            harness << "    sim.clk = true;\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (!same_words(sim.reg_q, std::array<std::uint64_t, 2>{UINT64_C(0x0123456789ABCDEF), UINT64_C(0x0000000012345678)})) return 5;\n";
+            harness << "    sim.clk = false;\n";
+            harness << "    sim.wide96 = std::array<std::uint64_t, 2>{UINT64_C(0xFEEDFACECAFEBEEF), UINT64_C(0x00000000ABCDEF01)};\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (!same_words(sim.reg_q, std::array<std::uint64_t, 2>{UINT64_C(0x0123456789ABCDEF), UINT64_C(0x0000000012345678)})) return 6;\n";
+            harness << "    sim.clk = true;\n";
+            harness << "    sim.eval();\n";
+            harness << "    if (!same_words(sim.reg_q, std::array<std::uint64_t, 2>{UINT64_C(0xFEEDFACECAFEBEEF), UINT64_C(0x00000000ABCDEF01)})) return 7;\n";
+            harness << "    return 0;\n";
+            harness << "}\n";
+        }
+        const std::filesystem::path twoWordHarnessExe = twoWordDir / "grhsim_top_harness";
+        std::string twoWordCompileCmd =
+            "clang++ " + std::string(kHarnessCompileFlags) + " -I" + twoWordDir.string();
+        for (const auto &stateFile : twoWordStateFiles)
+        {
+            twoWordCompileCmd += " " + stateFile.string();
+        }
+        twoWordCompileCmd += " " + (twoWordDir / "grhsim_top_eval.cpp").string();
+        for (const auto &schedPath : twoWordSchedFiles)
+        {
+            twoWordCompileCmd += " " + schedPath.string();
+        }
+        twoWordCompileCmd += " " + twoWordHarnessPath.string() + " -o " + twoWordHarnessExe.string();
+        if (std::system(twoWordCompileCmd.c_str()) != 0)
+        {
+            return fail("two-word-helper harness failed to compile");
+        }
+        if (std::system(twoWordHarnessExe.string().c_str()) != 0)
+        {
+            return fail("two-word-helper harness failed to run");
+        }
+
         const std::filesystem::path commitBatchDir =
             std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_commit_cond_batch";
         std::filesystem::remove_all(commitBatchDir);
@@ -3365,12 +3601,12 @@ int main()
         {
             return fail("dpi state/schedule files missing");
         }
-        const std::string dpiHeaderText = readFile(dpiHeaderPath);
         const std::string dpiSchedText = readFiles(dpiSchedFiles);
-        if (dpiHeaderText.find("inline static constexpr const char *value_") == std::string::npos ||
-            dpiHeaderText.find("= \"tag\";") == std::string::npos)
+        const std::string dpiStateText = readFile(dpiStatePath);
+        if (dpiStateText.find("const char GrhSIM_top::value_") != std::string::npos ||
+            dpiSchedText.find("\"tag\"") == std::string::npos)
         {
-            return fail("dpi constant strings should emit as static constexpr char pointers");
+            return fail("dpi constant strings should emit directly at their use sites");
         }
         if (dpiSchedText.find("extern \"C\" std::int32_t dpi_mix") == std::string::npos ||
             dpiSchedText.find("const char * label") == std::string::npos ||
@@ -3547,6 +3783,84 @@ int main()
         if (!std::filesystem::exists(limitDir / "grhsim_top_runtime.hpp"))
         {
             return fail("size-limited grhsim emit should keep the oversized partial artifact for inspection");
+        }
+
+        const std::filesystem::path packedSchedDir =
+            std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_sched_packed";
+        std::filesystem::remove_all(packedSchedDir);
+        std::filesystem::create_directories(packedSchedDir);
+        Design packedSchedDesign = buildDesign(wideMemInitPath.string());
+        SessionStore packedSchedSession;
+        if (!runActivitySchedule(packedSchedDesign, packedSchedSession))
+        {
+            return fail("packed-sched activity-schedule pass failed");
+        }
+        EmitOptions packedSchedOptions;
+        packedSchedOptions.outputDir = packedSchedDir.string();
+        packedSchedOptions.session = &packedSchedSession;
+        packedSchedOptions.sessionPathPrefix = std::string("top");
+        packedSchedOptions.attributes["sched_batch_max_ops"] = "8";
+        packedSchedOptions.attributes["sched_batch_max_estimated_lines"] = "96";
+        packedSchedOptions.attributes["emit_parallelism"] = "2";
+        packedSchedOptions.attributes["sched_batches_per_cpp"] = "2";
+        EmitDiagnostics packedSchedDiag;
+        EmitGrhSimCpp packedSchedEmitter(&packedSchedDiag);
+        EmitResult packedSchedResult = packedSchedEmitter.emit(packedSchedDesign, packedSchedOptions);
+        if (!packedSchedResult.success || packedSchedDiag.hasError())
+        {
+            return fail("packed-sched emit failed");
+        }
+        const std::vector<std::filesystem::path> packedSchedFiles =
+            collectSchedFiles(packedSchedDir, "grhsim_top_sched_group_");
+        if (packedSchedFiles.empty() || packedSchedFiles.size() >= schedFiles.size())
+        {
+            return fail("packed-sched emit should reduce emitted schedule cpp file count");
+        }
+        const std::string packedMakefile = readFile(packedSchedDir / "Makefile");
+        if (packedMakefile.find("grhsim_top_sched_group_0.cpp") == std::string::npos ||
+            packedMakefile.find("grhsim_top_sched_0.cpp") != std::string::npos)
+        {
+            return fail("packed-sched Makefile should reference packed schedule group files");
+        }
+        const std::string firstPackedSched = readFile(packedSchedFiles.front());
+        if (countSubstring(firstPackedSched, "void GrhSIM_top::eval_") < 2)
+        {
+            return fail("packed-sched group file should contain multiple batch methods");
+        }
+
+        const std::filesystem::path runtimeProfileDir =
+            std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_runtime_profile";
+        std::filesystem::remove_all(runtimeProfileDir);
+        std::filesystem::create_directories(runtimeProfileDir);
+        Design runtimeProfileDesign = buildDesign(wideMemInitPath.string());
+        SessionStore runtimeProfileSession;
+        if (!runActivitySchedule(runtimeProfileDesign, runtimeProfileSession))
+        {
+            return fail("runtime-profile activity-schedule pass failed");
+        }
+        EmitOptions runtimeProfileOptions;
+        runtimeProfileOptions.outputDir = runtimeProfileDir.string();
+        runtimeProfileOptions.session = &runtimeProfileSession;
+        runtimeProfileOptions.sessionPathPrefix = std::string("top");
+        runtimeProfileOptions.attributes["sched_batch_max_ops"] = "8";
+        runtimeProfileOptions.attributes["sched_batch_max_estimated_lines"] = "96";
+        runtimeProfileOptions.attributes["emit_parallelism"] = "2";
+        runtimeProfileOptions.attributes["emit_runtime_profile"] = "1";
+        EmitDiagnostics runtimeProfileDiag;
+        EmitGrhSimCpp runtimeProfileEmitter(&runtimeProfileDiag);
+        EmitResult runtimeProfileResult = runtimeProfileEmitter.emit(runtimeProfileDesign, runtimeProfileOptions);
+        if (!runtimeProfileResult.success || runtimeProfileDiag.hasError())
+        {
+            return fail("runtime-profile-enabled emit failed");
+        }
+        const std::string runtimeProfileHeader = readFile(runtimeProfileDir / "grhsim_top.hpp");
+        const std::string runtimeProfileSched = readFiles(collectSchedFiles(runtimeProfileDir, "grhsim_top_sched_"));
+        if (runtimeProfileHeader.find("static constexpr bool kRuntimeProfileCompiled = true;") == std::string::npos ||
+            runtimeProfileHeader.find("runtime_profile_active_supernodes_") == std::string::npos ||
+            runtimeProfileSched.find("if (runtime_profile_enabled_)") == std::string::npos ||
+            runtimeProfileSched.find("runtime_profile_compute_ops_") == std::string::npos)
+        {
+            return fail("runtime-profile-enabled emit should include runtime profile storage and hot-path updates");
         }
 
         const std::filesystem::path perfDir = std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_perf";
