@@ -321,6 +321,14 @@ namespace
         graph.setAttr(repOp, "rep", static_cast<int64_t>(4));
         graph.bindOutputPort("rep_y", repY);
 
+        ValueId scalarMuxY = makeLogicValue(graph, "scalar_mux_y", 8);
+        OperationId scalarMux = graph.createOperation(OperationKind::kMux, graph.internSymbol("scalar_mux_op"));
+        graph.addOperand(scalarMux, en);
+        graph.addOperand(scalarMux, comb);
+        graph.addOperand(scalarMux, a);
+        graph.addResult(scalarMux, scalarMuxY);
+        graph.bindOutputPort("scalar_mux_y", scalarMuxY);
+
         ValueId caseEqY = makeLogicValue(graph, "case_eq_y", 1);
         OperationId caseEq = graph.createOperation(OperationKind::kCaseEq, graph.internSymbol("case_eq_op"));
         graph.addOperand(caseEq, comb);
@@ -1874,6 +1882,14 @@ int main()
     {
         return fail("Missing runtime helper header");
     }
+    if (runtime.find("inline std::uint64_t grhsim_mux_u64") == std::string::npos)
+    {
+        return fail("Missing branchless scalar mux runtime helper");
+    }
+    if (runtime.find("grhsim_mux_words") == std::string::npos)
+    {
+        return fail("Missing branchless words mux runtime helper");
+    }
     if (runtime.find("grhsim_concat_uniform_scalars_words") == std::string::npos)
     {
         return fail("Missing scalar concat loop helpers in runtime");
@@ -1932,6 +1948,12 @@ int main()
     {
         return fail("scalar replicate with result width <= 64 should emit a direct expression instead of grhsim_replicate_u64");
     }
+    if (sched.find("scalar_mux_op") == std::string::npos ||
+        sched.find("grhsim_mux_u64(") == std::string::npos ||
+        sched.find(" ? (") != std::string::npos)
+    {
+        return fail("scalar mux should emit branchless mask-select helper instead of ?: expressions");
+    }
     const bool hasWideSliceHelperCoverage =
         sched.find("wide_slice_static_op") != std::string::npos &&
         sched.find("wide_slice_dyn_op") != std::string::npos &&
@@ -1943,6 +1965,7 @@ int main()
         sched.find("grhsim_concat_words<") != std::string::npos;
     if (sched.find("grhsim_udiv_words") == std::string::npos ||
         sched.find("grhsim_shl_words") == std::string::npos ||
+        sched.find("grhsim_mux_words") == std::string::npos ||
         sched.find("grhsim_replicate_words") == std::string::npos ||
         !hasWideSliceHelperCoverage ||
         !hasWideHelperCoverage)
@@ -2103,9 +2126,10 @@ int main()
     if (state.find("std::fill_n(event_edge_slots_, ") == std::string::npos ||
         state.find("state_shadow_touched_slots_ = {};") != std::string::npos ||
         state.find("memory_write_touched_slots_ = {};") != std::string::npos ||
-        state.find("state_mem_wide_mem_61_ = {};") == std::string::npos ||
-        state.find("state_mem_wide_masked_mem_64_ = {};") == std::string::npos ||
-        state.find("state_mem_idx_mem_67_ = {};") == std::string::npos)
+        state.find("state_mem_wide_mem_") == std::string::npos ||
+        state.find("state_mem_wide_masked_mem_") == std::string::npos ||
+        state.find("state_mem_idx_mem_") == std::string::npos ||
+        state.find(" = {};") == std::string::npos)
     {
         return fail("Missing static storage reset emission");
     }
@@ -2456,6 +2480,7 @@ int main()
         harness << "    if (!sim.red_xor_y) return 18;\n";
         harness << "    if (sim.slice_y != static_cast<std::uint8_t>(5)) return 19;\n";
         harness << "    if (sim.rep_y != static_cast<std::uint8_t>(0xAA)) return 20;\n";
+        harness << "    if (sim.scalar_mux_y != static_cast<std::uint8_t>(0xB6)) return 90;\n";
         harness << "    if (sim.case_eq_y) return 70;\n";
         harness << "    if (!sim.case_ne_y) return 71;\n";
         harness << "    if (!sim.wildcard_eq_y) return 72;\n";

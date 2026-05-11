@@ -8062,6 +8062,18 @@ namespace wolvrix::lib::emit
             return out.str();
         }
 
+        std::string muxWordsExpr(const std::string &condExpr,
+                                 const std::string &trueExpr,
+                                 const std::string &falseExpr,
+                                 int32_t resultWidth)
+        {
+            const std::size_t destWords = logicWordCount(resultWidth);
+            std::ostringstream out;
+            out << "grhsim_mux_words<" << destWords << ">(static_cast<std::uint64_t>(" << condExpr << "), "
+                << trueExpr << ", " << falseExpr << ", " << resultWidth << ")";
+            return out.str();
+        }
+
         std::string unaryWordsBoolExpr(const std::string &valueExpr,
                                        int32_t width,
                                        std::string_view helperName)
@@ -9107,8 +9119,10 @@ namespace wolvrix::lib::emit
                            std::to_string(graph.valueWidth(condValue)) + ")")
                         : ("(" + operandExprs[0] + ") != 0");
                 return eventLogicExprFromWordsExpr(graph, resultValue,
-                                                   "((" + condExpr + ") ? " + operandWords(1, resultWidth) + " : " +
-                                                       operandWords(2, resultWidth) + ")");
+                                                   muxWordsExpr(condExpr,
+                                                                operandWords(1, resultWidth),
+                                                                operandWords(2, resultWidth),
+                                                                resultWidth));
             }
             case OperationKind::kConcat:
             {
@@ -9884,7 +9898,10 @@ namespace wolvrix::lib::emit
             case OperationKind::kAShr:
                 return ScalarLogicExpr{"grhsim_ashr_u64(" + operandExpr(0, resultWidth) + ", " + operands[1] + ", " + std::to_string(resultWidth) + ")", true};
             case OperationKind::kMux:
-                return ScalarLogicExpr{"((" + operands[0] + ") ? (" + operandExpr(1, resultWidth) + ") : (" + operandExpr(2, resultWidth) + "))", true};
+                return ScalarLogicExpr{
+                    "grhsim_mux_u64(static_cast<std::uint64_t>(" + operands[0] + "), " +
+                        operandExpr(1, resultWidth) + ", " + operandExpr(2, resultWidth) + ")",
+                    true};
             case OperationKind::kConcat:
             {
                 if (resultWidth <= 64)
@@ -12877,6 +12894,10 @@ namespace wolvrix::lib::emit
             *stream << "    }\n";
             *stream << "    return grhsim_trunc_u64(value, destWidth);\n";
             *stream << "}\n\n";
+            *stream << "inline std::uint64_t grhsim_mux_u64(std::uint64_t cond, std::uint64_t trueValue, std::uint64_t falseValue)\n{\n";
+            *stream << "    const std::uint64_t trueMask = static_cast<std::uint64_t>(-static_cast<std::int64_t>(cond != 0));\n";
+            *stream << "    return (trueValue & trueMask) | (falseValue & ~trueMask);\n";
+            *stream << "}\n\n";
             *stream << "inline int grhsim_compare_unsigned_u64(std::uint64_t lhs, std::uint64_t rhs, std::size_t width)\n{\n";
             *stream << "    lhs = grhsim_trunc_u64(lhs, width);\n";
             *stream << "    rhs = grhsim_trunc_u64(rhs, width);\n";
@@ -14229,6 +14250,21 @@ inline std::array<std::uint64_t, N> grhsim_not_words(const std::array<std::uint6
     std::array<std::uint64_t, N> out{};
     for (std::size_t i = 0; i < N; ++i) {
         out[i] = ~value[i];
+    }
+    grhsim_trunc_words(out, width);
+    return out;
+}
+
+template <std::size_t N>
+inline std::array<std::uint64_t, N> grhsim_mux_words(std::uint64_t cond,
+                                                     const std::array<std::uint64_t, N> &trueValue,
+                                                     const std::array<std::uint64_t, N> &falseValue,
+                                                     std::size_t width)
+{
+    const std::uint64_t trueMask = static_cast<std::uint64_t>(-static_cast<std::int64_t>(cond != 0));
+    std::array<std::uint64_t, N> out{};
+    for (std::size_t i = 0; i < N; ++i) {
+        out[i] = (trueValue[i] & trueMask) | (falseValue[i] & ~trueMask);
     }
     grhsim_trunc_words(out, width);
     return out;
