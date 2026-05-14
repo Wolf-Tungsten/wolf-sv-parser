@@ -2842,7 +2842,7 @@ int main()
         EmitDiagnostics wideConcatFastDiag;
         EmitResult wideConcatFastResult;
         ActivityScheduleOptions wideConcatFastSchedule;
-        wideConcatFastSchedule.maxComputeNodeInComputeSupernode = 1;
+        wideConcatFastSchedule.maxOpInComputeSupernode = 1;
         wideConcatFastSchedule.maxOpInCommitSupernode = 1;
         if (!emitWithActivitySchedule(wideConcatFastDesign,
                                       wideConcatFastDir,
@@ -2986,7 +2986,7 @@ int main()
         EmitDiagnostics packedActivationDiag;
         EmitResult packedActivationResult;
         ActivityScheduleOptions packedActivationSchedule;
-        packedActivationSchedule.maxComputeNodeInComputeSupernode = 1;
+        packedActivationSchedule.maxOpInComputeSupernode = 1;
         packedActivationSchedule.enableCoarsen = false;
         if (!emitWithActivitySchedule(packedActivationDesign,
                                       packedActivationDir,

@@ -182,7 +182,7 @@ int main()
         PassManager manager;
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(
-            ActivityScheduleOptions{.path = "top", .maxComputeNodeInComputeSupernode = 4}));
+            ActivityScheduleOptions{.path = "top", .maxOpInComputeSupernode = 4}));
 
         PassDiagnostics diags;
         const PassManagerResult runResult = manager.run(design, diags);
@@ -272,7 +272,7 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "source_compute",
-            .maxComputeNodeInComputeSupernode = 1,
+            .maxOpInComputeSupernode = 1,
             .enableCoarsen = false,
         }));
         PassDiagnostics diags;
@@ -292,16 +292,39 @@ int main()
             return fail("Expected compute op to map to a supernode");
         }
         bool foundLocalConstClone = false;
+        wolvrix::lib::grh::OperationId clonedConstOp = wolvrix::lib::grh::OperationId::invalid();
         for (const auto opId : (*schedule.supernodeToOps)[addSupernode])
         {
             if (opId != cOp && graph.opKind(opId) == wolvrix::lib::grh::OperationKind::kConstant)
             {
                 foundLocalConstClone = true;
+                clonedConstOp = opId;
             }
         }
         if (!foundLocalConstClone)
         {
-            return fail("Expected source constant to be cloned into compute supernode");
+            for (const auto opId : graph.operations())
+            {
+                if (opId != cOp && graph.opKind(opId) == wolvrix::lib::grh::OperationKind::kConstant)
+                {
+                    const auto supernode = (*schedule.opToSupernode)[opId.index - 1];
+                    if (supernode != kInvalidActivitySupernodeId)
+                    {
+                        foundLocalConstClone = true;
+                        clonedConstOp = opId;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!foundLocalConstClone || !clonedConstOp.valid())
+        {
+            return fail("Expected source constant clone to enter compute scheduling");
+        }
+        if (graph.opOperands(addOp).size() < 2 ||
+            graph.valueDef(graph.opOperands(addOp)[1]) != clonedConstOp)
+        {
+            return fail("Expected compute op operand to be rewritten to source clone");
         }
     }
 
@@ -339,7 +362,7 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "mem_read",
-            .maxComputeNodeInComputeSupernode = 2,
+            .maxOpInComputeSupernode = 2,
         }));
         PassDiagnostics diags;
         const PassManagerResult runResult = manager.run(design, diags);
@@ -414,7 +437,7 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "common_expr",
-            .maxComputeNodeInComputeSupernode = 1,
+            .maxOpInComputeSupernode = 1,
             .enableCoarsen = false,
         }));
         PassDiagnostics diags;
@@ -484,7 +507,7 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "declared_value_local_compute",
-            .maxComputeNodeInComputeSupernode = 2,
+            .maxOpInComputeSupernode = 2,
             .enableCoarsen = false,
             .enableChainMerge = false,
         }));
@@ -562,7 +585,7 @@ int main()
         manager.options().session = &session;
         manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
             .path = "commit_chunk",
-            .maxComputeNodeInComputeSupernode = 1,
+            .maxOpInComputeSupernode = 1,
             .maxOpInCommitSupernode = 1,
             .enableCoarsen = false,
         }));

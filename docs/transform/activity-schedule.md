@@ -10,9 +10,9 @@
 - 冻结 graph
 - 显式分类 `source` / `sink` / `compute` / `declaration`
 - 先按 event guard 构造 `commitSupernode`
-- 从 commit 输入、graph output、inout out/oe 反向构造 `computeNode`
-- 只把 `kConstant` / `kRegisterReadPort` / `kLatchReadPort` source op 克隆到 `computeNode`
-- 以 `computeNode` 为单位做 topo / coarsen / 连续分段，生成最终 `computeSupernode`
+- 将 `kConstant` / `kRegisterReadPort` / `kLatchReadPort` 的 compute 侧 use 前置 clone
+- 直接按 source/compute op 初始化 compute 侧调度原子
+- 以这些 op 级调度原子做 topo / coarsen / 连续分段，生成最终 `computeSupernode`
 - 展开并导出最终 `computeSupernode` / `commitSupernode` 调度模型
 - 导出 `supernode_to_ops` / `op_to_supernode` / `supernode_kind` / `value_fanout` / `topo_order` / `state_read_supernodes`
 
@@ -34,12 +34,14 @@
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `-path` | 无 | 目标 graph / 实例路径，必填 |
-| `-max-compute-node-in-compute-supernode` | `72` | 单个 `computeSupernode` 最多包含的 `computeNode` 数 |
-| `-max-op-in-compute-node` | `8192` | 单个 `computeNode` 反向建树最多吸收的 raw op 数，包括 source clone |
+| `-max-op-in-compute-supernode` | `128` | 单个 `computeSupernode` 最多包含的 compute 侧调度原子数；XiangShan flow 当前默认用 `108` 与 GSIM `--supernode-max-size=15` 的超节点数量对齐 |
+| `-max-op-in-compute-node` | `8192` | 兼容旧 CLI/脚本的保留参数；当前 op 级主路径不再使用 |
 | `-max-op-in-commit-supernode` | `4096` | 单个 `commitSupernode` 最多包含的 sink op 数 |
-| `-enable-coarsen` | `true` | 是否在 computeNode DAG 上执行 coarsen |
-| `-enable-chain-merge` | `true` | 是否启用 computeNode out1 / in1 chain merge |
-| `-cost-model` | `edge-cut` | 运行入口仍要求传入 `edge-cut`；当前主路径不再按 edge-cut DP 分段 |
+| `-enable-coarsen` | `true` | 是否在 compute 侧调度原子 DAG 上执行 coarsen pipeline |
+| `-enable-chain-merge` | `true` | 是否启用 `out1` / `in1` chain merge 策略 |
+| `-cost-model` | `edge-cut` | 兼容旧 CLI/脚本的保留参数；当前主路径使用固定的 boundary-aware coarsen/DP |
+
+兼容说明：旧参数 `-max-compute-node-in-compute-supernode` 仍会被解析为 `-max-op-in-compute-supernode`，但新代码和新脚本应使用后者。`-max-op-in-compute-node` 已不参与当前主路径，保留它只是为了避免旧命令行失败。
 
 ## Session 输出
 
@@ -56,11 +58,12 @@
 
 ## 当前 computeNode / commitSupernode 语义
 
-截至 `2026-05-06`，`activity-schedule` 主路径按 NO0070 重构为两级模型：
+截至 `2026-05-13`，`activity-schedule` 主路径保留 `source` / `compute` / `sink` 语义分类，但 compute 侧不再反向构造独立的 `computeNode` 层：
 
 1. `commitSupernode` 只包含 sink op，按 event key 聚类，再按 `maxOpInCommitSupernode` 切 chunk。
-2. `computeNode` 是中间粒度，包含普通 compute op 和克隆进来的 source op。
-3. `computeSupernode` 由 `computeNode` 经 topo / coarsen / 连续 topo 分段得到，`maxComputeNodeInComputeSupernode` 统计的是 `computeNode` 数量，不是 raw op 数。
+2. source op 到 compute op 的 use 在调度初始化前被 clone，并把 compute operand 改接到 clone value。
+3. compute 侧初始调度原子直接来自 source/compute op；每个原子初始只包含一个 op。
+4. `computeSupernode` 由这些 op 级调度原子经 topo / coarsen / 连续 topo 分段得到，`maxOpInComputeSupernode` 当前统计的是调度原子数量。
 
 `sink op` 包括：
 
@@ -80,7 +83,7 @@
 
 关键不变量：
 
-- source op 只能克隆到 `computeNode`，不能克隆到 `commitSupernode`
+- source op 到 compute op 的 use 会在调度初始化前 clone；source op 不能克隆到 `commitSupernode`
 - direct source -> commit 依赖通过原始 source value 的 `value_fanout` 保留
 - sink op 只出现在 `commitSupernode`
 - `commitSupernode` 不作为 value producer 产生出边
@@ -88,22 +91,99 @@
 
 ## 当前 computeSupernode 调度算法
 
-截至 `2026-05-08`，主路径的 `computeSupernode` 调度逻辑对应 `buildComputeNodeRewrite(...)` + `materializeComputeNodeSchedule(...)`，行为如下：
+截至 `2026-05-13`，主路径的 `computeSupernode` 调度逻辑对应 source 前置 clone + `buildComputeNodeRewrite(...)` + `materializeComputeNodeSchedule(...)`，行为如下：
 
-1. 先从 sink 输入、graph output、inout out/oe 反向构造 `computeNode`，再建立 `computeNode` DAG。
-2. 初始 cluster 是“每个 `computeNode` 各自一个 cluster”，并先按 DAG topo 排序。
-3. 如果启用 coarsen，只做 `out1` / `in1` chain merge：
-  - `out1`：当前 cluster 只有一个后继时，尝试与该后继合并。
-  - `in1`：当前 cluster 只有一个前驱时，尝试与该前驱合并。
-  - 两种 merge 都只受 `maxComputeNodeInComputeSupernode` 约束。
-4. coarsen 之后，按 topo 顺序把连续 cluster 累加进当前 segment；一旦再加入下一个 cluster 会超过 `maxComputeNodeInComputeSupernode`，就切开，开始下一个 segment。
+1. 对 source -> compute use 前置 clone；source -> commit 仍保留 direct source dependency。
+2. 对每个仍有调度用途的 source op 和每个 compute op 初始化一个 compute 侧调度原子，再按 operand def 建 DAG。
+3. 初始 cluster 是“每个调度原子各自一个 cluster”，并先按 DAG topo 排序；topo ready tie-break 会优先选择与前一个 cluster 有更多 activation 连接的候选。
+4. 如果启用 coarsen，按小流水线反复执行策略：
+  - `out1`：当前 cluster 只有一个后继时，按 activation gain 从高到低尝试与该后继合并。
+  - `in1`：当前 cluster 只有一个前驱时，按 activation gain 从高到低尝试与该前驱合并。
+  - `boundary-gain`：按跨 cluster boundary activation edge 减少量从高到低尝试合并相邻依赖 cluster。
+  - 当前三种 merge 都受 `maxOpInComputeSupernode` 约束。
+5. coarsen 之后，按 topo 顺序做连续分段 DP；约束是单个 segment 的调度原子数不超过 `maxOpInComputeSupernode`，目标是最小化 segment 间 boundary activation edge，并带一个轻量 segment 数惩罚。
 
 当前主路径里：
 
-- 分段输入只包含 `computeNode`，不混入 `commitSupernode`
+- 分段输入只包含 compute 侧调度原子，不混入 `commitSupernode`
 - 不再使用旧 `WorkingPartition` 路径里的 `fixedBoundary`
-- 不再在主路径里使用 edge-cut 打分 DP
+- 当前 DP 只优化 topo 连续段，不做任意 DAG partition
 - `-cost-model=edge-cut` 目前只保留为运行入口的兼容性检查
+
+### Boundary activation 权重
+
+当前 compute 侧会为 cluster DAG 额外统计 `ClusterValueEdges`：
+
+- `valueFanouts` 记录每个 compute-side boundary value 的 producer cluster 和 distinct target clusters。
+- `(fromCluster, toCluster)` weight 是 `fromCluster -> toCluster` 上不同 boundary value 形成的 activation edge 数。
+- 同一个 value 在同一个 target cluster 内有多个 use，只算一条 activation edge；同一个 value 扇出到多个 target cluster，会按 target cluster 数累计。
+
+这个权重同时服务三处：
+
+- topo ready tie-break
+- `boundary-gain` coarsen
+- 连续分段 DP 的 activation cost
+
+它只统计 compute 侧调度原子之间的 value 依赖；commit 输入依赖仍在最终 `value_fanout` materialize 阶段处理。
+
+当前优化目标以 `boundary_activation_edges` 为主，因为它同时覆盖：
+
+- `boundary_values`：多少唯一 value 跨 supernode。
+- fanout：每个跨 supernode value 激活多少个目标 supernode。
+
+因此一个 merge 的收益不只看是否消掉某个唯一 value，也看它能否减少该 value 的跨 supernode 目标数。
+
+### Topo-aware ordering
+
+初始和 coarsen 后的 cluster 排序都必须保持 DAG topo 合法。当前使用 Kahn-style ready set：
+
+1. ready set 默认按 cluster id 保持确定性。
+2. 如果上一个输出 cluster 对某个 ready candidate 有 activation 边，则优先选择 activation weight 最大的 candidate。
+3. 若 weight 相同，回退到较小 cluster id。
+
+这个规则只改变同一 topo frontier 内的 tie-break，不改变依赖方向，因此不会引入新 cycle。实现上只检查上一个 cluster 的 outgoing value edge，避免在百万级 ready set 上全扫描。
+
+### Coarsen pipeline
+
+coarsen 阶段是一个小流水线，每轮按固定顺序执行策略，直到整轮没有变化：
+
+1. `out1`
+   - 当前 cluster 只有一个后继时，尝试合并到该后继。
+   - 候选按 producer -> consumer activation weight 降序处理。
+   - 适合吞掉线性 producer -> consumer 链。
+2. `in1`
+   - 当前 cluster 只有一个前驱时，尝试合并到该前驱。
+   - 候选按 producer -> consumer activation weight 降序处理。
+   - 适合吞掉线性 consumer tail。
+3. `boundary-gain`
+   - 按 cluster pair 的 boundary activation edge weight 从高到低尝试合并。
+   - 目标是优先消掉 activation 连接最紧的 supernode 边。
+
+所有策略共享同一个硬约束：
+
+- 合并后的 compute 侧调度原子数不能超过 `maxOpInComputeSupernode`。
+- 合并后必须能重新得到合法 topo order。
+
+后续新增策略应作为新的 pipeline stage 插入，而不是绕开统一约束。每个 stage 应只负责产生候选 merge；合法性仍由 size guard 和 topo check 兜底。
+
+### Boundary-aware DP
+
+coarsen 后，DP 只在 topo-ordered cluster 序列上做连续分段，不做任意 DAG partition。
+
+约束：
+
+- 单个 segment 的调度原子数不超过 `maxOpInComputeSupernode`。
+- 如果单个 cluster 已经超过上限，保留为单独 segment。
+
+目标函数：
+
+```text
+cost(segment) = incoming_boundary_activation_edges + 1
+```
+
+其中 `incoming_boundary_activation_edges` 是该 segment 消费、但 producer 不在同一 segment 内的 compute-side boundary value distinct source-target segment 数。若同一个 value 在同一 segment 内被多个 cluster 使用，只算一次；若同一个 value 扇出到多个 segment，则每个 target segment 各算一次。`+1` 是轻量 segment 数惩罚，用于在 activation cost 相同时偏向更少 segment。
+
+DP 只决定最终 computeSupernode 的连续分段边界。最终 `value_fanout`、`dag`、`state_read_supernodes` 仍在 materialize 阶段从实际 supernode 内容重新计算。
 
 ## 旧路径遗留说明
 
@@ -139,7 +219,7 @@
 
 这意味着旧路径已经开始把 `coarsen` 往“同步变动驱动”的方向收敛，但还没有完全删掉旧的 forwarder 兼容路径。
 
-## 旧 `WorkingPartition` 路径里 `max-compute-node-in-compute-supernode` 的含义
+## 旧 `WorkingPartition` 路径里 `max-op-in-compute-supernode` 的含义
 
 下面这些说明只适用于旧 `WorkingPartition` / DP 路径，不适用于当前 `computeNode` 主路径。
 
@@ -161,7 +241,7 @@
 补充说明：
 
 - 它不限制 `sink-supernode`
-- 因此最终 `supernode_to_ops[i].size()` 可能明显大于 `max-compute-node-in-compute-supernode`
+- 因此最终 `supernode_to_ops[i].size()` 可能明显大于 `max-op-in-compute-supernode`
 - 这仍然不等价于 emit 后文件大小上限；如果某些 op 自身的 C++ 展开非常大，仍可能生成很大的 `sched_*.cpp`
 
 ## 旧路径中的 `fixedBoundary` 语义
@@ -182,7 +262,7 @@
 
 - 先基于 replication 之后的 graph 重新建立 topo
 - 对每个 symbol cluster 收集 live op symbol，并按 topo 顺序排序
-- 如果某个 cluster 的 live op 数超过 `max-compute-node-in-compute-supernode`，就按连续 topo chunk 重新切开
+- 如果某个 cluster 的 live op 数超过 `max-op-in-compute-supernode`，就按连续 topo chunk 重新切开
 
 这样做的目的不是改变 DP 的 cost model，而是修复 replication 把单个 supernode 膨胀到远超上限、从而导致极端大 `sched_*.cpp` 的问题。
 
@@ -201,12 +281,71 @@
 - 输入：`build/xs/grhsim/wolvrix_xs_post_stats.json`
 - 相关脚本：[`scripts/wolvrix_xs_grhsim.py`](/workspace/gaoruihao-dev-gpu/wolvrix-playground/scripts/wolvrix_xs_grhsim.py)
 
-### `max-compute-node-in-compute-supernode=128`
+### 2026-05-13：GSIM 对齐默认值
+
+GSIM XiangShan 当前使用：
+
+```bash
+--supernode-max-size=15 --cpp-max-size-KB=8192
+```
+
+对应已有 GSIM stats：
+
+- `emitted_supernode_count=84714`
+- `emitted_supernode_edge_count=645829`
+
+activity-schedule 的 `max-op-in-compute-supernode` 统计的是 GRH op 级调度原子，不是 GSIM 的 FIRRTL node，因此不能直接设为 `15`。当前 XiangShan GrhSIM flow 默认值为：
+
+```bash
+XS_GSIM_SUPERNODE_MAX_SIZE=15
+XS_WOLF_GRHSIM_MAX_OP_IN_COMPUTE_SUPERNODE=108
+```
+
+实测命令：
+
+```bash
+make xs_wolf_grhsim_emit
+```
+
+日志：
+
+- [xs_wolf_grhsim_build_20260513_225303.log](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/logs/xs/xs_wolf_grhsim_build_20260513_225303.log)
+- [activity_schedule_supernode_stats.json](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/activity_schedule_supernode_stats.json)
+
+结果：
+
+- `supernodes=94383`
+- `compute_supernodes=62823`
+- `commit_supernodes=31560`
+- `dag_edges=1261846`
+- `boundary_values=1573742`
+- `boundary_activation_edges=2835577`
+- `compute_compute_value_pairs=2366673`
+- `compute_commit_value_pairs=468904`
+- `ops_per_supernode.mean=76.279`
+- `ops_per_supernode.median=107`
+- `ops_per_supernode.p90=128`
+- `ops_per_supernode.p99=128`
+- `ops_per_supernode.max=768`
+- `activity-schedule` 耗时 `379598 ms`
+- `write_grhsim_cpp` 耗时 `45771 ms`
+- 总耗时 `447271 ms`
+
+对比本轮重构后误用小粒度默认值 `max-op-in-compute-supernode=16` 的结果：
+
+- `supernodes: 547969 -> 94383`
+- `compute_supernodes: 516409 -> 62823`
+- `boundary_values: 2296075 -> 1573742`
+- `boundary_activation_edges: 4449749 -> 2835577`
+
+因此当前 XiangShan 默认值不再使用小图实验里的 `16`。在 activation-aware coarsen/DP 之后，默认使用 `108` 让总 supernode 数量更接近 GSIM `--supernode-max-size=15` 的 `84,714`。该默认值只是经验对齐点，仍可通过 `XS_WOLF_GRHSIM_MAX_OP_IN_COMPUTE_SUPERNODE` 做 sweep。
+
+### `max-op-in-compute-supernode=128`
 
 命令：
 
 ```bash
-make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=128
+make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_OP_IN_COMPUTE_SUPERNODE=128
 ```
 
 日志：
@@ -231,12 +370,12 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=12
 - `state_commit_shadow_*.cpp` `30` 个
 - `state_commit_write_*.cpp` `1` 个
 
-### `max-compute-node-in-compute-supernode=75`（tie-break 修复前基线）
+### `max-op-in-compute-supernode=75`（tie-break 修复前基线）
 
 命令：
 
 ```bash
-make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=75
+make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_OP_IN_COMPUTE_SUPERNODE=75
 ```
 
 日志：
@@ -266,7 +405,7 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=75
 
 这组数据说明：
 
-- `max-compute-node-in-compute-supernode=75` 已经正确传入
+- `max-op-in-compute-supernode=75` 已经正确传入
 - 但它只是 partition member 上限，不是目标装箱大小
 - 它也不是最终 `supernode_to_ops[i].size()` 的硬上限
 - 在这次运行里，`dp_supernodes` 与 `coarse_supernodes` 完全相同，说明 DP 阶段基本没有继续把 coarse cluster 合并大
@@ -275,12 +414,12 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=75
 - 额外静态排查发现，当 `buildDpSegments()` 遇到等成本候选时，旧实现会优先选择 `begin` 更大的方案，也就是偏向更短的末段；这会进一步压低 segment fill ratio
 - 该 tie-break 已在 `2026-04-12` 改为“同成本优先更长 segment”，后续 sweep 需要以新结果为准
 
-### `max-compute-node-in-compute-supernode=75`（tie-break 修复后重跑）
+### `max-op-in-compute-supernode=75`（tie-break 修复后重跑）
 
 命令：
 
 ```bash
-make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=75
+make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_OP_IN_COMPUTE_SUPERNODE=75
 ```
 
 日志：
@@ -319,17 +458,17 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=75
 
 这次结果说明：
 
-- 问题核心确实在 `buildDpSegments()` 的 tie-break，而不是 `max-compute-node-in-compute-supernode` 根本没有传进去
+- 问题核心确实在 `buildDpSegments()` 的 tie-break，而不是 `max-op-in-compute-supernode` 根本没有传进去
 - `coarse_supernodes` 基本不变，说明改动没有改变 coarsen 形状，收益主要来自 DP 真正开始把 coarse cluster 装进更长 segment
-- 修复后，`max-compute-node-in-compute-supernode=75` 已经足以把最终 `supernodes` 压到 `64k` 量级
-- 因此此前关于“单调调大 `max-compute-node-in-compute-supernode` 也难以下到 `9-10 万`”的判断，只适用于 tie-break 修复前的旧实现
+- 修复后，`max-op-in-compute-supernode=75` 已经足以把最终 `supernodes` 压到 `64k` 量级
+- 因此此前关于“单调调大 `max-op-in-compute-supernode` 也难以下到 `9-10 万`”的判断，只适用于 tie-break 修复前的旧实现
 
-### `max-compute-node-in-compute-supernode=1024`
+### `max-op-in-compute-supernode=1024`
 
 命令：
 
 ```bash
-make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=1024
+make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_OP_IN_COMPUTE_SUPERNODE=1024
 ```
 
 日志：
@@ -360,7 +499,7 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=10
 
 这说明在 tie-break 修复前的旧实现里，当前 XiangShan 规模下：
 
-- `max-compute-node-in-compute-supernode` 会影响结果
+- `max-op-in-compute-supernode` 会影响结果
 - 但影响不是线性的
 - 最终 supernode 数量并不主要受这个参数单独控制
 - 最终 `ops / supernode` 的平均值也不会自动逼近这个上限
@@ -387,8 +526,8 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=10
 
 基于 `2026-04-12` 的 XiangShan 实测，可以明确记录：
 
-- 在 tie-break 修复前，不能指望仅通过调大 `max-compute-node-in-compute-supernode`，把 `supernodes` 从 `70-80 万` 直接压到 `9-10 万`
-- 在 tie-break 修复后，`max-compute-node-in-compute-supernode=75` 已经可以把 `supernodes` 压到 `64616`
+- 在 tie-break 修复前，不能指望仅通过调大 `max-op-in-compute-supernode`，把 `supernodes` 从 `70-80 万` 直接压到 `9-10 万`
+- 在 tie-break 修复后，`max-op-in-compute-supernode=75` 已经可以把 `supernodes` 压到 `64616`
 
 因此，后续优化方向应区分两件事：
 
@@ -401,20 +540,20 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=10
 - replication 策略是否产生了过多活跃分裂
 - final materialize / symbol partition 是否保留了过多切口
 
-而不是继续单独放大 `max-compute-node-in-compute-supernode`。
+而不是继续单独放大 `max-op-in-compute-supernode`。
 
 ## 相关实现与脚本变更记录
 
 这轮实验还伴随了几项和 GrhSIM 流程相关的实现调整：
 
 - `scripts/wolvrix_xs_grhsim.py` 在 `activity-schedule` 之后不再 `store_json`
-- `Makefile` / `scripts/wolvrix_xs_grhsim.py` 已支持通过 `XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE` / `WOLVRIX_XS_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE` 传参
+- `Makefile` / `scripts/wolvrix_xs_grhsim.py` 已支持通过 `XS_WOLF_GRHSIM_MAX_OP_IN_COMPUTE_SUPERNODE` / `WOLVRIX_XS_GRHSIM_MAX_OP_IN_COMPUTE_SUPERNODE` 传参
 - `grhsim-cpp` emit 已支持将超大的 state/init/commit 文件拆分为多个 `.cpp`
 - emitter 会清理同前缀旧产物，避免重复 emit 到同一路径时残留过期 `sched_*.cpp`
 
 如果后续继续做 sweep，建议至少记录：
 
-- `max-compute-node-in-compute-supernode`
+- `max-op-in-compute-supernode`
 - `supernodes`
 - `coarse_supernodes`
 - `dp_supernodes`
@@ -425,7 +564,7 @@ make xs_wolf_grhsim_emit XS_WOLF_GRHSIM_MAX_COMPUTE_NODE_IN_COMPUTE_SUPERNODE=10
 
 ## 2026-04-12：grhsim-cpp 编译可用性修复
 
-在默认 `max-compute-node-in-compute-supernode=72`、tie-break 修复已经落地的基础上，这一轮继续处理的是 `grhsim-cpp` 的 C++ 编译体量问题，而不是 supernode 数量本身。
+在默认 `max-op-in-compute-supernode=72`、tie-break 修复已经落地的基础上，这一轮继续处理的是 `grhsim-cpp` 的 C++ 编译体量问题，而不是 supernode 数量本身。
 
 核心修改在 [grhsim_cpp.cpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/wolvrix/lib/emit/grhsim_cpp.cpp)：
 
@@ -492,7 +631,7 @@ make -C testcase/xiangshan/difftest emu \
 
 这说明当前这套：
 
-- `max-compute-node-in-compute-supernode=72`
+- `max-op-in-compute-supernode=72`
 - DP tie-break 修复
 - replication 后置拆分
 - `EvalScratchFrame` 值存储分层
@@ -570,7 +709,7 @@ make -C testcase/xiangshan/difftest emu \
 
 这一轮没有继续保留 `local/batch/eval/object` 的值存储细分。对于非输入 `value`，emit 侧统一视为可索引 object slot。
 
-对 XiangShan (`xs-default`, `max-compute-node-in-compute-supernode=72`) 的实测结果：
+对 XiangShan (`xs-default`, `max-op-in-compute-supernode=72`) 的实测结果：
 
 - [grhsim_SimTop.hpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop.hpp)
   - 修改前：`273,227,744` bytes
@@ -623,7 +762,7 @@ make -C testcase/xiangshan/difftest emu \
 - 改为保存 slot index / scalar kind / word count
 - `sched` 写 shadow、`init()` 清零 shadow、`commit_state_updates()` 读回 shadow 都统一走 helper 生成的索引表达式
 
-对 XiangShan (`xs-default`, `max-compute-node-in-compute-supernode=72`) 的继续实测结果：
+对 XiangShan (`xs-default`, `max-op-in-compute-supernode=72`) 的继续实测结果：
 
 - [grhsim_SimTop.hpp](/workspace/gaoruihao-dev-gpu/wolvrix-playground/build/xs/grhsim/grhsim_emit/grhsim_SimTop.hpp)
   - `value` 池化后：`145,602,254` bytes
@@ -687,7 +826,7 @@ make -C testcase/xiangshan/difftest emu \
 - `memory` 引用 pool 中的 `vector<elem>` / `vector<array<...>>`
 - `init()` 新增独立的 `kStateStorage` 阶段，先分配 state pool，再做逐 state 初始化
 
-对 XiangShan (`xs-default`, `max-compute-node-in-compute-supernode=72`) 的实测结果继续下降：
+对 XiangShan (`xs-default`, `max-op-in-compute-supernode=72`) 的实测结果继续下降：
 
 - 初始字段展开版本：`273,227,744` bytes
 - `value + evt_edge` 池化后：`145,602,254` bytes

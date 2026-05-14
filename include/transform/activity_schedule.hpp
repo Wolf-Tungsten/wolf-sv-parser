@@ -31,7 +31,7 @@ namespace wolvrix::lib::transform
     struct ActivityScheduleOptions
     {
         std::string path;
-        std::size_t maxComputeNodeInComputeSupernode = 72;
+        std::size_t maxOpInComputeSupernode = 128;
         std::size_t maxOpInComputeNode = 8192;
         std::size_t maxOpInCommitSupernode = 4096;
         std::size_t localSharedComputeMaxFanout = 4;
@@ -99,6 +99,9 @@ namespace wolvrix::lib::transform
         std::size_t computeNodeBoundaryInputCapacity = 0;
         std::size_t computeNodeBoundaryValues = 0;
         std::size_t commitInputRootValues = 0;
+        std::size_t commitSinkOps = 0;
+        std::size_t commitEventKeyRuns = 0;
+        std::size_t commitEventKeys = 0;
         std::size_t topoEdges = 0;
         std::size_t graphOps = 0;
         std::size_t graphValues = 0;

@@ -908,11 +908,24 @@ namespace wolvrix::lib::transform
                 {
                     options.path = std::string(arg.substr(std::string_view("-path=").size()));
                 }
-                else if (arg == "-max-compute-node-in-compute-supernode")
+                else if (arg == "-max-op-in-compute-supernode" ||
+                         arg == "-max-compute-node-in-compute-supernode")
                 {
-                    if (!parseSizeArg("-max-compute-node-in-compute-supernode",
-                                      options.maxComputeNodeInComputeSupernode))
+                    if (!parseSizeArg(arg, options.maxOpInComputeSupernode))
                     {
+                        return nullptr;
+                    }
+                }
+                else if (arg.starts_with("-max-op-in-compute-supernode="))
+                {
+                    try
+                    {
+                        options.maxOpInComputeSupernode = static_cast<std::size_t>(std::stoull(std::string(
+                            arg.substr(std::string_view("-max-op-in-compute-supernode=").size()))));
+                    }
+                    catch (const std::exception &)
+                    {
+                        error = "invalid -max-op-in-compute-supernode value";
                         return nullptr;
                     }
                 }
@@ -920,7 +933,7 @@ namespace wolvrix::lib::transform
                 {
                     try
                     {
-                        options.maxComputeNodeInComputeSupernode = static_cast<std::size_t>(std::stoull(std::string(
+                        options.maxOpInComputeSupernode = static_cast<std::size_t>(std::stoull(std::string(
                             arg.substr(std::string_view("-max-compute-node-in-compute-supernode=").size()))));
                     }
                     catch (const std::exception &)

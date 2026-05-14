@@ -601,7 +601,7 @@ def _compile_activity_schedule_kwargs(named: dict[str, Any]) -> list[str]:
         ("cost_model", "-cost-model"),
     ]
     size_options = [
-        ("max_compute_node_in_compute_supernode", "-max-compute-node-in-compute-supernode"),
+        ("max_op_in_compute_supernode", "-max-op-in-compute-supernode"),
         ("max_op_in_compute_node", "-max-op-in-compute-node"),
         ("max_op_in_commit_supernode", "-max-op-in-commit-supernode"),
         ("local_shared_compute_max_fanout", "-local-shared-compute-max-fanout"),
@@ -617,6 +617,9 @@ def _compile_activity_schedule_kwargs(named: dict[str, Any]) -> list[str]:
         value = _pop_named(local, key, None)
         if value is not None:
             out.extend([arg, str(value)])
+    legacy_max_compute_node = _pop_named(local, "max_compute_node_in_compute_supernode", None)
+    if "max_op_in_compute_supernode" not in local and legacy_max_compute_node is not None:
+        local["max_op_in_compute_supernode"] = legacy_max_compute_node
     for key, arg in size_options:
         value = _pop_named(local, key, None)
         if value is not None:
