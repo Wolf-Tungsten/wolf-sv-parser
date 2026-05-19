@@ -447,6 +447,7 @@ namespace wolvrix::lib::emit
         struct DeferredActivationGroup
         {
             std::vector<uint32_t> activeIds;
+            std::vector<ValueId> sourceValues;
             std::string changedExpr;
         };
 
@@ -456,6 +457,55 @@ namespace wolvrix::lib::emit
         {
             DeferredActivationGroups *groups = nullptr;
         };
+
+        bool containsValueId(const std::vector<ValueId> &values, ValueId value)
+        {
+            return std::find(values.begin(), values.end(), value) != values.end();
+        }
+
+        bool valueIdLess(ValueId lhs, ValueId rhs) noexcept
+        {
+            if (lhs.graph.index != rhs.graph.index)
+            {
+                return lhs.graph.index < rhs.graph.index;
+            }
+            if (lhs.graph.generation != rhs.graph.generation)
+            {
+                return lhs.graph.generation < rhs.graph.generation;
+            }
+            if (lhs.index != rhs.index)
+            {
+                return lhs.index < rhs.index;
+            }
+            return lhs.generation < rhs.generation;
+        }
+
+        void sortUniqueValueIds(std::vector<ValueId> &values)
+        {
+            std::sort(values.begin(), values.end(), valueIdLess);
+            values.erase(std::unique(values.begin(), values.end()), values.end());
+        }
+
+        std::string valueIdGroupKey(const std::vector<ValueId> &values)
+        {
+            std::string key;
+            key.reserve(values.size() * 12u);
+            for (ValueId value : values)
+            {
+                if (!key.empty())
+                {
+                    key.push_back(',');
+                }
+                key += std::to_string(value.graph.index);
+                key.push_back(':');
+                key += std::to_string(value.graph.generation);
+                key.push_back(':');
+                key += std::to_string(value.index);
+                key.push_back(':');
+                key += std::to_string(value.generation);
+            }
+            return key;
+        }
 
         std::string activationGroupKey(const std::vector<uint32_t> &activeIds)
         {
@@ -4356,14 +4406,38 @@ namespace wolvrix::lib::emit
             }
             if (deferredContext != nullptr && deferredContext->groups != nullptr)
             {
+                std::vector<uint32_t> directActiveIds = fanoutIt->second;
                 for (auto &group : *deferredContext->groups)
                 {
-                    if (group.activeIds == fanoutIt->second)
+                    if (!containsValueId(group.sourceValues, resultValue))
                     {
-                        stream << indent << group.changedExpr << " = static_cast<bool>(" << group.changedExpr
-                               << " | " << conditionExpr << ");\n";
+                        continue;
+                    }
+                    stream << indent << group.changedExpr << " = static_cast<bool>(" << group.changedExpr
+                           << " | " << conditionExpr << ");\n";
+                    std::vector<uint32_t> remaining;
+                    remaining.reserve(directActiveIds.size());
+                    std::set_difference(directActiveIds.begin(),
+                                        directActiveIds.end(),
+                                        group.activeIds.begin(),
+                                        group.activeIds.end(),
+                                        std::back_inserter(remaining));
+                    directActiveIds = std::move(remaining);
+                    if (directActiveIds.empty())
+                    {
                         return;
                     }
+                }
+                if (directActiveIds.size() != fanoutIt->second.size())
+                {
+                    emitConditionalActivationStatements(stream,
+                                                        "supernode_active_curr_",
+                                                        "active_count_",
+                                                        directActiveIds,
+                                                        conditionExpr,
+                                                        indent,
+                                                        context);
+                    return;
                 }
             }
             emitConditionalActivationStatements(stream,
@@ -4389,45 +4463,79 @@ namespace wolvrix::lib::emit
                 return groups;
             }
 
-            struct Candidate
+            struct ValueFanout
             {
+                ValueId value;
                 std::vector<uint32_t> activeIds;
-                std::size_t count = 0;
             };
 
-            std::unordered_map<std::string, Candidate> candidates;
+            std::vector<ValueFanout> valueFanouts;
             for (OperationId opId : supernodeToOps[supernodeId])
             {
                 const Operation op = graph.getOperation(opId);
-                if (op.results().size() != 1)
+                if (op.results().empty())
                 {
                     continue;
                 }
-                const ValueId resultValue = op.results().front();
-                if (isEventValue(model, resultValue))
+                for (ValueId resultValue : op.results())
+                {
+                    if (isEventValue(model, resultValue))
+                    {
+                        continue;
+                    }
+                    const auto fanoutIt = model.boundaryFanoutByValue.find(resultValue);
+                    if (fanoutIt == model.boundaryFanoutByValue.end() || fanoutIt->second.empty())
+                    {
+                        continue;
+                    }
+                    valueFanouts.push_back(ValueFanout{.value = resultValue, .activeIds = fanoutIt->second});
+                }
+            }
+            if (valueFanouts.size() < kMinDeferredGroupValues)
+            {
+                return groups;
+            }
+
+            std::unordered_map<uint32_t, std::vector<ValueId>> sourceValuesByActiveId;
+            for (const auto &fanout : valueFanouts)
+            {
+                for (uint32_t activeId : fanout.activeIds)
+                {
+                    sourceValuesByActiveId[activeId].push_back(fanout.value);
+                }
+            }
+
+            struct Candidate
+            {
+                std::vector<uint32_t> activeIds;
+                std::vector<ValueId> sourceValues;
+            };
+
+            std::unordered_map<std::string, Candidate> candidates;
+            for (auto &[activeId, sourceValues] : sourceValuesByActiveId)
+            {
+                sortUniqueValueIds(sourceValues);
+                if (sourceValues.size() < kMinDeferredGroupValues)
                 {
                     continue;
                 }
-                const auto fanoutIt = model.boundaryFanoutByValue.find(resultValue);
-                if (fanoutIt == model.boundaryFanoutByValue.end() || fanoutIt->second.empty())
-                {
-                    continue;
-                }
-                const std::string key = activationGroupKey(fanoutIt->second);
+                const std::string key = valueIdGroupKey(sourceValues);
                 auto &candidate = candidates[key];
-                if (candidate.activeIds.empty())
+                if (candidate.sourceValues.empty())
                 {
-                    candidate.activeIds = fanoutIt->second;
+                    candidate.sourceValues = std::move(sourceValues);
                 }
-                ++candidate.count;
+                candidate.activeIds.push_back(activeId);
             }
 
             groups.reserve(candidates.size());
             for (auto &[_, candidate] : candidates)
             {
-                if (candidate.count >= kMinDeferredGroupValues)
+                sortUniqueVector(candidate.activeIds);
+                if (candidate.sourceValues.size() >= kMinDeferredGroupValues)
                 {
-                    groups.push_back(DeferredActivationGroup{.activeIds = std::move(candidate.activeIds)});
+                    groups.push_back(DeferredActivationGroup{.activeIds = std::move(candidate.activeIds),
+                                                             .sourceValues = std::move(candidate.sourceValues)});
                 }
             }
             std::sort(groups.begin(),
@@ -4437,6 +4545,10 @@ namespace wolvrix::lib::emit
                           if (lhs.activeIds.size() != rhs.activeIds.size())
                           {
                               return lhs.activeIds.size() > rhs.activeIds.size();
+                          }
+                          if (lhs.sourceValues.size() != rhs.sourceValues.size())
+                          {
+                              return lhs.sourceValues.size() > rhs.sourceValues.size();
                           }
                           return lhs.activeIds < rhs.activeIds;
                       });
@@ -11517,13 +11629,16 @@ namespace wolvrix::lib::emit
                             {
                                 stream << "                    if (" << lhs << " != " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front()))
                                        << ") {\n";
-                                emitChangedValueEffects(stream,
-                                                        model,
-                                                        resultValue,
-                                                        lhs,
-                                                        defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())),
-                                                        "                    ",
-                                                        &activationContext);
+                                emitChangedValueEffectsForCondition(
+                                    stream,
+                                    model,
+                                    resultValue,
+                                    lhs,
+                                    defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())),
+                                    "true",
+                                    "                    ",
+                                    &activationContext,
+                                    &deferredActivationContext);
                                 stream << "                        " << lhs << " = " << defaultInitExprForLogicWidth(graph.valueWidth(op.results().front())) << ";\n";
                                 stream << "                    }\n";
                             }
@@ -11546,7 +11661,15 @@ namespace wolvrix::lib::emit
                             if (needChangeDetect)
                             {
                                 stream << "                    if (" << lhs << " != next_value) {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                    ", &activationContext);
+                                emitChangedValueEffectsForCondition(stream,
+                                                                    model,
+                                                                    resultValue,
+                                                                    lhs,
+                                                                    "next_value",
+                                                                    "true",
+                                                                    "                    ",
+                                                                    &activationContext,
+                                                                    &deferredActivationContext);
                                 stream << "                        " << lhs << " = next_value;\n";
                                 stream << "                    }\n";
                             }
@@ -11648,7 +11771,15 @@ namespace wolvrix::lib::emit
                                        << pathExpr << ", " << modeExpr << "), "
                                        << graph.valueWidth(resultValue) << "));\n";
                                 stream << "                if (" << lhs << " != next_value) {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
+                                emitChangedValueEffectsForCondition(stream,
+                                                                    model,
+                                                                    resultValue,
+                                                                    lhs,
+                                                                    "next_value",
+                                                                    "true",
+                                                                    "                ",
+                                                                    &activationContext,
+                                                                    &deferredActivationContext);
                                 stream << "                    " << lhs << " = next_value;\n";
                                 stream << "                }\n";
                                 stream << "            }\n";
@@ -11676,7 +11807,15 @@ namespace wolvrix::lib::emit
                                        << systemTaskArgExpr(graph, model, operands[0], &localExprContext) << "))), "
                                        << graph.valueWidth(resultValue) << "));\n";
                                 stream << "                if (" << lhs << " != next_value) {\n";
-                                emitChangedValueEffects(stream, model, resultValue, lhs, "next_value", "                ", &activationContext);
+                                emitChangedValueEffectsForCondition(stream,
+                                                                    model,
+                                                                    resultValue,
+                                                                    lhs,
+                                                                    "next_value",
+                                                                    "true",
+                                                                    "                ",
+                                                                    &activationContext,
+                                                                    &deferredActivationContext);
                                 stream << "                    " << lhs << " = next_value;\n";
                                 stream << "                }\n";
                                 stream << "            }\n";
@@ -11889,13 +12028,15 @@ namespace wolvrix::lib::emit
                             stream << "                auto dpi_ret = " << sanitizeIdentifier(decl.symbol)
                                    << "(" << joinStrings(deferredArgs, ", ") << ");\n";
                             stream << "                if (" << returnRef << " != dpi_ret) {\n";
-                            emitChangedValueEffects(stream,
-                                                    model,
-                                                    returnValue,
-                                                    returnRef,
-                                                    "dpi_ret",
-                                                    "                ",
-                                                    &activationContext);
+                            emitChangedValueEffectsForCondition(stream,
+                                                                model,
+                                                                returnValue,
+                                                                returnRef,
+                                                                "dpi_ret",
+                                                                "true",
+                                                                "                ",
+                                                                &activationContext,
+                                                                &deferredActivationContext);
                             stream << "                    " << returnRef << " = dpi_ret;\n";
                             stream << "                }\n";
                             for (std::size_t i = 0; i < decl.argsDirection.size(); ++i)
@@ -11914,7 +12055,15 @@ namespace wolvrix::lib::emit
                                     const std::string lhs =
                                         resolvedStoredValueRefExpr(model, resultValue, &localExprContext);
                                     stream << "                if (" << lhs << " != " << tempName << ") {\n";
-                                    emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ", &activationContext);
+                                    emitChangedValueEffectsForCondition(stream,
+                                                                        model,
+                                                                        resultValue,
+                                                                        lhs,
+                                                                        tempName,
+                                                                        "true",
+                                                                        "                ",
+                                                                        &activationContext,
+                                                                        &deferredActivationContext);
                                     stream << "                    " << lhs << " = " << tempName << ";\n";
                                     stream << "                }\n";
                                 }
@@ -11939,7 +12088,15 @@ namespace wolvrix::lib::emit
                                     const std::string lhs =
                                         resolvedStoredValueRefExpr(model, resultValue, &localExprContext);
                                     stream << "                if (" << lhs << " != " << tempName << ") {\n";
-                                    emitChangedValueEffects(stream, model, resultValue, lhs, tempName, "                ", &activationContext);
+                                    emitChangedValueEffectsForCondition(stream,
+                                                                        model,
+                                                                        resultValue,
+                                                                        lhs,
+                                                                        tempName,
+                                                                        "true",
+                                                                        "                ",
+                                                                        &activationContext,
+                                                                        &deferredActivationContext);
                                     stream << "                    " << lhs << " = " << tempName << ";\n";
                                     stream << "                }\n";
                                 }

@@ -1371,23 +1371,24 @@ namespace wolvrix::lib::transform
                         return nullptr;
                     }
                 }
-                else if (arg == "-essent-max-cluster-ops")
+                else if (arg == "-essent-small-overlap-candidate-budget")
                 {
-                    if (!parseSizeArg("-essent-max-cluster-ops", options.essentMaxClusterOps))
+                    if (!parseSizeArg("-essent-small-overlap-candidate-budget",
+                                      options.essentSmallOverlapCandidateBudget))
                     {
                         return nullptr;
                     }
                 }
-                else if (arg.starts_with("-essent-max-cluster-ops="))
+                else if (arg.starts_with("-essent-small-overlap-candidate-budget="))
                 {
                     try
                     {
-                        options.essentMaxClusterOps = static_cast<std::size_t>(std::stoull(std::string(
-                            arg.substr(std::string_view("-essent-max-cluster-ops=").size()))));
+                        options.essentSmallOverlapCandidateBudget = static_cast<std::size_t>(std::stoull(std::string(
+                            arg.substr(std::string_view("-essent-small-overlap-candidate-budget=").size()))));
                     }
                     catch (const std::exception &)
                     {
-                        error = "invalid -essent-max-cluster-ops value";
+                        error = "invalid -essent-small-overlap-candidate-budget value";
                         return nullptr;
                     }
                 }

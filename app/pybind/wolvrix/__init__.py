@@ -609,7 +609,7 @@ def _compile_activity_schedule_kwargs(named: dict[str, Any]) -> list[str]:
         ("essent_small_part_cutoff", "-essent-small-part-cutoff"),
         ("essent_small_sibling_max_preds", "-essent-small-sibling-max-preds"),
         ("essent_small_sibling_candidate_budget", "-essent-small-sibling-candidate-budget"),
-        ("essent_max_cluster_ops", "-essent-max-cluster-ops"),
+        ("essent_small_overlap_candidate_budget", "-essent-small-overlap-candidate-budget"),
         ("essent_cycle_guard_max_visits", "-essent-cycle-guard-max-visits"),
         ("split_oversize_compute_node_max_ops", "-split-oversize-compute-node-max-ops"),
     ]

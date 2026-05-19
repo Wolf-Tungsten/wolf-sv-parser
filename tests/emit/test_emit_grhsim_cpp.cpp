@@ -1049,6 +1049,53 @@ namespace
         return design;
     }
 
+    Design buildOverlappingActivationDesign()
+    {
+        Design design;
+        Graph &graph = design.createGraph("top");
+        design.markAsTop(graph.symbol());
+
+        ValueId a = makeLogicValue(graph, "a", 8);
+        ValueId b = makeLogicValue(graph, "b", 8);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+
+        ValueId producer0 = makeLogicValue(graph, "overlap_producer0", 8);
+        ValueId producer1 = makeLogicValue(graph, "overlap_producer1", 8);
+        graph.bindOutputPort("overlap_producer1", producer1);
+
+        OperationId dpiImport = graph.createOperation(OperationKind::kDpicImport,
+                                                      graph.internSymbol("overlap_pair"));
+        graph.setAttr(dpiImport, "argsDirection", std::vector<std::string>{"input", "input", "output", "output"});
+        graph.setAttr(dpiImport, "argsWidth", std::vector<int64_t>{8, 8, 8, 8});
+        graph.setAttr(dpiImport, "argsName", std::vector<std::string>{"a", "b", "out0", "out1"});
+        graph.setAttr(dpiImport, "argsSigned", std::vector<bool>{false, false, false, false});
+        graph.setAttr(dpiImport, "argsType", std::vector<std::string>{"logic", "logic", "logic", "logic"});
+        graph.setAttr(dpiImport, "hasReturn", false);
+
+        OperationId dpiCall = graph.createOperation(OperationKind::kDpicCall,
+                                                    graph.internSymbol("overlap_pair_call"));
+        graph.addOperand(dpiCall, a);
+        graph.addOperand(dpiCall, a);
+        graph.addOperand(dpiCall, b);
+        graph.addResult(dpiCall, producer0);
+        graph.addResult(dpiCall, producer1);
+        graph.setAttr(dpiCall, "targetImportSymbol", std::string("overlap_pair"));
+        graph.setAttr(dpiCall, "inArgName", std::vector<std::string>{"a", "b"});
+        graph.setAttr(dpiCall, "outArgName", std::vector<std::string>{"out0", "out1"});
+        graph.setAttr(dpiCall, "hasReturn", false);
+
+        ValueId sharedConsumer = makeLogicValue(graph, "overlap_shared_consumer", 8);
+        OperationId sharedConsumerOp = graph.createOperation(OperationKind::kAdd,
+                                                            graph.internSymbol("overlap_shared_consumer_add"));
+        graph.addOperand(sharedConsumerOp, producer0);
+        graph.addOperand(sharedConsumerOp, producer1);
+        graph.addResult(sharedConsumerOp, sharedConsumer);
+        graph.bindOutputPort("overlap_shared_consumer", sharedConsumer);
+
+        return design;
+    }
+
     Design buildRegisterWriteInteractionDesign()
     {
         Design design;
@@ -3010,6 +3057,47 @@ int main()
         if (packedActivationEval.find("grhsim_or_active_u16(supernode_active_curr_.data()") == std::string::npos)
         {
             return fail("packed-activation fanout should emit packed active flag ORs");
+        }
+
+        const std::filesystem::path overlappingActivationDir =
+            std::filesystem::path(WOLF_SV_EMIT_ARTIFACT_DIR) / "grhsim_cpp_overlapping_activation";
+        std::filesystem::remove_all(overlappingActivationDir);
+        Design overlappingActivationDesign = buildOverlappingActivationDesign();
+        EmitDiagnostics overlappingActivationDiag;
+        EmitResult overlappingActivationResult;
+        ActivityScheduleOptions overlappingActivationSchedule;
+        overlappingActivationSchedule.maxOpInComputeSupernode = 1;
+        overlappingActivationSchedule.enableCoarsen = false;
+        if (!emitWithActivitySchedule(overlappingActivationDesign,
+                                      overlappingActivationDir,
+                                      overlappingActivationDiag,
+                                      overlappingActivationResult,
+                                      overlappingActivationSchedule))
+        {
+            return fail("overlapping-activation activity-schedule pass failed");
+        }
+        if (!overlappingActivationResult.success || overlappingActivationDiag.hasError())
+        {
+            return fail("overlapping-activation emit failed");
+        }
+        const std::vector<std::filesystem::path> overlappingActivationSchedFiles =
+            collectSchedFiles(overlappingActivationDir, "grhsim_top_sched_");
+        if (overlappingActivationSchedFiles.empty())
+        {
+            return fail("overlapping-activation schedule files missing");
+        }
+        const std::string overlappingActivationSched = readFiles(overlappingActivationSchedFiles);
+        if (overlappingActivationSched.find("grhsim_any_changed_") == std::string::npos)
+        {
+            return fail("overlapping activation should emit a deferred changed-value group");
+        }
+        if (countSubstring(overlappingActivationSched, "grhsim_any_changed_0_0 = static_cast<bool>") != 2)
+        {
+            return fail("overlapping activation should merge both changed values into one deferred condition");
+        }
+        if (countSubstring(overlappingActivationSched, "activeWordFlags |= static_cast<std::uint8_t>") != 1)
+        {
+            return fail("overlapping activation should activate the shared successor once");
         }
 
         const std::filesystem::path twoWordDir =

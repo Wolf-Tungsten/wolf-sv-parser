@@ -421,6 +421,22 @@ namespace wolvrix::lib::transform
                 << stats.essentSmallOverlapRejectedBounded;
             out << ",\"essent_small_overlap_rejected_topo\":"
                 << stats.essentSmallOverlapRejectedTopo;
+            out << ",\"essent_small_overlap_small_parts\":"
+                << stats.essentSmallOverlapSmallParts;
+            out << ",\"essent_small_overlap_raw_candidates\":"
+                << stats.essentSmallOverlapRawCandidates;
+            out << ",\"essent_small_overlap_threshold_candidates\":"
+                << stats.essentSmallOverlapThresholdCandidates;
+            out << ",\"essent_small_overlap_acyclic_candidates\":"
+                << stats.essentSmallOverlapAcyclicCandidates;
+            out << ",\"essent_small_overlap_acyclic_rejected\":"
+                << stats.essentSmallOverlapAcyclicRejected;
+            out << ",\"essent_small_overlap_inactive_rejected\":"
+                << stats.essentSmallOverlapInactiveRejected;
+            out << ",\"essent_small_overlap_candidate_removed_edges\":"
+                << stats.essentSmallOverlapCandidateRemovedEdges;
+            out << ",\"essent_small_overlap_accepted_removed_edges\":"
+                << stats.essentSmallOverlapAcceptedRemovedEdges;
             out << ",\"essent_down_candidates\":"
                 << stats.essentDownCandidates;
             out << ",\"essent_down_rejected_size\":"
@@ -431,6 +447,20 @@ namespace wolvrix::lib::transform
                 << stats.essentDownRejectedBounded;
             out << ",\"essent_down_rejected_topo\":"
                 << stats.essentDownRejectedTopo;
+            out << ",\"essent_down_small_parts\":"
+                << stats.essentDownSmallParts;
+            out << ",\"essent_down_raw_candidates\":"
+                << stats.essentDownRawCandidates;
+            out << ",\"essent_down_acyclic_candidates\":"
+                << stats.essentDownAcyclicCandidates;
+            out << ",\"essent_down_acyclic_rejected\":"
+                << stats.essentDownAcyclicRejected;
+            out << ",\"essent_down_inactive_rejected\":"
+                << stats.essentDownInactiveRejected;
+            out << ",\"essent_down_candidate_removed_edges\":"
+                << stats.essentDownCandidateRemovedEdges;
+            out << ",\"essent_down_accepted_removed_edges\":"
+                << stats.essentDownAcceptedRemovedEdges;
             out << ",\"source_clones_in_compute_nodes\":" << stats.sourceClonesInComputeNodes;
             out << ",\"local_shared_compute_clones_in_compute_nodes\":"
                 << stats.localSharedComputeClonesInComputeNodes;
@@ -528,11 +558,34 @@ namespace wolvrix::lib::transform
             stats.essentSmallOverlapRejectedCycle = rewrite.stats.essentSmallOverlapRejectedCycle;
             stats.essentSmallOverlapRejectedBounded = rewrite.stats.essentSmallOverlapRejectedBounded;
             stats.essentSmallOverlapRejectedTopo = rewrite.stats.essentSmallOverlapRejectedTopo;
+            stats.essentSmallOverlapSmallParts = rewrite.stats.essentSmallOverlapSmallParts;
+            stats.essentSmallOverlapRawCandidates = rewrite.stats.essentSmallOverlapRawCandidates;
+            stats.essentSmallOverlapThresholdCandidates =
+                rewrite.stats.essentSmallOverlapThresholdCandidates;
+            stats.essentSmallOverlapAcyclicCandidates =
+                rewrite.stats.essentSmallOverlapAcyclicCandidates;
+            stats.essentSmallOverlapAcyclicRejected =
+                rewrite.stats.essentSmallOverlapAcyclicRejected;
+            stats.essentSmallOverlapInactiveRejected =
+                rewrite.stats.essentSmallOverlapInactiveRejected;
+            stats.essentSmallOverlapCandidateRemovedEdges =
+                rewrite.stats.essentSmallOverlapCandidateRemovedEdges;
+            stats.essentSmallOverlapAcceptedRemovedEdges =
+                rewrite.stats.essentSmallOverlapAcceptedRemovedEdges;
             stats.essentDownCandidates = rewrite.stats.essentDownCandidates;
             stats.essentDownRejectedSize = rewrite.stats.essentDownRejectedSize;
             stats.essentDownRejectedCycle = rewrite.stats.essentDownRejectedCycle;
             stats.essentDownRejectedBounded = rewrite.stats.essentDownRejectedBounded;
             stats.essentDownRejectedTopo = rewrite.stats.essentDownRejectedTopo;
+            stats.essentDownSmallParts = rewrite.stats.essentDownSmallParts;
+            stats.essentDownRawCandidates = rewrite.stats.essentDownRawCandidates;
+            stats.essentDownAcyclicCandidates = rewrite.stats.essentDownAcyclicCandidates;
+            stats.essentDownAcyclicRejected = rewrite.stats.essentDownAcyclicRejected;
+            stats.essentDownInactiveRejected = rewrite.stats.essentDownInactiveRejected;
+            stats.essentDownCandidateRemovedEdges =
+                rewrite.stats.essentDownCandidateRemovedEdges;
+            stats.essentDownAcceptedRemovedEdges =
+                rewrite.stats.essentDownAcceptedRemovedEdges;
             stats.sourceClonesInComputeNodes = rewrite.stats.sourceClonesInComputeNodes;
             stats.localSharedComputeClonesInComputeNodes =
                 rewrite.stats.localSharedComputeClonesInComputeNodes;
@@ -793,11 +846,26 @@ namespace wolvrix::lib::transform
             std::size_t essentSmallOverlapRejectedCycle = 0;
             std::size_t essentSmallOverlapRejectedBounded = 0;
             std::size_t essentSmallOverlapRejectedTopo = 0;
+            std::size_t essentSmallOverlapSmallParts = 0;
+            std::size_t essentSmallOverlapRawCandidates = 0;
+            std::size_t essentSmallOverlapThresholdCandidates = 0;
+            std::size_t essentSmallOverlapAcyclicCandidates = 0;
+            std::size_t essentSmallOverlapAcyclicRejected = 0;
+            std::size_t essentSmallOverlapInactiveRejected = 0;
+            std::size_t essentSmallOverlapCandidateRemovedEdges = 0;
+            std::size_t essentSmallOverlapAcceptedRemovedEdges = 0;
             std::size_t essentDownCandidates = 0;
             std::size_t essentDownRejectedSize = 0;
             std::size_t essentDownRejectedCycle = 0;
             std::size_t essentDownRejectedBounded = 0;
             std::size_t essentDownRejectedTopo = 0;
+            std::size_t essentDownSmallParts = 0;
+            std::size_t essentDownRawCandidates = 0;
+            std::size_t essentDownAcyclicCandidates = 0;
+            std::size_t essentDownAcyclicRejected = 0;
+            std::size_t essentDownInactiveRejected = 0;
+            std::size_t essentDownCandidateRemovedEdges = 0;
+            std::size_t essentDownAcceptedRemovedEdges = 0;
             std::size_t segments = 0;
             std::size_t computeSupernodes = 0;
             std::size_t splitOversizeComputeNodes = 0;
@@ -2874,11 +2942,26 @@ namespace wolvrix::lib::transform
             std::size_t essentSmallOverlapRejectedCycle = 0;
             std::size_t essentSmallOverlapRejectedBounded = 0;
             std::size_t essentSmallOverlapRejectedTopo = 0;
+            std::size_t essentSmallOverlapSmallParts = 0;
+            std::size_t essentSmallOverlapRawCandidates = 0;
+            std::size_t essentSmallOverlapThresholdCandidates = 0;
+            std::size_t essentSmallOverlapAcyclicCandidates = 0;
+            std::size_t essentSmallOverlapAcyclicRejected = 0;
+            std::size_t essentSmallOverlapInactiveRejected = 0;
+            std::size_t essentSmallOverlapCandidateRemovedEdges = 0;
+            std::size_t essentSmallOverlapAcceptedRemovedEdges = 0;
             std::size_t essentDownCandidates = 0;
             std::size_t essentDownRejectedSize = 0;
             std::size_t essentDownRejectedCycle = 0;
             std::size_t essentDownRejectedBounded = 0;
             std::size_t essentDownRejectedTopo = 0;
+            std::size_t essentDownSmallParts = 0;
+            std::size_t essentDownRawCandidates = 0;
+            std::size_t essentDownAcyclicCandidates = 0;
+            std::size_t essentDownAcyclicRejected = 0;
+            std::size_t essentDownInactiveRejected = 0;
+            std::size_t essentDownCandidateRemovedEdges = 0;
+            std::size_t essentDownAcceptedRemovedEdges = 0;
             std::size_t sourceClonesInComputeNodes = 0;
             std::size_t localSharedComputeClonesInComputeNodes = 0;
             std::size_t directSourceInputsToCommitSupernodes = 0;
@@ -4131,6 +4214,14 @@ namespace wolvrix::lib::transform
             std::size_t rejectedCycle = 0;
             std::size_t rejectedBounded = 0;
             std::size_t rejectedTopo = 0;
+            std::size_t smallParts = 0;
+            std::size_t rawCandidates = 0;
+            std::size_t thresholdCandidates = 0;
+            std::size_t acyclicCandidates = 0;
+            std::size_t acyclicRejected = 0;
+            std::size_t inactiveRejected = 0;
+            std::size_t candidateRemovedEdges = 0;
+            std::size_t acceptedRemovedEdges = 0;
         };
 
         void accumulateEssentMergeStats(EssentMergeStats &total, const EssentMergeStats &phase)
@@ -4140,6 +4231,14 @@ namespace wolvrix::lib::transform
             total.rejectedCycle += phase.rejectedCycle;
             total.rejectedBounded += phase.rejectedBounded;
             total.rejectedTopo += phase.rejectedTopo;
+            total.smallParts += phase.smallParts;
+            total.rawCandidates += phase.rawCandidates;
+            total.thresholdCandidates += phase.thresholdCandidates;
+            total.acyclicCandidates += phase.acyclicCandidates;
+            total.acyclicRejected += phase.acyclicRejected;
+            total.inactiveRejected += phase.inactiveRejected;
+            total.candidateRemovedEdges += phase.candidateRemovedEdges;
+            total.acceptedRemovedEdges += phase.acceptedRemovedEdges;
         }
 
         struct UInt32VectorHash
@@ -4215,6 +4314,56 @@ namespace wolvrix::lib::transform
 
             const std::size_t before = totalInDegree + totalOutDegree;
             const std::size_t after = predCount + mergedOut.size();
+            return before > after ? before - after : 0;
+        }
+
+        std::size_t essentEdgesRemovedByPair(const NodeClusterView &view, uint32_t lhs, uint32_t rhs)
+        {
+            if (lhs >= view.members.size() || rhs >= view.members.size() || lhs == rhs)
+            {
+                return 0;
+            }
+            std::vector<uint32_t> mergedIn;
+            mergedIn.reserve(view.preds[lhs].size() + view.preds[rhs].size());
+            for (const uint32_t pred : view.preds[lhs])
+            {
+                if (pred != lhs && pred != rhs)
+                {
+                    mergedIn.push_back(pred);
+                }
+            }
+            for (const uint32_t pred : view.preds[rhs])
+            {
+                if (pred != lhs && pred != rhs)
+                {
+                    mergedIn.push_back(pred);
+                }
+            }
+            std::sort(mergedIn.begin(), mergedIn.end());
+            mergedIn.erase(std::unique(mergedIn.begin(), mergedIn.end()), mergedIn.end());
+
+            std::vector<uint32_t> mergedOut;
+            mergedOut.reserve(view.succs[lhs].size() + view.succs[rhs].size());
+            for (const uint32_t succ : view.succs[lhs])
+            {
+                if (succ != lhs && succ != rhs)
+                {
+                    mergedOut.push_back(succ);
+                }
+            }
+            for (const uint32_t succ : view.succs[rhs])
+            {
+                if (succ != lhs && succ != rhs)
+                {
+                    mergedOut.push_back(succ);
+                }
+            }
+            std::sort(mergedOut.begin(), mergedOut.end());
+            mergedOut.erase(std::unique(mergedOut.begin(), mergedOut.end()), mergedOut.end());
+
+            const std::size_t before = view.preds[lhs].size() + view.preds[rhs].size() +
+                                       view.succs[lhs].size() + view.succs[rhs].size();
+            const std::size_t after = mergedIn.size() + mergedOut.size();
             return before > after ? before - after : 0;
         }
 
@@ -4371,6 +4520,190 @@ namespace wolvrix::lib::transform
             return true;
         }
 
+        struct DynamicEssentClusterDag
+        {
+            DynamicEssentClusterDag(const NodeClusterView &view, DisjointSet &sets)
+                : dsu(sets), succs(view.succs), seen(view.members.size(), 0)
+            {
+                stack.reserve(std::min<std::size_t>(view.members.size(), 4096));
+            }
+
+            uint32_t root(uint32_t id)
+            {
+                return id < succs.size() ? dsu.find(id) : kInvalidActivitySupernodeId;
+            }
+
+            uint32_t nextStamp()
+            {
+                ++stamp;
+                if (stamp == 0)
+                {
+                    std::fill(seen.begin(), seen.end(), 0);
+                    stamp = 1;
+                }
+                return stamp;
+            }
+
+            void compactRoot(uint32_t id)
+            {
+                id = root(id);
+                if (id == kInvalidActivitySupernodeId || id >= succs.size())
+                {
+                    return;
+                }
+                auto &row = succs[id];
+                std::size_t out = 0;
+                for (const uint32_t succ : row)
+                {
+                    const uint32_t succRoot = root(succ);
+                    if (succRoot == kInvalidActivitySupernodeId || succRoot == id)
+                    {
+                        continue;
+                    }
+                    row[out++] = succRoot;
+                }
+                row.resize(out);
+                std::sort(row.begin(), row.end());
+                row.erase(std::unique(row.begin(), row.end()), row.end());
+            }
+
+            EssentPathStatus hasExternalPath(uint32_t from,
+                                             uint32_t to,
+                                             uint32_t lhs,
+                                             uint32_t rhs,
+                                             std::size_t maxVisits)
+            {
+                from = root(from);
+                to = root(to);
+                lhs = root(lhs);
+                rhs = root(rhs);
+                if (from == kInvalidActivitySupernodeId || to == kInvalidActivitySupernodeId ||
+                    from >= succs.size() || to >= succs.size())
+                {
+                    return EssentPathStatus::NoPath;
+                }
+                const uint32_t currentStamp = nextStamp();
+                stack.clear();
+                stack.push_back(from);
+                seen[from] = currentStamp;
+                std::size_t visits = 0;
+                while (!stack.empty())
+                {
+                    const uint32_t node = root(stack.back());
+                    stack.pop_back();
+                    if (node == kInvalidActivitySupernodeId || node >= succs.size())
+                    {
+                        continue;
+                    }
+                    if (++visits > maxVisits)
+                    {
+                        return EssentPathStatus::Bounded;
+                    }
+                    for (const uint32_t succ : succs[node])
+                    {
+                        const uint32_t succRoot = root(succ);
+                        if (succRoot == kInvalidActivitySupernodeId || succRoot == node)
+                        {
+                            continue;
+                        }
+                        if (node == from && succRoot == to)
+                        {
+                            continue;
+                        }
+                        if (succRoot == to)
+                        {
+                            return EssentPathStatus::ExternalPath;
+                        }
+                        if (succRoot == lhs || succRoot == rhs || seen[succRoot] == currentStamp)
+                        {
+                            continue;
+                        }
+                        seen[succRoot] = currentStamp;
+                        stack.push_back(succRoot);
+                    }
+                }
+                return EssentPathStatus::NoPath;
+            }
+
+            bool canMerge(uint32_t lhs, uint32_t rhs, std::size_t maxVisits, EssentMergeStats *stats)
+            {
+                lhs = root(lhs);
+                rhs = root(rhs);
+                if (lhs == kInvalidActivitySupernodeId || rhs == kInvalidActivitySupernodeId ||
+                    lhs == rhs)
+                {
+                    return false;
+                }
+                const EssentPathStatus lhsToRhs =
+                    hasExternalPath(lhs, rhs, lhs, rhs, maxVisits);
+                if (lhsToRhs == EssentPathStatus::Bounded)
+                {
+                    if (stats != nullptr)
+                    {
+                        ++stats->rejectedBounded;
+                    }
+                    return false;
+                }
+                if (lhsToRhs == EssentPathStatus::ExternalPath)
+                {
+                    if (stats != nullptr)
+                    {
+                        ++stats->rejectedCycle;
+                    }
+                    return false;
+                }
+                const EssentPathStatus rhsToLhs =
+                    hasExternalPath(rhs, lhs, lhs, rhs, maxVisits);
+                if (rhsToLhs == EssentPathStatus::Bounded)
+                {
+                    if (stats != nullptr)
+                    {
+                        ++stats->rejectedBounded;
+                    }
+                    return false;
+                }
+                if (rhsToLhs == EssentPathStatus::ExternalPath)
+                {
+                    if (stats != nullptr)
+                    {
+                        ++stats->rejectedCycle;
+                    }
+                    return false;
+                }
+                return true;
+            }
+
+            bool merge(uint32_t lhs, uint32_t rhs)
+            {
+                lhs = root(lhs);
+                rhs = root(rhs);
+                if (lhs == kInvalidActivitySupernodeId || rhs == kInvalidActivitySupernodeId ||
+                    lhs == rhs)
+                {
+                    return false;
+                }
+                if (dsu.size[lhs] < dsu.size[rhs])
+                {
+                    std::swap(lhs, rhs);
+                }
+                dsu.parent[rhs] = lhs;
+                dsu.size[lhs] += dsu.size[rhs];
+                succs[lhs].insert(succs[lhs].end(), succs[rhs].begin(), succs[rhs].end());
+                succs[rhs].clear();
+                if (succs[lhs].size() > 256)
+                {
+                    compactRoot(lhs);
+                }
+                return true;
+            }
+
+            DisjointSet &dsu;
+            std::vector<std::vector<uint32_t>> succs;
+            std::vector<uint32_t> seen;
+            std::vector<uint32_t> stack;
+            uint32_t stamp = 1;
+        };
+
         bool tryEssentMergeSingleParent(std::vector<std::vector<uint32_t>> &clusters,
                                         const std::vector<std::vector<uint32_t>> &nodeDag,
                                         std::size_t nodeCount,
@@ -4441,7 +4774,7 @@ namespace wolvrix::lib::transform
                 }
                 uint32_t lhs = dsu.find(candidate.parent);
                 uint32_t rhs = dsu.find(candidate.child);
-                if (lhs == rhs || static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes)
+                if (lhs == rhs || (maxNodes != 0 && static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes))
                 {
                     if (lhs != rhs && stats != nullptr)
                     {
@@ -4719,7 +5052,7 @@ namespace wolvrix::lib::transform
                     {
                         ++stats->candidates;
                     }
-                    if (base == rhs || static_cast<std::size_t>(dsu.size[base] + dsu.size[rhs]) > maxNodes)
+                    if (base == rhs || (maxNodes != 0 && static_cast<std::size_t>(dsu.size[base] + dsu.size[rhs]) > maxNodes))
                     {
                         if (base != rhs && stats != nullptr)
                         {
@@ -4782,6 +5115,7 @@ namespace wolvrix::lib::transform
                                         std::size_t maxNodes,
                                         std::size_t smallPartCutoff,
                                         double threshold,
+                                        std::size_t candidateBudget,
                                         std::size_t cycleGuardMaxVisits,
                                         const ComputeRewriteBuild &rewrite,
                                         const wolvrix::lib::grh::Graph &graph,
@@ -4801,12 +5135,21 @@ namespace wolvrix::lib::transform
             std::vector<uint32_t> seen(view.members.size(), 0);
             uint32_t stamp = 1;
             std::vector<Candidate> candidates;
+            std::size_t candidateAttempts = 0;
             for (uint32_t id = 0; id < view.members.size(); ++id)
             {
+                if (candidateBudget != 0 && candidateAttempts >= candidateBudget)
+                {
+                    break;
+                }
                 if (clusterOpSize(view.members[id], nodeOpSizes) >= smallPartCutoff ||
                     view.preds[id].empty())
                 {
                     continue;
+                }
+                if (stats != nullptr)
+                {
+                    ++stats->smallParts;
                 }
                 if (stamp == 0)
                 {
@@ -4829,8 +5172,7 @@ namespace wolvrix::lib::transform
                     }
                     for (const auto sibling : view.succs[pred])
                     {
-                        if (sibling != id && sibling < view.members.size() &&
-                            clusterOpSize(view.members[sibling], nodeOpSizes) < smallPartCutoff)
+                        if (sibling != id && sibling < view.members.size())
                         {
                             candidateIds.push_back(sibling);
                         }
@@ -4839,11 +5181,21 @@ namespace wolvrix::lib::transform
                 std::sort(candidateIds.begin(), candidateIds.end());
                 candidateIds.erase(std::unique(candidateIds.begin(), candidateIds.end()),
                                    candidateIds.end());
+                std::optional<Candidate> topChoice;
                 for (const auto sibling : candidateIds)
                 {
-                    if (id > sibling || view.preds[sibling].empty())
+                    if (candidateBudget != 0 && candidateAttempts >= candidateBudget)
+                    {
+                        break;
+                    }
+                    ++candidateAttempts;
+                    if (id <= sibling || view.preds[sibling].empty())
                     {
                         continue;
+                    }
+                    if (stats != nullptr)
+                    {
+                        ++stats->rawCandidates;
                     }
                     std::size_t common = 0;
                     for (const auto pred : view.preds[sibling])
@@ -4853,8 +5205,7 @@ namespace wolvrix::lib::transform
                             ++common;
                         }
                     }
-                    const std::size_t inputCount =
-                        std::max(view.preds[id].size(), view.preds[sibling].size());
+                    const std::size_t inputCount = view.preds[id].size();
                     if (inputCount == 0)
                     {
                         continue;
@@ -4865,37 +5216,65 @@ namespace wolvrix::lib::transform
                     {
                         continue;
                     }
-                    candidates.push_back(Candidate{id,
-                                                   sibling,
-                                                   common,
-                                                   inputCount,
-                                                   view.preds[id].size() + view.preds[sibling].size()});
+                    if (stats != nullptr)
+                    {
+                        ++stats->thresholdCandidates;
+                    }
+                    EssentMergeStats acyclicStats;
+                    if (!canEssentMergeClusters(clusterDag,
+                                                sibling,
+                                                id,
+                                                cycleGuardMaxVisits,
+                                                &acyclicStats))
+                    {
+                        if (stats != nullptr)
+                        {
+                            stats->rejectedCycle += acyclicStats.rejectedCycle;
+                            stats->rejectedBounded += acyclicStats.rejectedBounded;
+                            ++stats->acyclicRejected;
+                        }
+                        continue;
+                    }
+                    if (stats != nullptr)
+                    {
+                        ++stats->acyclicCandidates;
+                    }
+                    Candidate candidate{id,
+                                        sibling,
+                                        common,
+                                        inputCount,
+                                        essentEdgesRemovedByPair(view, id, sibling)};
+                    if (!topChoice.has_value())
+                    {
+                        topChoice = candidate;
+                    }
+                    else
+                    {
+                        const auto &current = *topChoice;
+                        const uint64_t candidateScore =
+                            static_cast<uint64_t>(candidate.commonInputs) * current.inputCount;
+                        const uint64_t currentScore =
+                            static_cast<uint64_t>(current.commonInputs) * candidate.inputCount;
+                        if (candidateScore > currentScore ||
+                            (candidateScore == currentScore &&
+                             (candidate.removedEdges > current.removedEdges ||
+                              (candidate.removedEdges == current.removedEdges &&
+                               candidate.rhs < current.rhs))))
+                        {
+                            topChoice = candidate;
+                        }
+                    }
+                }
+                if (topChoice.has_value())
+                {
+                    if (stats != nullptr)
+                    {
+                        stats->candidateRemovedEdges += topChoice->removedEdges;
+                    }
+                    candidates.push_back(*topChoice);
                 }
                 ++stamp;
             }
-            std::sort(candidates.begin(),
-                      candidates.end(),
-                      [](const auto &lhs, const auto &rhs)
-                      {
-                          const uint64_t lhsScore =
-                              static_cast<uint64_t>(lhs.commonInputs) * rhs.inputCount;
-                          const uint64_t rhsScore =
-                              static_cast<uint64_t>(rhs.commonInputs) * lhs.inputCount;
-                          if (lhsScore != rhsScore)
-                          {
-                              return lhsScore > rhsScore;
-                          }
-                          if (lhs.removedEdges != rhs.removedEdges)
-                          {
-                              return lhs.removedEdges > rhs.removedEdges;
-                          }
-                          if (lhs.lhs != rhs.lhs)
-                          {
-                              return lhs.lhs < rhs.lhs;
-                          }
-                          return lhs.rhs < rhs.rhs;
-                      });
-
             DisjointSet dsu(view.members.size());
             for (uint32_t id = 0; id < view.members.size(); ++id)
             {
@@ -4911,11 +5290,18 @@ namespace wolvrix::lib::transform
                 }
                 uint32_t lhs = dsu.find(candidate.lhs);
                 uint32_t rhs = dsu.find(candidate.rhs);
-                if (lhs == rhs || static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes)
+                if (lhs == rhs || (maxNodes != 0 && static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes))
                 {
-                    if (lhs != rhs && stats != nullptr)
+                    if (stats != nullptr)
                     {
-                        ++stats->rejectedSize;
+                        if (lhs == rhs)
+                        {
+                            ++stats->inactiveRejected;
+                        }
+                        else
+                        {
+                            ++stats->rejectedSize;
+                        }
                     }
                     continue;
                 }
@@ -4927,6 +5313,10 @@ namespace wolvrix::lib::transform
                 {
                     changed = true;
                     ++accepted;
+                    if (stats != nullptr)
+                    {
+                        stats->acceptedRemovedEdges += candidate.removedEdges;
+                    }
                 }
             }
             if (!changed)
@@ -4978,12 +5368,11 @@ namespace wolvrix::lib::transform
         {
             const auto view = buildNodeClusterView(clusters, nodeDag, nodeCount);
             auto clusterDag = buildClusterDagCsr(view.succs);
-            const auto valueEdges = buildClusterValueEdges(view, rewrite, graph);
             struct Candidate
             {
                 uint32_t parent = 0;
                 uint32_t child = 0;
-                std::size_t weight = 0;
+                std::size_t removedEdges = 0;
             };
             std::vector<Candidate> candidates;
             for (uint32_t parent = 0; parent < view.members.size(); ++parent)
@@ -4992,30 +5381,66 @@ namespace wolvrix::lib::transform
                 {
                     continue;
                 }
+                if (stats != nullptr)
+                {
+                    ++stats->smallParts;
+                }
+                std::optional<Candidate> topChoice;
                 for (const auto child : view.succs[parent])
                 {
                     if (child >= view.members.size())
                     {
                         continue;
                     }
-                    const std::size_t weight = clusterEdgeWeight(valueEdges, parent, child);
-                    candidates.push_back(Candidate{parent, child, weight});
+                    if (stats != nullptr)
+                    {
+                        ++stats->rawCandidates;
+                    }
+                    EssentMergeStats acyclicStats;
+                    if (!canEssentMergeClusters(clusterDag,
+                                                parent,
+                                                child,
+                                                cycleGuardMaxVisits,
+                                                &acyclicStats))
+                    {
+                        if (stats != nullptr)
+                        {
+                            stats->rejectedCycle += acyclicStats.rejectedCycle;
+                            stats->rejectedBounded += acyclicStats.rejectedBounded;
+                            ++stats->acyclicRejected;
+                        }
+                        continue;
+                    }
+                    if (stats != nullptr)
+                    {
+                        ++stats->acyclicCandidates;
+                    }
+                    const std::size_t removedEdges = essentEdgesRemovedByPair(view, parent, child);
+                    Candidate candidate{parent, child, removedEdges};
+                    if (!topChoice.has_value())
+                    {
+                        topChoice = candidate;
+                    }
+                    else
+                    {
+                        const auto &current = *topChoice;
+                        if (candidate.removedEdges > current.removedEdges ||
+                            (candidate.removedEdges == current.removedEdges &&
+                             candidate.child < current.child))
+                        {
+                            topChoice = candidate;
+                        }
+                    }
+                }
+                if (topChoice.has_value())
+                {
+                    if (stats != nullptr)
+                    {
+                        stats->candidateRemovedEdges += topChoice->removedEdges;
+                    }
+                    candidates.push_back(*topChoice);
                 }
             }
-            std::sort(candidates.begin(),
-                      candidates.end(),
-                      [](const auto &lhs, const auto &rhs)
-                      {
-                          if (lhs.weight != rhs.weight)
-                          {
-                              return lhs.weight > rhs.weight;
-                          }
-                          if (lhs.parent != rhs.parent)
-                          {
-                              return lhs.parent < rhs.parent;
-                          }
-                          return lhs.child < rhs.child;
-                      });
 
             DisjointSet dsu(view.members.size());
             for (uint32_t id = 0; id < view.members.size(); ++id)
@@ -5024,6 +5449,7 @@ namespace wolvrix::lib::transform
             }
             bool changed = false;
             std::size_t accepted = 0;
+            DynamicEssentClusterDag dynamicDag(view, dsu);
             for (const auto &candidate : candidates)
             {
                 if (stats != nullptr)
@@ -5032,22 +5458,33 @@ namespace wolvrix::lib::transform
                 }
                 uint32_t lhs = dsu.find(candidate.parent);
                 uint32_t rhs = dsu.find(candidate.child);
-                if (lhs == rhs || static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes)
+                if (lhs == rhs || (maxNodes != 0 && static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes))
                 {
-                    if (lhs != rhs && stats != nullptr)
+                    if (stats != nullptr)
                     {
-                        ++stats->rejectedSize;
+                        if (lhs == rhs)
+                        {
+                            ++stats->inactiveRejected;
+                        }
+                        else
+                        {
+                            ++stats->rejectedSize;
+                        }
                     }
                     continue;
                 }
-                if (!canEssentMergeClusters(clusterDag, lhs, rhs, cycleGuardMaxVisits, stats))
+                if (!dynamicDag.canMerge(lhs, rhs, cycleGuardMaxVisits, stats))
                 {
                     continue;
                 }
-                if (dsu.unite(lhs, rhs))
+                if (dynamicDag.merge(lhs, rhs))
                 {
                     changed = true;
                     ++accepted;
+                    if (stats != nullptr)
+                    {
+                        stats->acceptedRemovedEdges += candidate.removedEdges;
+                    }
                 }
             }
             if (!changed)
@@ -6007,11 +6444,8 @@ namespace wolvrix::lib::transform
             {
                 perf = &fallbackPerf;
             }
-            std::size_t maxOpsPerComputeSupernode = options.maxOpInComputeSupernode;
-            if (options.enableEssentCoarsen && options.essentMaxClusterOps != 0)
-            {
-                maxOpsPerComputeSupernode = options.essentMaxClusterOps;
-            }
+            const std::size_t maxOpsPerComputeSupernode = options.maxOpInComputeSupernode;
+            const std::size_t maxOpsPerEssentCluster = 0;
             const std::size_t maxOpsPerSplitComputeNode =
                 options.splitOversizeComputeNodeMaxOps != 0
                     ? options.splitOversizeComputeNodeMaxOps
@@ -6080,7 +6514,7 @@ namespace wolvrix::lib::transform
                                                            rewrite.computeNodes.size(),
                                                            nodeTopoPos,
                                                            nodeOpSizes,
-                                                           maxOpsPerComputeSupernode,
+                                                           maxOpsPerEssentCluster,
                                                            options.essentSmallPartCutoff,
                                                            options.essentCycleGuardMaxVisits,
                                                            rewrite,
@@ -6114,7 +6548,7 @@ namespace wolvrix::lib::transform
                                                           rewrite.computeNodes.size(),
                                                           nodeTopoPos,
                                                           nodeOpSizes,
-                                                          maxOpsPerComputeSupernode,
+                                                          maxOpsPerEssentCluster,
                                                           options.essentSmallPartCutoff,
                                                           options.essentSmallSiblingMaxPreds,
                                                           options.essentSmallSiblingCandidateBudget,
@@ -6162,9 +6596,10 @@ namespace wolvrix::lib::transform
                                                                rewrite.computeNodes.size(),
                                                                nodeTopoPos,
                                                                nodeOpSizes,
-                                                               maxOpsPerComputeSupernode,
+                                                               maxOpsPerEssentCluster,
                                                                options.essentSmallPartCutoff,
                                                                threshold,
+                                                               options.essentSmallOverlapCandidateBudget,
                                                                options.essentCycleGuardMaxVisits,
                                                                rewrite,
                                                                graph,
@@ -6175,6 +6610,22 @@ namespace wolvrix::lib::transform
                         logPhase("small_overlap done clusters=" + std::to_string(clusters.size()) +
                                  " merges=" + std::to_string(smallOverlapMerges) +
                                  " candidates=" + std::to_string(smallOverlapStats.candidates) +
+                                 " small_parts=" + std::to_string(smallOverlapStats.smallParts) +
+                                 " raw=" + std::to_string(smallOverlapStats.rawCandidates) +
+                                 " threshold=" +
+                                 std::to_string(smallOverlapStats.thresholdCandidates) +
+                                 " acyclic=" +
+                                 std::to_string(smallOverlapStats.acyclicCandidates) +
+                                 " acyclic_rejected=" +
+                                 std::to_string(smallOverlapStats.acyclicRejected) +
+                                 " inactive_rejected=" +
+                                 std::to_string(smallOverlapStats.inactiveRejected) +
+                                 " candidate_removed_edges=" +
+                                 std::to_string(smallOverlapStats.candidateRemovedEdges) +
+                                 " accepted_removed_edges=" +
+                                 std::to_string(smallOverlapStats.acceptedRemovedEdges) +
+                                 " candidate_budget=" +
+                                 std::to_string(options.essentSmallOverlapCandidateBudget) +
                                  " elapsed_ms=" + std::to_string(elapsedMs(smallOverlapStart)));
                     }
                     perf->essentSmallOverlapMs = elapsedMs(smallOverlapStart);
@@ -6185,6 +6636,20 @@ namespace wolvrix::lib::transform
                     perf->essentSmallOverlapRejectedCycle = smallOverlapStats.rejectedCycle;
                     perf->essentSmallOverlapRejectedBounded = smallOverlapStats.rejectedBounded;
                     perf->essentSmallOverlapRejectedTopo = smallOverlapStats.rejectedTopo;
+                    perf->essentSmallOverlapSmallParts = smallOverlapStats.smallParts;
+                    perf->essentSmallOverlapRawCandidates = smallOverlapStats.rawCandidates;
+                    perf->essentSmallOverlapThresholdCandidates =
+                        smallOverlapStats.thresholdCandidates;
+                    perf->essentSmallOverlapAcyclicCandidates =
+                        smallOverlapStats.acyclicCandidates;
+                    perf->essentSmallOverlapAcyclicRejected =
+                        smallOverlapStats.acyclicRejected;
+                    perf->essentSmallOverlapInactiveRejected =
+                        smallOverlapStats.inactiveRejected;
+                    perf->essentSmallOverlapCandidateRemovedEdges =
+                        smallOverlapStats.candidateRemovedEdges;
+                    perf->essentSmallOverlapAcceptedRemovedEdges =
+                        smallOverlapStats.acceptedRemovedEdges;
                     perf->essentClustersAfterSmallOverlap = clusters.size();
 
                     std::size_t downMerges = 0;
@@ -6202,7 +6667,7 @@ namespace wolvrix::lib::transform
                                                    rewrite.computeNodes.size(),
                                                    nodeTopoPos,
                                                    nodeOpSizes,
-                                                   maxOpsPerComputeSupernode,
+                                                   maxOpsPerEssentCluster,
                                                    options.essentSmallPartCutoff,
                                                    options.essentCycleGuardMaxVisits,
                                                    rewrite,
@@ -6213,6 +6678,17 @@ namespace wolvrix::lib::transform
                         logPhase("down done clusters=" + std::to_string(clusters.size()) +
                                  " merges=" + std::to_string(downMerges) +
                                  " candidates=" + std::to_string(downStats.candidates) +
+                                 " small_parts=" + std::to_string(downStats.smallParts) +
+                                 " raw=" + std::to_string(downStats.rawCandidates) +
+                                 " acyclic=" + std::to_string(downStats.acyclicCandidates) +
+                                 " acyclic_rejected=" +
+                                 std::to_string(downStats.acyclicRejected) +
+                                 " inactive_rejected=" +
+                                 std::to_string(downStats.inactiveRejected) +
+                                 " candidate_removed_edges=" +
+                                 std::to_string(downStats.candidateRemovedEdges) +
+                                 " accepted_removed_edges=" +
+                                 std::to_string(downStats.acceptedRemovedEdges) +
                                  " elapsed_ms=" + std::to_string(elapsedMs(downStart)));
                     }
                     perf->essentDownMs = elapsedMs(downStart);
@@ -6223,6 +6699,13 @@ namespace wolvrix::lib::transform
                     perf->essentDownRejectedCycle = downStats.rejectedCycle;
                     perf->essentDownRejectedBounded = downStats.rejectedBounded;
                     perf->essentDownRejectedTopo = downStats.rejectedTopo;
+                    perf->essentDownSmallParts = downStats.smallParts;
+                    perf->essentDownRawCandidates = downStats.rawCandidates;
+                    perf->essentDownAcyclicCandidates = downStats.acyclicCandidates;
+                    perf->essentDownAcyclicRejected = downStats.acyclicRejected;
+                    perf->essentDownInactiveRejected = downStats.inactiveRejected;
+                    perf->essentDownCandidateRemovedEdges = downStats.candidateRemovedEdges;
+                    perf->essentDownAcceptedRemovedEdges = downStats.acceptedRemovedEdges;
                     perf->essentClustersAfterDown = clusters.size();
                     perf->clustersAfterEssentCoarsen = clusters.size();
                     perf->essentMergeCandidates = totalMergeStats.candidates;
@@ -6268,11 +6751,39 @@ namespace wolvrix::lib::transform
                     rewrite.stats.essentSmallOverlapRejectedBounded =
                         perf->essentSmallOverlapRejectedBounded;
                     rewrite.stats.essentSmallOverlapRejectedTopo = perf->essentSmallOverlapRejectedTopo;
+                    rewrite.stats.essentSmallOverlapSmallParts =
+                        perf->essentSmallOverlapSmallParts;
+                    rewrite.stats.essentSmallOverlapRawCandidates =
+                        perf->essentSmallOverlapRawCandidates;
+                    rewrite.stats.essentSmallOverlapThresholdCandidates =
+                        perf->essentSmallOverlapThresholdCandidates;
+                    rewrite.stats.essentSmallOverlapAcyclicCandidates =
+                        perf->essentSmallOverlapAcyclicCandidates;
+                    rewrite.stats.essentSmallOverlapAcyclicRejected =
+                        perf->essentSmallOverlapAcyclicRejected;
+                    rewrite.stats.essentSmallOverlapInactiveRejected =
+                        perf->essentSmallOverlapInactiveRejected;
+                    rewrite.stats.essentSmallOverlapCandidateRemovedEdges =
+                        perf->essentSmallOverlapCandidateRemovedEdges;
+                    rewrite.stats.essentSmallOverlapAcceptedRemovedEdges =
+                        perf->essentSmallOverlapAcceptedRemovedEdges;
                     rewrite.stats.essentDownCandidates = perf->essentDownCandidates;
                     rewrite.stats.essentDownRejectedSize = perf->essentDownRejectedSize;
                     rewrite.stats.essentDownRejectedCycle = perf->essentDownRejectedCycle;
                     rewrite.stats.essentDownRejectedBounded = perf->essentDownRejectedBounded;
                     rewrite.stats.essentDownRejectedTopo = perf->essentDownRejectedTopo;
+                    rewrite.stats.essentDownSmallParts = perf->essentDownSmallParts;
+                    rewrite.stats.essentDownRawCandidates = perf->essentDownRawCandidates;
+                    rewrite.stats.essentDownAcyclicCandidates =
+                        perf->essentDownAcyclicCandidates;
+                    rewrite.stats.essentDownAcyclicRejected =
+                        perf->essentDownAcyclicRejected;
+                    rewrite.stats.essentDownInactiveRejected =
+                        perf->essentDownInactiveRejected;
+                    rewrite.stats.essentDownCandidateRemovedEdges =
+                        perf->essentDownCandidateRemovedEdges;
+                    rewrite.stats.essentDownAcceptedRemovedEdges =
+                        perf->essentDownAcceptedRemovedEdges;
                 }
                 else
                 {
@@ -7030,13 +7541,43 @@ namespace wolvrix::lib::transform
                 std::to_string(materializePerf.essentSmallOverlapRejectedCycle) +
                 " small_overlap_rejected_bounded=" +
                 std::to_string(materializePerf.essentSmallOverlapRejectedBounded) +
+                " small_overlap_small_parts=" +
+                std::to_string(materializePerf.essentSmallOverlapSmallParts) +
+                " small_overlap_raw=" +
+                std::to_string(materializePerf.essentSmallOverlapRawCandidates) +
+                " small_overlap_threshold=" +
+                std::to_string(materializePerf.essentSmallOverlapThresholdCandidates) +
+                " small_overlap_acyclic=" +
+                std::to_string(materializePerf.essentSmallOverlapAcyclicCandidates) +
+                " small_overlap_acyclic_rejected=" +
+                std::to_string(materializePerf.essentSmallOverlapAcyclicRejected) +
+                " small_overlap_inactive_rejected=" +
+                std::to_string(materializePerf.essentSmallOverlapInactiveRejected) +
+                " small_overlap_candidate_removed_edges=" +
+                std::to_string(materializePerf.essentSmallOverlapCandidateRemovedEdges) +
+                " small_overlap_accepted_removed_edges=" +
+                std::to_string(materializePerf.essentSmallOverlapAcceptedRemovedEdges) +
                 " down_candidates=" + std::to_string(materializePerf.essentDownCandidates) +
                 " down_rejected_size=" +
                 std::to_string(materializePerf.essentDownRejectedSize) +
                 " down_rejected_cycle=" +
                 std::to_string(materializePerf.essentDownRejectedCycle) +
                 " down_rejected_bounded=" +
-                std::to_string(materializePerf.essentDownRejectedBounded));
+                std::to_string(materializePerf.essentDownRejectedBounded) +
+                " down_small_parts=" +
+                std::to_string(materializePerf.essentDownSmallParts) +
+                " down_raw=" +
+                std::to_string(materializePerf.essentDownRawCandidates) +
+                " down_acyclic=" +
+                std::to_string(materializePerf.essentDownAcyclicCandidates) +
+                " down_acyclic_rejected=" +
+                std::to_string(materializePerf.essentDownAcyclicRejected) +
+                " down_inactive_rejected=" +
+                std::to_string(materializePerf.essentDownInactiveRejected) +
+                " down_candidate_removed_edges=" +
+                std::to_string(materializePerf.essentDownCandidateRemovedEdges) +
+                " down_accepted_removed_edges=" +
+                std::to_string(materializePerf.essentDownAcceptedRemovedEdges));
         for (const auto &iter : materializePerf.coarsenIterationStats)
         {
             logInfo("activity-schedule timing: compute_node_coarsen_iter=" +

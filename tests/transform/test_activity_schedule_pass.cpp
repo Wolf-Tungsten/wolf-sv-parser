@@ -820,6 +820,93 @@ int main()
     }
 
     {
+        currentCase = "essent_coarsen_small_overlap_large_sibling";
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("essent_coarsen_small_overlap_large_sibling");
+        design.markAsTop("essent_coarsen_small_overlap_large_sibling");
+
+        const auto a = makeValue(graph, "a", 8);
+        const auto b = makeValue(graph, "b", 8);
+        const auto c = makeValue(graph, "c", 8);
+        const auto d = makeValue(graph, "d", 8);
+        const auto e = makeValue(graph, "e", 8);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+        graph.bindInputPort("d", d);
+        graph.bindInputPort("e", e);
+
+        const auto p0 = makeValue(graph, "large_overlap_p0", 8);
+        const auto p0Op = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                graph.internSymbol("large_overlap_p0_op"));
+        graph.addOperand(p0Op, a);
+        graph.addOperand(p0Op, b);
+        graph.addResult(p0Op, p0);
+
+        const auto p1 = makeValue(graph, "large_overlap_p1", 8);
+        const auto p1Op = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                graph.internSymbol("large_overlap_p1_op"));
+        graph.addOperand(p1Op, a);
+        graph.addOperand(p1Op, c);
+        graph.addResult(p1Op, p1);
+
+        auto cursor = p1;
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto next = makeValue(graph, "large_overlap_sibling_" + std::to_string(i), 8);
+            const auto op = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                  graph.internSymbol("large_overlap_sibling_op_" + std::to_string(i)));
+            graph.addOperand(op, cursor);
+            graph.addOperand(op, i == 0 ? d : e);
+            graph.addResult(op, next);
+            cursor = next;
+        }
+        graph.bindOutputPort("large_sibling", cursor);
+
+        const auto smallChild = makeValue(graph, "large_overlap_small_child", 8);
+        const auto smallChildOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kAnd,
+                                                       graph.internSymbol("large_overlap_small_child_op"));
+        graph.addOperand(smallChildOp, p0);
+        graph.addOperand(smallChildOp, p1);
+        graph.addResult(smallChildOp, smallChild);
+        graph.bindOutputPort("small_child", smallChild);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "essent_coarsen_small_overlap_large_sibling",
+            .maxOpInComputeSupernode = 8,
+            .maxOpInComputeNode = 16,
+            .essentSmallPartCutoff = 4,
+            .essentOverlapThreshold1 = 0.5,
+            .essentOverlapThreshold2 = 0.0,
+            .enableCoarsen = true,
+            .enableEssentMffcBuild = true,
+            .enableEssentCoarsen = true,
+            .enableEssentSingleParentMerge = false,
+            .enableEssentSmallSiblingMerge = false,
+            .enableEssentDownMerge = false,
+        }));
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected ESSENT small-overlap with large sibling to succeed");
+        }
+        const auto schedule = loadSchedule(session, "essent_coarsen_small_overlap_large_sibling");
+        if (const int rc = validateCommonScheduleShape(graph, schedule); rc != 0)
+        {
+            return rc;
+        }
+        if (schedule.summaryStats->find("\"essent_small_overlap_merges\":1") == std::string::npos)
+        {
+            return fail("Expected small-overlap to merge a non-small sibling candidate: " +
+                        *schedule.summaryStats);
+        }
+    }
+
+    {
         currentCase = "essent_cycle_guard_bounded_reject";
         wolvrix::lib::grh::Design design;
         auto &graph = design.createGraph("essent_cycle_guard_bounded_reject");
