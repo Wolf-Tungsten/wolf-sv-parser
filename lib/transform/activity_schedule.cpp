@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -352,6 +353,84 @@ namespace wolvrix::lib::transform
             out << ",\"other_compute_duplicate_activation_edges\":" << stats.otherComputeDuplicateActivationEdges;
             out << ",\"compute_nodes\":" << stats.computeNodes;
             out << ",\"compute_node_ops_total\":" << stats.computeNodeOpsTotal;
+            out << ",\"initial_compute_supernodes\":" << stats.initialComputeSupernodes;
+            out << ",\"initial_compute_supernode_ops_total\":"
+                << stats.initialComputeSupernodeOpsTotal;
+            out << ",\"initial_compute_supernode_dag_edges\":"
+                << stats.initialComputeSupernodeDagEdges;
+            out << ",\"initial_boundary_values\":" << stats.initialBoundaryValues;
+            out << ",\"initial_boundary_activation_edges\":"
+                << stats.initialBoundaryActivationEdges;
+            out << ",\"essent_clusters_before_coarsen\":"
+                << stats.essentClustersBeforeCoarsen;
+            out << ",\"essent_clusters_after_mffc\":" << stats.essentClustersAfterMffc;
+            out << ",\"essent_clusters_after_single_parent\":"
+                << stats.essentClustersAfterSingleParent;
+            out << ",\"essent_clusters_after_small_siblings\":"
+                << stats.essentClustersAfterSmallSiblings;
+            out << ",\"essent_clusters_after_small_overlap\":"
+                << stats.essentClustersAfterSmallOverlap;
+            out << ",\"essent_clusters_after_down\":" << stats.essentClustersAfterDown;
+            out << ",\"clusters_after_essent_coarsen\":"
+                << stats.clustersAfterEssentCoarsen;
+            out << ",\"essent_single_parent_merges\":"
+                << stats.essentSingleParentMerges;
+            out << ",\"essent_small_sibling_merges\":"
+                << stats.essentSmallSiblingMerges;
+            out << ",\"essent_small_overlap_merges\":"
+                << stats.essentSmallOverlapMerges;
+            out << ",\"essent_down_merges\":"
+                << stats.essentDownMerges;
+            out << ",\"essent_merge_candidates\":"
+                << stats.essentMergeCandidates;
+            out << ",\"essent_merge_rejected_size\":"
+                << stats.essentMergeRejectedSize;
+            out << ",\"essent_merge_rejected_cycle\":"
+                << stats.essentMergeRejectedCycle;
+            out << ",\"essent_merge_rejected_bounded\":"
+                << stats.essentMergeRejectedBounded;
+            out << ",\"essent_merge_rejected_topo\":"
+                << stats.essentMergeRejectedTopo;
+            out << ",\"essent_single_parent_candidates\":"
+                << stats.essentSingleParentCandidates;
+            out << ",\"essent_single_parent_rejected_size\":"
+                << stats.essentSingleParentRejectedSize;
+            out << ",\"essent_single_parent_rejected_cycle\":"
+                << stats.essentSingleParentRejectedCycle;
+            out << ",\"essent_single_parent_rejected_bounded\":"
+                << stats.essentSingleParentRejectedBounded;
+            out << ",\"essent_single_parent_rejected_topo\":"
+                << stats.essentSingleParentRejectedTopo;
+            out << ",\"essent_small_sibling_candidates\":"
+                << stats.essentSmallSiblingCandidates;
+            out << ",\"essent_small_sibling_rejected_size\":"
+                << stats.essentSmallSiblingRejectedSize;
+            out << ",\"essent_small_sibling_rejected_cycle\":"
+                << stats.essentSmallSiblingRejectedCycle;
+            out << ",\"essent_small_sibling_rejected_bounded\":"
+                << stats.essentSmallSiblingRejectedBounded;
+            out << ",\"essent_small_sibling_rejected_topo\":"
+                << stats.essentSmallSiblingRejectedTopo;
+            out << ",\"essent_small_overlap_candidates\":"
+                << stats.essentSmallOverlapCandidates;
+            out << ",\"essent_small_overlap_rejected_size\":"
+                << stats.essentSmallOverlapRejectedSize;
+            out << ",\"essent_small_overlap_rejected_cycle\":"
+                << stats.essentSmallOverlapRejectedCycle;
+            out << ",\"essent_small_overlap_rejected_bounded\":"
+                << stats.essentSmallOverlapRejectedBounded;
+            out << ",\"essent_small_overlap_rejected_topo\":"
+                << stats.essentSmallOverlapRejectedTopo;
+            out << ",\"essent_down_candidates\":"
+                << stats.essentDownCandidates;
+            out << ",\"essent_down_rejected_size\":"
+                << stats.essentDownRejectedSize;
+            out << ",\"essent_down_rejected_cycle\":"
+                << stats.essentDownRejectedCycle;
+            out << ",\"essent_down_rejected_bounded\":"
+                << stats.essentDownRejectedBounded;
+            out << ",\"essent_down_rejected_topo\":"
+                << stats.essentDownRejectedTopo;
             out << ",\"source_clones_in_compute_nodes\":" << stats.sourceClonesInComputeNodes;
             out << ",\"local_shared_compute_clones_in_compute_nodes\":"
                 << stats.localSharedComputeClonesInComputeNodes;
@@ -407,6 +486,53 @@ namespace wolvrix::lib::transform
             stats.supernodes = build.supernodeToOps.size();
             stats.computeNodes = rewrite.stats.computeNodes;
             stats.computeNodeOpsTotal = rewrite.stats.computeNodeOpsTotal;
+            stats.initialComputeSupernodes = rewrite.stats.initialComputeSupernodes;
+            stats.initialComputeSupernodeOpsTotal =
+                rewrite.stats.initialComputeSupernodeOpsTotal;
+            stats.initialComputeSupernodeDagEdges =
+                rewrite.stats.initialComputeSupernodeDagEdges;
+            stats.initialBoundaryValues = rewrite.stats.initialBoundaryValues;
+            stats.initialBoundaryActivationEdges =
+                rewrite.stats.initialBoundaryActivationEdges;
+            stats.essentClustersBeforeCoarsen = rewrite.stats.essentClustersBeforeCoarsen;
+            stats.essentClustersAfterMffc = rewrite.stats.essentClustersAfterMffc;
+            stats.essentClustersAfterSingleParent =
+                rewrite.stats.essentClustersAfterSingleParent;
+            stats.essentClustersAfterSmallSiblings =
+                rewrite.stats.essentClustersAfterSmallSiblings;
+            stats.essentClustersAfterSmallOverlap =
+                rewrite.stats.essentClustersAfterSmallOverlap;
+            stats.essentClustersAfterDown = rewrite.stats.essentClustersAfterDown;
+            stats.clustersAfterEssentCoarsen = rewrite.stats.clustersAfterEssentCoarsen;
+            stats.essentSingleParentMerges = rewrite.stats.essentSingleParentMerges;
+            stats.essentSmallSiblingMerges = rewrite.stats.essentSmallSiblingMerges;
+            stats.essentSmallOverlapMerges = rewrite.stats.essentSmallOverlapMerges;
+            stats.essentDownMerges = rewrite.stats.essentDownMerges;
+            stats.essentMergeCandidates = rewrite.stats.essentMergeCandidates;
+            stats.essentMergeRejectedSize = rewrite.stats.essentMergeRejectedSize;
+            stats.essentMergeRejectedCycle = rewrite.stats.essentMergeRejectedCycle;
+            stats.essentMergeRejectedBounded = rewrite.stats.essentMergeRejectedBounded;
+            stats.essentMergeRejectedTopo = rewrite.stats.essentMergeRejectedTopo;
+            stats.essentSingleParentCandidates = rewrite.stats.essentSingleParentCandidates;
+            stats.essentSingleParentRejectedSize = rewrite.stats.essentSingleParentRejectedSize;
+            stats.essentSingleParentRejectedCycle = rewrite.stats.essentSingleParentRejectedCycle;
+            stats.essentSingleParentRejectedBounded = rewrite.stats.essentSingleParentRejectedBounded;
+            stats.essentSingleParentRejectedTopo = rewrite.stats.essentSingleParentRejectedTopo;
+            stats.essentSmallSiblingCandidates = rewrite.stats.essentSmallSiblingCandidates;
+            stats.essentSmallSiblingRejectedSize = rewrite.stats.essentSmallSiblingRejectedSize;
+            stats.essentSmallSiblingRejectedCycle = rewrite.stats.essentSmallSiblingRejectedCycle;
+            stats.essentSmallSiblingRejectedBounded = rewrite.stats.essentSmallSiblingRejectedBounded;
+            stats.essentSmallSiblingRejectedTopo = rewrite.stats.essentSmallSiblingRejectedTopo;
+            stats.essentSmallOverlapCandidates = rewrite.stats.essentSmallOverlapCandidates;
+            stats.essentSmallOverlapRejectedSize = rewrite.stats.essentSmallOverlapRejectedSize;
+            stats.essentSmallOverlapRejectedCycle = rewrite.stats.essentSmallOverlapRejectedCycle;
+            stats.essentSmallOverlapRejectedBounded = rewrite.stats.essentSmallOverlapRejectedBounded;
+            stats.essentSmallOverlapRejectedTopo = rewrite.stats.essentSmallOverlapRejectedTopo;
+            stats.essentDownCandidates = rewrite.stats.essentDownCandidates;
+            stats.essentDownRejectedSize = rewrite.stats.essentDownRejectedSize;
+            stats.essentDownRejectedCycle = rewrite.stats.essentDownRejectedCycle;
+            stats.essentDownRejectedBounded = rewrite.stats.essentDownRejectedBounded;
+            stats.essentDownRejectedTopo = rewrite.stats.essentDownRejectedTopo;
             stats.sourceClonesInComputeNodes = rewrite.stats.sourceClonesInComputeNodes;
             stats.localSharedComputeClonesInComputeNodes =
                 rewrite.stats.localSharedComputeClonesInComputeNodes;
@@ -618,6 +744,10 @@ namespace wolvrix::lib::transform
             std::uint64_t initClustersMs = 0;
             std::uint64_t topoBeforeCoarsenMs = 0;
             std::uint64_t coarsenMs = 0;
+            std::uint64_t essentSingleParentMs = 0;
+            std::uint64_t essentSmallSiblingMs = 0;
+            std::uint64_t essentSmallOverlapMs = 0;
+            std::uint64_t essentDownMs = 0;
             std::uint64_t topoAfterCoarsenMs = 0;
             std::uint64_t buildClusterViewMs = 0;
             std::uint64_t dpSegmentMs = 0;
@@ -632,8 +762,46 @@ namespace wolvrix::lib::transform
             std::size_t coarsenOut1Merges = 0;
             std::size_t coarsenIn1Merges = 0;
             std::size_t coarsenBoundaryMerges = 0;
+            std::size_t essentClustersBeforeCoarsen = 0;
+            std::size_t essentClustersAfterMffc = 0;
+            std::size_t essentClustersAfterSingleParent = 0;
+            std::size_t essentClustersAfterSmallSiblings = 0;
+            std::size_t essentClustersAfterSmallOverlap = 0;
+            std::size_t essentClustersAfterDown = 0;
+            std::size_t clustersAfterEssentCoarsen = 0;
+            std::size_t essentSingleParentMerges = 0;
+            std::size_t essentSmallSiblingMerges = 0;
+            std::size_t essentSmallOverlapMerges = 0;
+            std::size_t essentDownMerges = 0;
+            std::size_t essentMergeCandidates = 0;
+            std::size_t essentMergeRejectedSize = 0;
+            std::size_t essentMergeRejectedCycle = 0;
+            std::size_t essentMergeRejectedBounded = 0;
+            std::size_t essentMergeRejectedTopo = 0;
+            std::size_t essentSingleParentCandidates = 0;
+            std::size_t essentSingleParentRejectedSize = 0;
+            std::size_t essentSingleParentRejectedCycle = 0;
+            std::size_t essentSingleParentRejectedBounded = 0;
+            std::size_t essentSingleParentRejectedTopo = 0;
+            std::size_t essentSmallSiblingCandidates = 0;
+            std::size_t essentSmallSiblingRejectedSize = 0;
+            std::size_t essentSmallSiblingRejectedCycle = 0;
+            std::size_t essentSmallSiblingRejectedBounded = 0;
+            std::size_t essentSmallSiblingRejectedTopo = 0;
+            std::size_t essentSmallOverlapCandidates = 0;
+            std::size_t essentSmallOverlapRejectedSize = 0;
+            std::size_t essentSmallOverlapRejectedCycle = 0;
+            std::size_t essentSmallOverlapRejectedBounded = 0;
+            std::size_t essentSmallOverlapRejectedTopo = 0;
+            std::size_t essentDownCandidates = 0;
+            std::size_t essentDownRejectedSize = 0;
+            std::size_t essentDownRejectedCycle = 0;
+            std::size_t essentDownRejectedBounded = 0;
+            std::size_t essentDownRejectedTopo = 0;
             std::size_t segments = 0;
             std::size_t computeSupernodes = 0;
+            std::size_t splitOversizeComputeNodes = 0;
+            std::size_t splitOversizeComputeNodeSupernodes = 0;
             std::vector<CoarsenIteration> coarsenIterationStats;
         };
 
@@ -2670,6 +2838,47 @@ namespace wolvrix::lib::transform
 
             std::size_t computeNodes = 0;
             std::size_t computeNodeOpsTotal = 0;
+            std::size_t initialComputeSupernodes = 0;
+            std::size_t initialComputeSupernodeOpsTotal = 0;
+            std::size_t initialComputeSupernodeDagEdges = 0;
+            std::size_t initialBoundaryValues = 0;
+            std::size_t initialBoundaryActivationEdges = 0;
+            std::size_t essentClustersBeforeCoarsen = 0;
+            std::size_t essentClustersAfterMffc = 0;
+            std::size_t essentClustersAfterSingleParent = 0;
+            std::size_t essentClustersAfterSmallSiblings = 0;
+            std::size_t essentClustersAfterSmallOverlap = 0;
+            std::size_t essentClustersAfterDown = 0;
+            std::size_t clustersAfterEssentCoarsen = 0;
+            std::size_t essentSingleParentMerges = 0;
+            std::size_t essentSmallSiblingMerges = 0;
+            std::size_t essentSmallOverlapMerges = 0;
+            std::size_t essentDownMerges = 0;
+            std::size_t essentMergeCandidates = 0;
+            std::size_t essentMergeRejectedSize = 0;
+            std::size_t essentMergeRejectedCycle = 0;
+            std::size_t essentMergeRejectedBounded = 0;
+            std::size_t essentMergeRejectedTopo = 0;
+            std::size_t essentSingleParentCandidates = 0;
+            std::size_t essentSingleParentRejectedSize = 0;
+            std::size_t essentSingleParentRejectedCycle = 0;
+            std::size_t essentSingleParentRejectedBounded = 0;
+            std::size_t essentSingleParentRejectedTopo = 0;
+            std::size_t essentSmallSiblingCandidates = 0;
+            std::size_t essentSmallSiblingRejectedSize = 0;
+            std::size_t essentSmallSiblingRejectedCycle = 0;
+            std::size_t essentSmallSiblingRejectedBounded = 0;
+            std::size_t essentSmallSiblingRejectedTopo = 0;
+            std::size_t essentSmallOverlapCandidates = 0;
+            std::size_t essentSmallOverlapRejectedSize = 0;
+            std::size_t essentSmallOverlapRejectedCycle = 0;
+            std::size_t essentSmallOverlapRejectedBounded = 0;
+            std::size_t essentSmallOverlapRejectedTopo = 0;
+            std::size_t essentDownCandidates = 0;
+            std::size_t essentDownRejectedSize = 0;
+            std::size_t essentDownRejectedCycle = 0;
+            std::size_t essentDownRejectedBounded = 0;
+            std::size_t essentDownRejectedTopo = 0;
             std::size_t sourceClonesInComputeNodes = 0;
             std::size_t localSharedComputeClonesInComputeNodes = 0;
             std::size_t directSourceInputsToCommitSupernodes = 0;
@@ -2977,6 +3186,25 @@ namespace wolvrix::lib::transform
             return std::find(values.begin(), values.end(), value) != values.end();
         }
 
+        std::vector<wolvrix::lib::grh::OperationId>
+        uniqueOpsPreservingOrder(const std::vector<wolvrix::lib::grh::OperationId> &ops)
+        {
+            std::vector<wolvrix::lib::grh::OperationId> out;
+            out.reserve(ops.size());
+            std::unordered_set<wolvrix::lib::grh::OperationId,
+                               wolvrix::lib::grh::OperationIdHash>
+                seen;
+            seen.reserve(ops.size());
+            for (const auto opId : ops)
+            {
+                if (seen.insert(opId).second)
+                {
+                    out.push_back(opId);
+                }
+            }
+            return out;
+        }
+
         bool isDeclaredValue(const wolvrix::lib::grh::Graph &graph,
                              wolvrix::lib::grh::ValueId value) noexcept
         {
@@ -3193,6 +3421,31 @@ namespace wolvrix::lib::transform
         {
             const auto it = edges.weights.find(packClusterPair(from, to));
             return it == edges.weights.end() ? 0 : it->second;
+        }
+
+        std::vector<uint32_t> computeNodeOpSizes(const ComputeRewriteBuild &rewrite)
+        {
+            std::vector<uint32_t> out;
+            out.reserve(rewrite.computeNodes.size());
+            for (const auto &node : rewrite.computeNodes)
+            {
+                out.push_back(static_cast<uint32_t>(node.ops.size()));
+            }
+            return out;
+        }
+
+        std::size_t clusterOpSize(const std::vector<uint32_t> &members,
+                                  const std::vector<uint32_t> &nodeOpSizes)
+        {
+            std::size_t total = 0;
+            for (const uint32_t node : members)
+            {
+                if (node < nodeOpSizes.size())
+                {
+                    total += nodeOpSizes[node];
+                }
+            }
+            return total;
         }
 
         std::vector<uint32_t> topoOrderForDag(const std::vector<std::vector<uint32_t>> &dag)
@@ -3871,8 +4124,969 @@ namespace wolvrix::lib::transform
             return true;
         }
 
+        struct EssentMergeStats
+        {
+            std::size_t candidates = 0;
+            std::size_t rejectedSize = 0;
+            std::size_t rejectedCycle = 0;
+            std::size_t rejectedBounded = 0;
+            std::size_t rejectedTopo = 0;
+        };
+
+        void accumulateEssentMergeStats(EssentMergeStats &total, const EssentMergeStats &phase)
+        {
+            total.candidates += phase.candidates;
+            total.rejectedSize += phase.rejectedSize;
+            total.rejectedCycle += phase.rejectedCycle;
+            total.rejectedBounded += phase.rejectedBounded;
+            total.rejectedTopo += phase.rejectedTopo;
+        }
+
+        struct UInt32VectorHash
+        {
+            std::size_t operator()(const std::vector<uint32_t> &values) const noexcept
+            {
+                std::size_t seed = values.size();
+                for (const uint32_t value : values)
+                {
+                    seed ^= static_cast<std::size_t>(value) + 0x9e3779b9u + (seed << 6) + (seed >> 2);
+                }
+                return seed;
+            }
+        };
+
+        std::uint64_t hashUInt32Range(const std::vector<uint32_t> &values)
+        {
+            std::uint64_t hash = 1469598103934665603ull;
+            hash ^= static_cast<std::uint64_t>(values.size());
+            hash *= 1099511628211ull;
+            for (const uint32_t value : values)
+            {
+                hash ^= static_cast<std::uint64_t>(value) + 0x9e3779b97f4a7c15ull;
+                hash *= 1099511628211ull;
+            }
+            return hash;
+        }
+
+        std::size_t essentEdgesRemovedByMergeReq(const NodeClusterView &view,
+                                                 const std::vector<uint32_t> &mergeReq)
+        {
+            if (mergeReq.size() < 2)
+            {
+                return 0;
+            }
+            const uint32_t first = mergeReq.front();
+            if (first >= view.members.size())
+            {
+                return 0;
+            }
+            const std::size_t predCount = view.preds[first].size();
+            std::size_t totalInDegree = predCount;
+            std::size_t totalOutDegree = 0;
+            std::vector<uint32_t> sortedMerge = mergeReq;
+            std::sort(sortedMerge.begin(), sortedMerge.end());
+            sortedMerge.erase(std::unique(sortedMerge.begin(), sortedMerge.end()), sortedMerge.end());
+            std::vector<uint32_t> mergedOut;
+            for (const uint32_t id : mergeReq)
+            {
+                if (id >= view.members.size())
+                {
+                    continue;
+                }
+                if (view.preds[id] != view.preds[first])
+                {
+                    return 0;
+                }
+                if (id != first)
+                {
+                    totalInDegree += predCount;
+                }
+                totalOutDegree += view.succs[id].size();
+                for (const uint32_t succ : view.succs[id])
+                {
+                    if (!std::binary_search(sortedMerge.begin(), sortedMerge.end(), succ))
+                    {
+                        mergedOut.push_back(succ);
+                    }
+                }
+            }
+            std::sort(mergedOut.begin(), mergedOut.end());
+            mergedOut.erase(std::unique(mergedOut.begin(), mergedOut.end()), mergedOut.end());
+
+            const std::size_t before = totalInDegree + totalOutDegree;
+            const std::size_t after = predCount + mergedOut.size();
+            return before > after ? before - after : 0;
+        }
+
+        enum class EssentPathStatus : uint8_t
+        {
+            NoPath,
+            ExternalPath,
+            Bounded,
+        };
+
+        struct ClusterDagCsr
+        {
+            std::vector<uint32_t> succOffsets;
+            std::vector<uint32_t> succs;
+            std::vector<uint32_t> seen;
+            std::vector<uint32_t> stack;
+            uint32_t stamp = 1;
+        };
+
+        ClusterDagCsr buildClusterDagCsr(const std::vector<std::vector<uint32_t>> &succs)
+        {
+            ClusterDagCsr out;
+            out.succOffsets.reserve(succs.size() + 1);
+            out.succOffsets.push_back(0);
+            std::size_t edgeCount = 0;
+            for (const auto &row : succs)
+            {
+                edgeCount += row.size();
+            }
+            out.succs.reserve(edgeCount);
+            for (const auto &row : succs)
+            {
+                out.succs.insert(out.succs.end(), row.begin(), row.end());
+                out.succOffsets.push_back(static_cast<uint32_t>(out.succs.size()));
+            }
+            out.seen.assign(succs.size(), 0);
+            out.stack.reserve(std::min<std::size_t>(succs.size(), 4096));
+            return out;
+        }
+
+        uint32_t nextClusterDagStamp(ClusterDagCsr &csr)
+        {
+            ++csr.stamp;
+            if (csr.stamp == 0)
+            {
+                std::fill(csr.seen.begin(), csr.seen.end(), 0);
+                csr.stamp = 1;
+            }
+            return csr.stamp;
+        }
+
+        EssentPathStatus hasExternalPathBetweenClusters(ClusterDagCsr &csr,
+                                                        uint32_t from,
+                                                        uint32_t to,
+                                                        uint32_t lhs,
+                                                        uint32_t rhs,
+                                                        std::size_t maxVisits)
+        {
+            if (from + 1 >= csr.succOffsets.size() || to + 1 >= csr.succOffsets.size())
+            {
+                return EssentPathStatus::NoPath;
+            }
+            const uint32_t stamp = nextClusterDagStamp(csr);
+            csr.stack.clear();
+            csr.stack.push_back(from);
+            csr.seen[from] = stamp;
+            std::size_t visits = 0;
+            while (!csr.stack.empty())
+            {
+                const uint32_t node = csr.stack.back();
+                csr.stack.pop_back();
+                if (++visits > maxVisits)
+                {
+                    return EssentPathStatus::Bounded;
+                }
+                if (node + 1 >= csr.succOffsets.size())
+                {
+                    continue;
+                }
+                const uint32_t begin = csr.succOffsets[node];
+                const uint32_t end = csr.succOffsets[node + 1];
+                for (uint32_t edge = begin; edge < end; ++edge)
+                {
+                    const uint32_t succ = csr.succs[edge];
+                    if (succ >= csr.seen.size())
+                    {
+                        continue;
+                    }
+                    if (node == from && succ == to)
+                    {
+                        continue;
+                    }
+                    if (succ == to)
+                    {
+                        return EssentPathStatus::ExternalPath;
+                    }
+                    if (succ == lhs || succ == rhs || csr.seen[succ] == stamp)
+                    {
+                        continue;
+                    }
+                    csr.seen[succ] = stamp;
+                    csr.stack.push_back(succ);
+                }
+            }
+            return EssentPathStatus::NoPath;
+        }
+
+        bool canEssentMergeClusters(ClusterDagCsr &clusterDag,
+                                    uint32_t lhs,
+                                    uint32_t rhs,
+                                    std::size_t maxVisits,
+                                    EssentMergeStats *stats)
+        {
+            if (lhs == rhs)
+            {
+                return false;
+            }
+            const EssentPathStatus lhsToRhs =
+                hasExternalPathBetweenClusters(clusterDag, lhs, rhs, lhs, rhs, maxVisits);
+            if (lhsToRhs == EssentPathStatus::Bounded)
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->rejectedBounded;
+                }
+                return false;
+            }
+            if (lhsToRhs == EssentPathStatus::ExternalPath)
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->rejectedCycle;
+                }
+                return false;
+            }
+            const EssentPathStatus rhsToLhs =
+                hasExternalPathBetweenClusters(clusterDag, rhs, lhs, lhs, rhs, maxVisits);
+            if (rhsToLhs == EssentPathStatus::Bounded)
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->rejectedBounded;
+                }
+                return false;
+            }
+            if (rhsToLhs == EssentPathStatus::ExternalPath)
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->rejectedCycle;
+                }
+                return false;
+            }
+            return true;
+        }
+
+        bool tryEssentMergeSingleParent(std::vector<std::vector<uint32_t>> &clusters,
+                                        const std::vector<std::vector<uint32_t>> &nodeDag,
+                                        std::size_t nodeCount,
+                                        const std::vector<uint32_t> &nodeTopoPos,
+                                        const std::vector<uint32_t> &nodeOpSizes,
+                                        std::size_t maxNodes,
+                                        std::size_t smallPartCutoff,
+                                        std::size_t cycleGuardMaxVisits,
+                                        const ComputeRewriteBuild &rewrite,
+                                        const wolvrix::lib::grh::Graph &graph,
+                                        std::size_t *mergeCount,
+                                        EssentMergeStats *stats)
+        {
+            const auto view = buildNodeClusterView(clusters, nodeDag, nodeCount);
+            auto clusterDag = buildClusterDagCsr(view.succs);
+            struct Candidate
+            {
+                uint32_t parent = 0;
+                uint32_t child = 0;
+            };
+            std::vector<Candidate> candidates;
+            candidates.reserve(view.members.size());
+            for (uint32_t child = 0; child < view.members.size(); ++child)
+            {
+                if (clusterOpSize(view.members[child], nodeOpSizes) >= smallPartCutoff ||
+                    view.preds[child].size() != 1)
+                {
+                    continue;
+                }
+                const uint32_t parent = view.preds[child].front();
+                if (parent >= view.members.size() || parent == child)
+                {
+                    continue;
+                }
+                candidates.push_back(Candidate{parent, child});
+            }
+            std::sort(candidates.begin(),
+                      candidates.end(),
+                      [&](const auto &lhs, const auto &rhs)
+                      {
+                          const std::size_t lhsRemoved =
+                              view.preds[lhs.child].size() + view.succs[lhs.parent].size();
+                          const std::size_t rhsRemoved =
+                              view.preds[rhs.child].size() + view.succs[rhs.parent].size();
+                          if (lhsRemoved != rhsRemoved)
+                          {
+                              return lhsRemoved > rhsRemoved;
+                          }
+                          if (lhs.parent != rhs.parent)
+                          {
+                              return lhs.parent < rhs.parent;
+                          }
+                          return lhs.child < rhs.child;
+                      });
+
+            DisjointSet dsu(view.members.size());
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                dsu.size[id] = static_cast<uint32_t>(clusterOpSize(view.members[id], nodeOpSizes));
+            }
+            bool changed = false;
+            std::size_t accepted = 0;
+            for (const auto &candidate : candidates)
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->candidates;
+                }
+                uint32_t lhs = dsu.find(candidate.parent);
+                uint32_t rhs = dsu.find(candidate.child);
+                if (lhs == rhs || static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes)
+                {
+                    if (lhs != rhs && stats != nullptr)
+                    {
+                        ++stats->rejectedSize;
+                    }
+                    continue;
+                }
+                if (!canEssentMergeClusters(clusterDag, lhs, rhs, cycleGuardMaxVisits, stats))
+                {
+                    continue;
+                }
+                if (dsu.unite(lhs, rhs))
+                {
+                    changed = true;
+                    ++accepted;
+                }
+            }
+            if (!changed)
+            {
+                return false;
+            }
+
+            std::unordered_map<uint32_t, uint32_t> rootToCluster;
+            std::vector<std::vector<uint32_t>> out;
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                const uint32_t root = dsu.find(id);
+                auto [it, inserted] = rootToCluster.emplace(root, static_cast<uint32_t>(out.size()));
+                if (inserted)
+                {
+                    out.push_back({});
+                }
+                out[it->second].insert(out[it->second].end(), view.members[id].begin(), view.members[id].end());
+            }
+            out = canonicalizeNodeClusters(std::move(out), nodeTopoPos);
+            if (!orderNodeClustersTopologically(out, nodeDag, nodeCount, &rewrite, &graph))
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->rejectedTopo;
+                }
+                return false;
+            }
+            clusters = std::move(out);
+            if (mergeCount != nullptr)
+            {
+                *mergeCount += accepted;
+            }
+            return true;
+        }
+
+        bool tryEssentMergeSmallSiblings(std::vector<std::vector<uint32_t>> &clusters,
+                                         const std::vector<std::vector<uint32_t>> &nodeDag,
+                                         std::size_t nodeCount,
+                                         const std::vector<uint32_t> &nodeTopoPos,
+                                         const std::vector<uint32_t> &nodeOpSizes,
+                                         std::size_t maxNodes,
+                                         std::size_t smallPartCutoff,
+                                         std::size_t maxPreds,
+                                         std::size_t candidateBudget,
+                                         const ComputeRewriteBuild &rewrite,
+                                         const wolvrix::lib::grh::Graph &graph,
+                                         std::size_t *mergeCount,
+                                         EssentMergeStats *stats)
+        {
+            const auto view = buildNodeClusterView(clusters, nodeDag, nodeCount);
+            struct SiblingGroup
+            {
+                std::vector<uint32_t> ids;
+                std::size_t edgesRemoved = 0;
+            };
+            std::vector<SiblingGroup> groups;
+            const auto addSiblingGroup = [&](std::vector<uint32_t> ids)
+            {
+                if (ids.size() < 2)
+                {
+                    return;
+                }
+                std::sort(ids.begin(), ids.end());
+                ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+                if (ids.size() < 2)
+                {
+                    return;
+                }
+                const std::size_t edgesRemoved = essentEdgesRemovedByMergeReq(view, ids);
+                if (edgesRemoved == 0)
+                {
+                    return;
+                }
+                groups.push_back(SiblingGroup{std::move(ids), edgesRemoved});
+            };
+            if (maxPreds == 1)
+            {
+                groups.reserve(view.members.size() / 8 + 1);
+                for (uint32_t parent = 0; parent < view.succs.size(); ++parent)
+                {
+                    std::vector<uint32_t> group;
+                    for (const uint32_t child : view.succs[parent])
+                    {
+                        if (child >= view.members.size() ||
+                            clusterOpSize(view.members[child], nodeOpSizes) >= smallPartCutoff ||
+                            view.preds[child].size() != 1 ||
+                            view.preds[child].front() != parent)
+                        {
+                            continue;
+                        }
+                        group.push_back(child);
+                    }
+                    if (group.size() > 1)
+                    {
+                        addSiblingGroup(std::move(group));
+                    }
+                }
+            }
+            else
+            {
+                struct Entry
+                {
+                    std::uint64_t signature = 0;
+                    std::size_t predCount = 0;
+                    uint32_t id = 0;
+                };
+
+                std::vector<Entry> entries;
+                entries.reserve(std::min<std::size_t>(view.members.size(), candidateBudget == 0 ? view.members.size()
+                                                                                                : candidateBudget));
+                const auto addEntryIfEligible = [&](uint32_t id, std::size_t expectedPredCount) -> bool
+                {
+                    if (clusterOpSize(view.members[id], nodeOpSizes) >= smallPartCutoff ||
+                        view.preds[id].empty())
+                    {
+                        return false;
+                    }
+                    if (expectedPredCount != 0 && view.preds[id].size() != expectedPredCount)
+                    {
+                        return false;
+                    }
+                    if (maxPreds != 0 && view.preds[id].size() > maxPreds)
+                    {
+                        return false;
+                    }
+                    entries.push_back(Entry{hashUInt32Range(view.preds[id]), view.preds[id].size(), id});
+                    return true;
+                };
+
+                if (maxPreds == 0)
+                {
+                    for (uint32_t id = 0; id < view.members.size(); ++id)
+                    {
+                        if (candidateBudget != 0 && entries.size() >= candidateBudget)
+                        {
+                            break;
+                        }
+                        (void)addEntryIfEligible(id, 0);
+                    }
+                }
+                else
+                {
+                    for (std::size_t predCount = 1; predCount <= maxPreds; ++predCount)
+                    {
+                        for (uint32_t id = 0; id < view.members.size(); ++id)
+                        {
+                            if (candidateBudget != 0 && entries.size() >= candidateBudget)
+                            {
+                                break;
+                            }
+                            (void)addEntryIfEligible(id, predCount);
+                        }
+                        if (candidateBudget != 0 && entries.size() >= candidateBudget)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                std::sort(entries.begin(),
+                          entries.end(),
+                          [](const auto &lhs, const auto &rhs)
+                          {
+                              if (lhs.signature != rhs.signature)
+                              {
+                                  return lhs.signature < rhs.signature;
+                              }
+                              if (lhs.predCount != rhs.predCount)
+                              {
+                                  return lhs.predCount < rhs.predCount;
+                              }
+                              return lhs.id < rhs.id;
+                          });
+
+                groups.reserve(entries.size() / 4 + 1);
+                std::vector<uint32_t> currentGroup;
+                for (std::size_t begin = 0; begin < entries.size();)
+                {
+                    std::size_t end = begin + 1;
+                    while (end < entries.size() &&
+                           entries[end].signature == entries[begin].signature &&
+                           entries[end].predCount == entries[begin].predCount)
+                    {
+                        ++end;
+                    }
+
+                    std::sort(entries.begin() + static_cast<std::ptrdiff_t>(begin),
+                              entries.begin() + static_cast<std::ptrdiff_t>(end),
+                              [&](const auto &lhs, const auto &rhs)
+                              {
+                                  const auto &lhsPreds = view.preds[lhs.id];
+                                  const auto &rhsPreds = view.preds[rhs.id];
+                                  if (lhsPreds != rhsPreds)
+                                  {
+                                      return lhsPreds < rhsPreds;
+                                  }
+                                  return lhs.id < rhs.id;
+                              });
+
+                    for (std::size_t exactBegin = begin; exactBegin < end;)
+                    {
+                        std::size_t exactEnd = exactBegin + 1;
+                        while (exactEnd < end &&
+                               view.preds[entries[exactEnd].id] == view.preds[entries[exactBegin].id])
+                        {
+                            ++exactEnd;
+                        }
+                        if (exactEnd - exactBegin > 1)
+                        {
+                            currentGroup.clear();
+                            currentGroup.reserve(exactEnd - exactBegin);
+                            for (std::size_t i = exactBegin; i < exactEnd; ++i)
+                            {
+                                currentGroup.push_back(entries[i].id);
+                            }
+                            addSiblingGroup(currentGroup);
+                        }
+                        exactBegin = exactEnd;
+                    }
+                    begin = end;
+                }
+            }
+            std::sort(groups.begin(),
+                      groups.end(),
+                      [&](const auto &lhs, const auto &rhs)
+                      {
+                          if (lhs.edgesRemoved != rhs.edgesRemoved)
+                          {
+                              return lhs.edgesRemoved > rhs.edgesRemoved;
+                          }
+                          if (lhs.ids.size() != rhs.ids.size())
+                          {
+                              return lhs.ids.size() > rhs.ids.size();
+                          }
+                          return lhs.ids < rhs.ids;
+                      });
+
+            DisjointSet dsu(view.members.size());
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                dsu.size[id] = static_cast<uint32_t>(clusterOpSize(view.members[id], nodeOpSizes));
+            }
+
+            bool changed = false;
+            std::size_t accepted = 0;
+            for (const auto &groupInfo : groups)
+            {
+                const auto &group = groupInfo.ids;
+                if (group.empty())
+                {
+                    continue;
+                }
+                uint32_t base = dsu.find(group.front());
+                for (std::size_t i = 1; i < group.size(); ++i)
+                {
+                    uint32_t rhs = dsu.find(group[i]);
+                    base = dsu.find(base);
+                    if (stats != nullptr)
+                    {
+                        ++stats->candidates;
+                    }
+                    if (base == rhs || static_cast<std::size_t>(dsu.size[base] + dsu.size[rhs]) > maxNodes)
+                    {
+                        if (base != rhs && stats != nullptr)
+                        {
+                            ++stats->rejectedSize;
+                        }
+                        continue;
+                    }
+                    // Clusters in the same C2 group have exactly the same predecessor set.
+                    // In a DAG, such siblings cannot be mutually reachable, so merging them
+                    // cannot introduce a cycle. Avoiding per-candidate reachability checks is
+                    // what keeps C2 practical on XiangShan-sized graphs.
+                    if (dsu.unite(base, rhs))
+                    {
+                        const uint32_t root = dsu.find(base);
+                        base = root;
+                        changed = true;
+                        ++accepted;
+                    }
+                }
+            }
+            if (!changed)
+            {
+                return false;
+            }
+
+            std::unordered_map<uint32_t, uint32_t> rootToCluster;
+            std::vector<std::vector<uint32_t>> out;
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                const uint32_t root = dsu.find(id);
+                auto [it, inserted] = rootToCluster.emplace(root, static_cast<uint32_t>(out.size()));
+                if (inserted)
+                {
+                    out.push_back({});
+                }
+                out[it->second].insert(out[it->second].end(), view.members[id].begin(), view.members[id].end());
+            }
+            out = canonicalizeNodeClusters(std::move(out), nodeTopoPos);
+            if (!orderNodeClustersTopologically(out, nodeDag, nodeCount, nullptr, nullptr))
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->rejectedTopo;
+                }
+                return false;
+            }
+            clusters = std::move(out);
+            if (mergeCount != nullptr)
+            {
+                *mergeCount += accepted;
+            }
+            return true;
+        }
+
+        bool tryEssentMergeSmallOverlap(std::vector<std::vector<uint32_t>> &clusters,
+                                        const std::vector<std::vector<uint32_t>> &nodeDag,
+                                        std::size_t nodeCount,
+                                        const std::vector<uint32_t> &nodeTopoPos,
+                                        const std::vector<uint32_t> &nodeOpSizes,
+                                        std::size_t maxNodes,
+                                        std::size_t smallPartCutoff,
+                                        double threshold,
+                                        std::size_t cycleGuardMaxVisits,
+                                        const ComputeRewriteBuild &rewrite,
+                                        const wolvrix::lib::grh::Graph &graph,
+                                        std::size_t *mergeCount,
+                                        EssentMergeStats *stats)
+        {
+            const auto view = buildNodeClusterView(clusters, nodeDag, nodeCount);
+            auto clusterDag = buildClusterDagCsr(view.succs);
+            struct Candidate
+            {
+                uint32_t lhs = 0;
+                uint32_t rhs = 0;
+                std::size_t commonInputs = 0;
+                std::size_t inputCount = 0;
+                std::size_t removedEdges = 0;
+            };
+            std::vector<uint32_t> seen(view.members.size(), 0);
+            uint32_t stamp = 1;
+            std::vector<Candidate> candidates;
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                if (clusterOpSize(view.members[id], nodeOpSizes) >= smallPartCutoff ||
+                    view.preds[id].empty())
+                {
+                    continue;
+                }
+                if (stamp == 0)
+                {
+                    std::fill(seen.begin(), seen.end(), 0);
+                    stamp = 1;
+                }
+                for (const auto pred : view.preds[id])
+                {
+                    if (pred < view.members.size())
+                    {
+                        seen[pred] = stamp;
+                    }
+                }
+                std::vector<uint32_t> candidateIds;
+                for (const auto pred : view.preds[id])
+                {
+                    if (pred >= view.succs.size())
+                    {
+                        continue;
+                    }
+                    for (const auto sibling : view.succs[pred])
+                    {
+                        if (sibling != id && sibling < view.members.size() &&
+                            clusterOpSize(view.members[sibling], nodeOpSizes) < smallPartCutoff)
+                        {
+                            candidateIds.push_back(sibling);
+                        }
+                    }
+                }
+                std::sort(candidateIds.begin(), candidateIds.end());
+                candidateIds.erase(std::unique(candidateIds.begin(), candidateIds.end()),
+                                   candidateIds.end());
+                for (const auto sibling : candidateIds)
+                {
+                    if (id > sibling || view.preds[sibling].empty())
+                    {
+                        continue;
+                    }
+                    std::size_t common = 0;
+                    for (const auto pred : view.preds[sibling])
+                    {
+                        if (pred < seen.size() && seen[pred] == stamp)
+                        {
+                            ++common;
+                        }
+                    }
+                    const std::size_t inputCount =
+                        std::max(view.preds[id].size(), view.preds[sibling].size());
+                    if (inputCount == 0)
+                    {
+                        continue;
+                    }
+                    const double fraction =
+                        static_cast<double>(common) / static_cast<double>(inputCount);
+                    if (fraction + 1e-12 < threshold)
+                    {
+                        continue;
+                    }
+                    candidates.push_back(Candidate{id,
+                                                   sibling,
+                                                   common,
+                                                   inputCount,
+                                                   view.preds[id].size() + view.preds[sibling].size()});
+                }
+                ++stamp;
+            }
+            std::sort(candidates.begin(),
+                      candidates.end(),
+                      [](const auto &lhs, const auto &rhs)
+                      {
+                          const uint64_t lhsScore =
+                              static_cast<uint64_t>(lhs.commonInputs) * rhs.inputCount;
+                          const uint64_t rhsScore =
+                              static_cast<uint64_t>(rhs.commonInputs) * lhs.inputCount;
+                          if (lhsScore != rhsScore)
+                          {
+                              return lhsScore > rhsScore;
+                          }
+                          if (lhs.removedEdges != rhs.removedEdges)
+                          {
+                              return lhs.removedEdges > rhs.removedEdges;
+                          }
+                          if (lhs.lhs != rhs.lhs)
+                          {
+                              return lhs.lhs < rhs.lhs;
+                          }
+                          return lhs.rhs < rhs.rhs;
+                      });
+
+            DisjointSet dsu(view.members.size());
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                dsu.size[id] = static_cast<uint32_t>(clusterOpSize(view.members[id], nodeOpSizes));
+            }
+            bool changed = false;
+            std::size_t accepted = 0;
+            for (const auto &candidate : candidates)
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->candidates;
+                }
+                uint32_t lhs = dsu.find(candidate.lhs);
+                uint32_t rhs = dsu.find(candidate.rhs);
+                if (lhs == rhs || static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes)
+                {
+                    if (lhs != rhs && stats != nullptr)
+                    {
+                        ++stats->rejectedSize;
+                    }
+                    continue;
+                }
+                if (!canEssentMergeClusters(clusterDag, lhs, rhs, cycleGuardMaxVisits, stats))
+                {
+                    continue;
+                }
+                if (dsu.unite(lhs, rhs))
+                {
+                    changed = true;
+                    ++accepted;
+                }
+            }
+            if (!changed)
+            {
+                return false;
+            }
+
+            std::unordered_map<uint32_t, uint32_t> rootToCluster;
+            std::vector<std::vector<uint32_t>> out;
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                const uint32_t root = dsu.find(id);
+                auto [it, inserted] = rootToCluster.emplace(root, static_cast<uint32_t>(out.size()));
+                if (inserted)
+                {
+                    out.push_back({});
+                }
+                out[it->second].insert(out[it->second].end(), view.members[id].begin(), view.members[id].end());
+            }
+            out = canonicalizeNodeClusters(std::move(out), nodeTopoPos);
+            if (!orderNodeClustersTopologically(out, nodeDag, nodeCount, &rewrite, &graph))
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->rejectedTopo;
+                }
+                return false;
+            }
+            clusters = std::move(out);
+            if (mergeCount != nullptr)
+            {
+                *mergeCount += accepted;
+            }
+            return true;
+        }
+
+        bool tryEssentMergeDown(std::vector<std::vector<uint32_t>> &clusters,
+                                const std::vector<std::vector<uint32_t>> &nodeDag,
+                                std::size_t nodeCount,
+                                const std::vector<uint32_t> &nodeTopoPos,
+                                const std::vector<uint32_t> &nodeOpSizes,
+                                std::size_t maxNodes,
+                                std::size_t smallPartCutoff,
+                                std::size_t cycleGuardMaxVisits,
+                                const ComputeRewriteBuild &rewrite,
+                                const wolvrix::lib::grh::Graph &graph,
+                                std::size_t *mergeCount,
+                                EssentMergeStats *stats)
+        {
+            const auto view = buildNodeClusterView(clusters, nodeDag, nodeCount);
+            auto clusterDag = buildClusterDagCsr(view.succs);
+            const auto valueEdges = buildClusterValueEdges(view, rewrite, graph);
+            struct Candidate
+            {
+                uint32_t parent = 0;
+                uint32_t child = 0;
+                std::size_t weight = 0;
+            };
+            std::vector<Candidate> candidates;
+            for (uint32_t parent = 0; parent < view.members.size(); ++parent)
+            {
+                if (clusterOpSize(view.members[parent], nodeOpSizes) >= smallPartCutoff)
+                {
+                    continue;
+                }
+                for (const auto child : view.succs[parent])
+                {
+                    if (child >= view.members.size())
+                    {
+                        continue;
+                    }
+                    const std::size_t weight = clusterEdgeWeight(valueEdges, parent, child);
+                    candidates.push_back(Candidate{parent, child, weight});
+                }
+            }
+            std::sort(candidates.begin(),
+                      candidates.end(),
+                      [](const auto &lhs, const auto &rhs)
+                      {
+                          if (lhs.weight != rhs.weight)
+                          {
+                              return lhs.weight > rhs.weight;
+                          }
+                          if (lhs.parent != rhs.parent)
+                          {
+                              return lhs.parent < rhs.parent;
+                          }
+                          return lhs.child < rhs.child;
+                      });
+
+            DisjointSet dsu(view.members.size());
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                dsu.size[id] = static_cast<uint32_t>(clusterOpSize(view.members[id], nodeOpSizes));
+            }
+            bool changed = false;
+            std::size_t accepted = 0;
+            for (const auto &candidate : candidates)
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->candidates;
+                }
+                uint32_t lhs = dsu.find(candidate.parent);
+                uint32_t rhs = dsu.find(candidate.child);
+                if (lhs == rhs || static_cast<std::size_t>(dsu.size[lhs] + dsu.size[rhs]) > maxNodes)
+                {
+                    if (lhs != rhs && stats != nullptr)
+                    {
+                        ++stats->rejectedSize;
+                    }
+                    continue;
+                }
+                if (!canEssentMergeClusters(clusterDag, lhs, rhs, cycleGuardMaxVisits, stats))
+                {
+                    continue;
+                }
+                if (dsu.unite(lhs, rhs))
+                {
+                    changed = true;
+                    ++accepted;
+                }
+            }
+            if (!changed)
+            {
+                return false;
+            }
+
+            std::unordered_map<uint32_t, uint32_t> rootToCluster;
+            std::vector<std::vector<uint32_t>> out;
+            for (uint32_t id = 0; id < view.members.size(); ++id)
+            {
+                const uint32_t root = dsu.find(id);
+                auto [it, inserted] = rootToCluster.emplace(root, static_cast<uint32_t>(out.size()));
+                if (inserted)
+                {
+                    out.push_back({});
+                }
+                out[it->second].insert(out[it->second].end(), view.members[id].begin(), view.members[id].end());
+            }
+            out = canonicalizeNodeClusters(std::move(out), nodeTopoPos);
+            if (!orderNodeClustersTopologically(out, nodeDag, nodeCount, &rewrite, &graph))
+            {
+                if (stats != nullptr)
+                {
+                    ++stats->rejectedTopo;
+                }
+                return false;
+            }
+            clusters = std::move(out);
+            if (mergeCount != nullptr)
+            {
+                *mergeCount += accepted;
+            }
+            return true;
+        }
+
         std::vector<std::vector<uint32_t>> buildComputeSupernodeSegments(const NodeClusterView &view,
                                                                          const ClusterValueEdges &valueEdges,
+                                                                         const std::vector<uint32_t> &nodeOpSizes,
                                                                          std::size_t maxNodes)
         {
             const std::size_t count = view.members.size();
@@ -3884,7 +5098,7 @@ namespace wolvrix::lib::transform
             std::vector<std::size_t> prefixSize(count + 1, 0);
             for (std::size_t i = 0; i < count; ++i)
             {
-                prefixSize[i + 1] = prefixSize[i] + view.members[i].size();
+                prefixSize[i + 1] = prefixSize[i] + clusterOpSize(view.members[i], nodeOpSizes);
             }
 
             auto segmentSize = [&](std::size_t begin, std::size_t end) {
@@ -4028,15 +5242,17 @@ namespace wolvrix::lib::transform
                               std::string &error)
         {
             out.clear();
-            if (ops.size() < 2)
+            const std::vector<wolvrix::lib::grh::OperationId> uniqueOps =
+                uniqueOpsPreservingOrder(ops);
+            if (uniqueOps.size() < 2)
             {
-                out = ops;
+                out = uniqueOps;
                 return true;
             }
 
             std::unordered_set<wolvrix::lib::grh::OperationId, wolvrix::lib::grh::OperationIdHash> local;
-            local.reserve(ops.size());
-            for (const auto opId : ops)
+            local.reserve(uniqueOps.size());
+            for (const auto opId : uniqueOps)
             {
                 local.insert(opId);
             }
@@ -4044,12 +5260,12 @@ namespace wolvrix::lib::transform
             wolvrix::lib::toposort::TopoDag<wolvrix::lib::grh::OperationId,
                                             wolvrix::lib::grh::OperationIdHash>
                 dag;
-            dag.reserveNodes(ops.size());
-            for (const auto opId : ops)
+            dag.reserveNodes(uniqueOps.size());
+            for (const auto opId : uniqueOps)
             {
                 dag.addNode(opId);
             }
-            for (const auto opId : ops)
+            for (const auto opId : uniqueOps)
             {
                 for (const auto operand : graph.opOperands(opId))
                 {
@@ -4064,7 +5280,7 @@ namespace wolvrix::lib::transform
             try
             {
                 const auto layers = dag.toposort();
-                out.reserve(ops.size());
+                out.reserve(uniqueOps.size());
                 for (const auto &layer : layers)
                 {
                     std::vector<wolvrix::lib::grh::OperationId> ordered(layer.begin(), layer.end());
@@ -4073,10 +5289,10 @@ namespace wolvrix::lib::transform
                               [](const auto lhs, const auto rhs)
                               {
                                   return lhs.index < rhs.index;
-                              });
+                    });
                     out.insert(out.end(), ordered.begin(), ordered.end());
                 }
-                if (out.size() == ops.size())
+                if (out.size() == uniqueOps.size())
                 {
                     return true;
                 }
@@ -4087,8 +5303,8 @@ namespace wolvrix::lib::transform
             {
                 std::ostringstream oss;
                 oss << "activity-schedule local op topo failed: " << ex.what()
-                    << " ops=" << ops.size();
-                const std::size_t limit = std::min<std::size_t>(ops.size(), 12);
+                    << " ops=" << uniqueOps.size();
+                const std::size_t limit = std::min<std::size_t>(uniqueOps.size(), 12);
                 oss << " sample=[";
                 for (std::size_t i = 0; i < limit; ++i)
                 {
@@ -4096,9 +5312,9 @@ namespace wolvrix::lib::transform
                     {
                         oss << ",";
                     }
-                    oss << describeOp(graph, ops[i]);
+                    oss << describeOp(graph, uniqueOps[i]);
                 }
-                if (ops.size() > limit)
+                if (uniqueOps.size() > limit)
                 {
                     oss << ",...";
                 }
@@ -4279,14 +5495,528 @@ namespace wolvrix::lib::transform
             return true;
         }
 
+        bool buildEssentMffcComputeNodeRewrite(wolvrix::lib::grh::Graph &graph,
+                                               const ActivityScheduleOptions &options,
+                                               const ActivityOpData &opData,
+                                               std::vector<ActivityOpClass> &opClasses,
+                                               const ValueCanonicalMap &canonicalValues,
+                                               ComputeRewriteBuild &out,
+                                               std::string &error)
+        {
+            using wolvrix::lib::grh::OperationId;
+            using wolvrix::lib::grh::OperationIdHash;
+            using wolvrix::lib::grh::ValueId;
+            using wolvrix::lib::grh::ValueIdHash;
+
+            out = ComputeRewriteBuild{};
+            out.computeNodeOfOp.assign(opClasses.size(), kInvalidActivitySupernodeId);
+
+            const std::size_t maxCommitOps = options.maxOpInCommitSupernode;
+            std::vector<uint32_t> sinkTopoPositions;
+            sinkTopoPositions.reserve(opData.topoOps.size());
+            for (uint32_t topoPos = 0; topoPos < opData.topoOps.size(); ++topoPos)
+            {
+                const auto opId = opData.topoOps[topoPos];
+                if (opId.index < opClasses.size() && opClasses[opId.index] == ActivityOpClass::Sink)
+                {
+                    sinkTopoPositions.push_back(topoPos);
+                }
+            }
+            WorkingPartition sinkPartition =
+                buildEventClusteredSinkPartition(graph,
+                                                 opData,
+                                                 sinkTopoPositions,
+                                                 maxCommitOps,
+                                                 &canonicalValues);
+            out.stats.commitSinkOps = sinkTopoPositions.size();
+            out.stats.commitEventKeyRuns = sinkPartition.clusters.size();
+            {
+                std::unordered_set<std::string> uniqueEventKeys;
+                uniqueEventKeys.reserve(sinkTopoPositions.size());
+                for (const auto topoPos : sinkTopoPositions)
+                {
+                    uniqueEventKeys.insert(
+                        normalizedSinkEventKey(graph, graph.getOperation(opData.topoOps[topoPos]), &canonicalValues));
+                }
+                out.stats.commitEventKeys = uniqueEventKeys.size();
+            }
+            for (const auto &cluster : sinkPartition.clusters)
+            {
+                CommitNode commit;
+                for (const auto topoPos : cluster)
+                {
+                    const auto sinkOp = opData.topoOps[topoPos];
+                    commit.ops.push_back(sinkOp);
+                    for (const auto operand : graph.opOperands(sinkOp))
+                    {
+                        if (!vectorContainsValue(commit.inputValues, operand))
+                        {
+                            commit.inputValues.push_back(operand);
+                            ++out.stats.commitInputRootValues;
+                        }
+                    }
+                }
+                out.commitNodes.push_back(std::move(commit));
+            }
+
+            std::vector<ValueId> rootValues;
+            auto addRootValue = [&](ValueId value) {
+                if (value.valid() && !vectorContainsValue(rootValues, value))
+                {
+                    rootValues.push_back(value);
+                }
+            };
+            for (const auto &commit : out.commitNodes)
+            {
+                for (const auto value : commit.inputValues)
+                {
+                    if (!value.valid() || value.graph != graph.id())
+                    {
+                        error = "activity-schedule essent-mffc commit root value ownership mismatch";
+                        return false;
+                    }
+                    const auto defOp = graph.valueDef(value);
+                    if (defOp.valid() && defOp.index < opClasses.size() &&
+                        opClasses[defOp.index] == ActivityOpClass::Source)
+                    {
+                        ++out.stats.directSourceInputsToCommitSupernodes;
+                    }
+                    addRootValue(value);
+                }
+            }
+            for (const auto &port : graph.outputPorts())
+            {
+                addRootValue(port.value);
+            }
+            for (const auto &port : graph.inoutPorts())
+            {
+                addRootValue(port.out);
+                addRootValue(port.oe);
+            }
+
+            std::unordered_map<OperationId, uint32_t, OperationIdHash> mffcRootNode;
+            std::vector<std::vector<OperationId>> pendingNodeOps;
+            std::vector<std::vector<ValueId>> pendingNodeBoundaryInputs;
+            std::unordered_set<OperationId, OperationIdHash> assignedOps;
+
+            auto ensureOpIndex = [&](OperationId opId) {
+                if (opId.index >= out.computeNodeOfOp.size())
+                {
+                    out.computeNodeOfOp.resize(opId.index + 1, kInvalidActivitySupernodeId);
+                }
+            };
+
+            auto valueHasExternalConsumer = [&](ValueId value, OperationId currentUser) {
+                if (isObservableRootValue(graph, value))
+                {
+                    return true;
+                }
+                const auto valueInfo = graph.getValue(value);
+                for (const auto &user : valueInfo.users())
+                {
+                    if (!user.operation.valid() || user.operation == currentUser)
+                    {
+                        continue;
+                    }
+                    if (user.operation.index >= opClasses.size())
+                    {
+                        continue;
+                    }
+                    const ActivityOpClass userClass = opClasses[user.operation.index];
+                    if (userClass == ActivityOpClass::Compute || userClass == ActivityOpClass::Sink)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            const std::size_t maxOpsInNode = std::max<std::size_t>(1, options.maxOpInComputeNode);
+            auto createNodeFromRoot = [&](auto &&self, OperationId rootOp) -> uint32_t {
+                if (!rootOp.valid() || rootOp.index >= opClasses.size())
+                {
+                    return kInvalidActivitySupernodeId;
+                }
+                const ActivityOpClass rootClass = opClasses[rootOp.index];
+                if (rootClass == ActivityOpClass::Sink)
+                {
+                    error = "activity-schedule essent-mffc encountered sink predecessor root=" +
+                            describeOp(graph, rootOp);
+                    return kInvalidActivitySupernodeId;
+                }
+                if (rootClass != ActivityOpClass::Compute && rootClass != ActivityOpClass::Source)
+                {
+                    return kInvalidActivitySupernodeId;
+                }
+
+                if (rootClass == ActivityOpClass::Source)
+                {
+                    const auto it = mffcRootNode.find(rootOp);
+                    if (it != mffcRootNode.end())
+                    {
+                        return it->second;
+                    }
+                }
+                else
+                {
+                    ensureOpIndex(rootOp);
+                    if (out.computeNodeOfOp[rootOp.index] != kInvalidActivitySupernodeId)
+                    {
+                        return out.computeNodeOfOp[rootOp.index];
+                    }
+                    const auto it = mffcRootNode.find(rootOp);
+                    if (it != mffcRootNode.end())
+                    {
+                        return it->second;
+                    }
+                }
+
+                const uint32_t nodeId = static_cast<uint32_t>(pendingNodeOps.size());
+                mffcRootNode[rootOp] = nodeId;
+                pendingNodeOps.push_back({});
+                pendingNodeBoundaryInputs.push_back({});
+                std::unordered_set<OperationId, OperationIdHash> localOps;
+
+                auto addBoundary = [&](ValueId value) {
+                    if (!vectorContainsValue(pendingNodeBoundaryInputs[nodeId], value))
+                    {
+                        pendingNodeBoundaryInputs[nodeId].push_back(value);
+                    }
+                };
+
+                auto absorbOp = [&](auto &&absorbSelf, OperationId opId) -> void {
+                    if (!opId.valid() || opId.index >= opClasses.size() ||
+                        localOps.find(opId) != localOps.end())
+                    {
+                        return;
+                    }
+                    const ActivityOpClass opClass = opClasses[opId.index];
+                    if (opClass == ActivityOpClass::Sink)
+                    {
+                        error = "activity-schedule essent-mffc encountered sink predecessor op=" +
+                                describeOp(graph, opId);
+                        return;
+                    }
+                    if (opClass != ActivityOpClass::Compute && opClass != ActivityOpClass::Source)
+                    {
+                        return;
+                    }
+                    if (opClass == ActivityOpClass::Compute)
+                    {
+                        ensureOpIndex(opId);
+                        if (out.computeNodeOfOp[opId.index] != kInvalidActivitySupernodeId)
+                        {
+                            return;
+                        }
+                    }
+                    if (pendingNodeOps[nodeId].size() >= maxOpsInNode)
+                    {
+                        return;
+                    }
+
+                    localOps.insert(opId);
+                    pendingNodeOps[nodeId].push_back(opId);
+                    if (opClass == ActivityOpClass::Compute)
+                    {
+                        ensureOpIndex(opId);
+                        out.computeNodeOfOp[opId.index] = nodeId;
+                        assignedOps.insert(opId);
+                    }
+                    else if (opClass == ActivityOpClass::Source)
+                    {
+                        ensureOpIndex(opId);
+                        if (out.computeNodeOfOp[opId.index] == kInvalidActivitySupernodeId)
+                        {
+                            out.computeNodeOfOp[opId.index] = nodeId;
+                        }
+                    }
+
+                    if (opClass == ActivityOpClass::Source)
+                    {
+                        return;
+                    }
+
+                    for (const auto operand : graph.opOperands(opId))
+                    {
+                        const auto defOp = graph.valueDef(operand);
+                        if (!defOp.valid())
+                        {
+                            addBoundary(operand);
+                            continue;
+                        }
+                        if (defOp.index >= opClasses.size())
+                        {
+                            addBoundary(operand);
+                            continue;
+                        }
+                        const ActivityOpClass defClass = opClasses[defOp.index];
+                        if (defClass == ActivityOpClass::Source)
+                        {
+                            absorbSelf(absorbSelf, defOp);
+                            continue;
+                        }
+                        if (defClass == ActivityOpClass::Sink)
+                        {
+                            error = "activity-schedule essent-mffc encountered sink predecessor source=" +
+                                    describeOp(graph, defOp) + " user=" + describeOp(graph, opId);
+                            return;
+                        }
+                        if (defClass != ActivityOpClass::Compute)
+                        {
+                            addBoundary(operand);
+                            continue;
+                        }
+                        if (valueHasExternalConsumer(operand, opId))
+                        {
+                            const uint32_t predNode = self(self, defOp);
+                            (void)predNode;
+                            addBoundary(operand);
+                            continue;
+                        }
+                        ensureOpIndex(defOp);
+                        if (out.computeNodeOfOp[defOp.index] != kInvalidActivitySupernodeId &&
+                            out.computeNodeOfOp[defOp.index] != nodeId)
+                        {
+                            addBoundary(operand);
+                            continue;
+                        }
+                        absorbSelf(absorbSelf, defOp);
+                    }
+                };
+
+                absorbOp(absorbOp, rootOp);
+                return nodeId;
+            };
+
+            for (const auto rootValue : rootValues)
+            {
+                const auto defOp = graph.valueDef(rootValue);
+                if (!defOp.valid() || defOp.index >= opClasses.size())
+                {
+                    continue;
+                }
+                const ActivityOpClass defClass = opClasses[defOp.index];
+                if (defClass == ActivityOpClass::Source)
+                {
+                    continue;
+                }
+                if (defClass == ActivityOpClass::Sink)
+                {
+                    error = "activity-schedule essent-mffc root value is defined by sink op=" +
+                            describeOp(graph, defOp);
+                    return false;
+                }
+                if (defClass == ActivityOpClass::Compute)
+                {
+                    const uint32_t node = createNodeFromRoot(createNodeFromRoot, defOp);
+                    if (node == kInvalidActivitySupernodeId && !error.empty())
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            for (const auto opId : opData.topoOps)
+            {
+                if (opId.index >= opClasses.size())
+                {
+                    continue;
+                }
+                if (opClasses[opId.index] == ActivityOpClass::Compute)
+                {
+                    ensureOpIndex(opId);
+                    if (out.computeNodeOfOp[opId.index] == kInvalidActivitySupernodeId)
+                    {
+                        const uint32_t node = createNodeFromRoot(createNodeFromRoot, opId);
+                        if (node == kInvalidActivitySupernodeId && !error.empty())
+                        {
+                            return false;
+                        }
+                    }
+                }
+                else if (opClasses[opId.index] == ActivityOpClass::Source &&
+                         sourceOpHasScheduleUse(graph, opId, opClasses))
+                {
+                    if (mffcRootNode.find(opId) == mffcRootNode.end())
+                    {
+                        const uint32_t node = createNodeFromRoot(createNodeFromRoot, opId);
+                        if (node == kInvalidActivitySupernodeId && !error.empty())
+                        {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            std::unordered_map<uint32_t, uint32_t> oldToNewNode;
+            oldToNewNode.reserve(pendingNodeOps.size());
+            for (uint32_t oldNode = 0; oldNode < pendingNodeOps.size(); ++oldNode)
+            {
+                auto &ops = pendingNodeOps[oldNode];
+                if (ops.empty())
+                {
+                    continue;
+                }
+                std::vector<OperationId> orderedOps;
+                if (!topoSortLocalOps(graph, ops, orderedOps, error))
+                {
+                    return false;
+                }
+                const uint32_t newNode = static_cast<uint32_t>(out.computeNodes.size());
+                oldToNewNode.emplace(oldNode, newNode);
+                ComputeNode node;
+                node.ops = std::move(orderedOps);
+                node.boundaryInputs = std::move(pendingNodeBoundaryInputs[oldNode]);
+                out.computeNodes.push_back(std::move(node));
+            }
+
+            for (auto &owner : out.computeNodeOfOp)
+            {
+                if (owner == kInvalidActivitySupernodeId)
+                {
+                    continue;
+                }
+                const auto it = oldToNewNode.find(owner);
+                owner = it == oldToNewNode.end() ? kInvalidActivitySupernodeId : it->second;
+            }
+
+            for (uint32_t nodeId = 0; nodeId < out.computeNodes.size(); ++nodeId)
+            {
+                auto &node = out.computeNodes[nodeId];
+                std::vector<ValueId> rebuiltInputs;
+                for (const auto opId : node.ops)
+                {
+                    for (const auto operand : graph.opOperands(opId))
+                    {
+                        const auto defOp = graph.valueDef(operand);
+                        if (!defOp.valid())
+                        {
+                            if (!vectorContainsValue(rebuiltInputs, operand))
+                            {
+                                rebuiltInputs.push_back(operand);
+                            }
+                            ++out.stats.computeNodeBoundaryInputsTotal;
+                            ++out.stats.computeNodeBoundaryInputNoDef;
+                            continue;
+                        }
+                        if (defOp.index >= out.computeNodeOfOp.size())
+                        {
+                            if (!vectorContainsValue(rebuiltInputs, operand))
+                            {
+                                rebuiltInputs.push_back(operand);
+                            }
+                            ++out.stats.computeNodeBoundaryInputsTotal;
+                            ++out.stats.computeNodeBoundaryInputDefOutOfRange;
+                            continue;
+                        }
+                        const uint32_t owner = out.computeNodeOfOp[defOp.index];
+                        if (owner == nodeId)
+                        {
+                            continue;
+                        }
+                        if (!vectorContainsValue(rebuiltInputs, operand))
+                        {
+                            rebuiltInputs.push_back(operand);
+                        }
+                        ++out.stats.computeNodeBoundaryInputsTotal;
+                        if (owner == kInvalidActivitySupernodeId)
+                        {
+                            if (defOp.index < opClasses.size() &&
+                                opClasses[defOp.index] == ActivityOpClass::Sink)
+                            {
+                                error = "activity-schedule essent-mffc encountered sink predecessor source=" +
+                                        describeOp(graph, defOp) + " user=" + describeOp(graph, opId);
+                                return false;
+                            }
+                            ++out.stats.computeNodeBoundaryInputUnsupported;
+                        }
+                        else
+                        {
+                            ++out.stats.computeNodeBoundaryInputExistingOwner;
+                        }
+                    }
+                }
+                node.boundaryInputs = std::move(rebuiltInputs);
+            }
+
+            buildComputeDag(out, out.computeNodeOfOp, graph);
+            try
+            {
+                out.computeTopoOrder = topoOrderForDag(out.computeDag);
+            }
+            catch (const std::exception &ex)
+            {
+                error = std::string("activity-schedule essent-mffc compute-node topo failed: ") + ex.what();
+                return false;
+            }
+
+            out.stats.computeNodes = out.computeNodes.size();
+            out.stats.computeNodeOpsTotal = 0;
+            for (const auto &node : out.computeNodes)
+            {
+                out.stats.computeNodeOpsTotal += node.ops.size();
+            }
+            out.stats.initialComputeSupernodes = out.stats.computeNodes;
+            out.stats.initialComputeSupernodeOpsTotal = out.stats.computeNodeOpsTotal;
+            out.stats.initialComputeSupernodeDagEdges = 0;
+            for (const auto &succs : out.computeDag)
+            {
+                out.stats.initialComputeSupernodeDagEdges += succs.size();
+            }
+            {
+                std::unordered_set<ValueId, ValueIdHash> boundaryValues;
+                for (const auto &node : out.computeNodes)
+                {
+                    for (const auto value : node.boundaryInputs)
+                    {
+                        const auto defOp = graph.valueDef(value);
+                        if (!defOp.valid() || defOp.index >= out.computeNodeOfOp.size())
+                        {
+                            continue;
+                        }
+                        const uint32_t owner = out.computeNodeOfOp[defOp.index];
+                        if (owner == kInvalidActivitySupernodeId)
+                        {
+                            continue;
+                        }
+                        boundaryValues.insert(value);
+                        ++out.stats.initialBoundaryActivationEdges;
+                    }
+                }
+                out.stats.initialBoundaryValues = boundaryValues.size();
+            }
+            out.stats.essentClustersBeforeCoarsen = out.stats.computeNodes;
+            out.stats.essentClustersAfterMffc = out.stats.computeNodes;
+            out.stats.essentClustersAfterSingleParent = out.stats.computeNodes;
+            out.stats.essentClustersAfterSmallSiblings = out.stats.computeNodes;
+            out.stats.essentClustersAfterSmallOverlap = out.stats.computeNodes;
+            out.stats.essentClustersAfterDown = out.stats.computeNodes;
+            out.stats.clustersAfterEssentCoarsen = out.stats.computeNodes;
+            return true;
+        }
+
         bool materializeComputeNodeSchedule(const wolvrix::lib::grh::Graph &graph,
                                             const ActivityScheduleOptions &options,
-                                            const ComputeRewriteBuild &rewrite,
+                                            ComputeRewriteBuild &rewrite,
                                             ActivityScheduleBuild &build,
                                             ComputeNodeMaterializePerfStats *perf,
                                             std::string &error)
         {
-            const std::size_t maxOpsPerComputeSupernode = options.maxOpInComputeSupernode;
+            ComputeNodeMaterializePerfStats fallbackPerf;
+            if (perf == nullptr)
+            {
+                perf = &fallbackPerf;
+            }
+            std::size_t maxOpsPerComputeSupernode = options.maxOpInComputeSupernode;
+            if (options.enableEssentCoarsen && options.essentMaxClusterOps != 0)
+            {
+                maxOpsPerComputeSupernode = options.essentMaxClusterOps;
+            }
+            const std::size_t maxOpsPerSplitComputeNode =
+                options.splitOversizeComputeNodeMaxOps != 0
+                    ? options.splitOversizeComputeNodeMaxOps
+                    : maxOpsPerComputeSupernode;
+            const std::vector<uint32_t> nodeOpSizes = computeNodeOpSizes(rewrite);
             const auto initClustersStart = std::chrono::steady_clock::now();
             std::vector<uint32_t> nodeTopoPos(rewrite.computeNodes.size(), kInvalidActivitySupernodeId);
             for (uint32_t pos = 0; pos < rewrite.computeTopoOrder.size(); ++pos)
@@ -4324,80 +6054,303 @@ namespace wolvrix::lib::transform
             const auto coarsenStart = std::chrono::steady_clock::now();
             if (options.enableCoarsen)
             {
-                bool changed = true;
-                while (changed)
+                if (options.enableEssentCoarsen)
                 {
-                    const auto iterStart = std::chrono::steady_clock::now();
-                    const std::size_t clustersBeforeIter = clusters.size();
-                    changed = false;
-                    bool out1Changed = false;
-                    bool in1Changed = false;
-                    bool boundaryChanged = false;
-                    if (options.enableChainMerge)
+                    auto logPhase = [&](std::string message) {
+                        if (options.dumpEssentDagStats)
+                        {
+                            std::cerr << "activity-schedule essent progress: " << message << '\n';
+                        }
+                    };
+                    EssentMergeStats totalMergeStats;
+                    perf->essentClustersBeforeCoarsen = clusters.size();
+                    perf->essentClustersAfterMffc = clusters.size();
+                    std::size_t singleParentMerges = 0;
+                    EssentMergeStats singleParentStats;
+                    const auto singleParentStart = std::chrono::steady_clock::now();
+                    if (options.enableEssentSingleParentMerge)
                     {
-                        const std::size_t clustersBeforeOut1 = clusters.size();
-                        out1Changed = tryMergeNodeOut1(clusters,
-                                                       rewrite.computeDag,
-                                                       rewrite.computeNodes.size(),
-                                                       nodeTopoPos,
-                                                       maxOpsPerComputeSupernode,
-                                                       rewrite,
-                                                       graph);
-                        if (out1Changed && perf)
+                        logPhase("single_parent start clusters=" + std::to_string(clusters.size()));
+                        bool singleParentChanged = true;
+                        while (singleParentChanged)
                         {
-                            perf->coarsenOut1Merges += clustersBeforeOut1 >= clusters.size()
-                                                           ? clustersBeforeOut1 - clusters.size()
-                                                           : 0;
+                            singleParentChanged =
+                                tryEssentMergeSingleParent(clusters,
+                                                           rewrite.computeDag,
+                                                           rewrite.computeNodes.size(),
+                                                           nodeTopoPos,
+                                                           nodeOpSizes,
+                                                           maxOpsPerComputeSupernode,
+                                                           options.essentSmallPartCutoff,
+                                                           options.essentCycleGuardMaxVisits,
+                                                           rewrite,
+                                                           graph,
+                                                           &singleParentMerges,
+                                                           &singleParentStats);
                         }
-                        changed = out1Changed || changed;
-
-                        const std::size_t clustersBeforeIn1 = clusters.size();
-                        in1Changed = tryMergeNodeIn1(clusters,
-                                                     rewrite.computeDag,
-                                                     rewrite.computeNodes.size(),
-                                                     nodeTopoPos,
-                                                     maxOpsPerComputeSupernode,
-                                                     rewrite,
-                                                     graph);
-                        if (in1Changed && perf)
-                        {
-                            perf->coarsenIn1Merges += clustersBeforeIn1 >= clusters.size()
-                                                          ? clustersBeforeIn1 - clusters.size()
-                                                          : 0;
-                        }
-                        changed = in1Changed || changed;
+                        logPhase("single_parent done clusters=" + std::to_string(clusters.size()) +
+                                 " merges=" + std::to_string(singleParentMerges) +
+                                 " candidates=" + std::to_string(singleParentStats.candidates) +
+                                 " elapsed_ms=" + std::to_string(elapsedMs(singleParentStart)));
                     }
-                    const std::size_t clustersBeforeBoundary = clusters.size();
-                    boundaryChanged = tryMergeNodeBoundaryGain(clusters,
+                    perf->essentSingleParentMs = elapsedMs(singleParentStart);
+                    accumulateEssentMergeStats(totalMergeStats, singleParentStats);
+                    perf->essentSingleParentMerges = singleParentMerges;
+                    perf->essentSingleParentCandidates = singleParentStats.candidates;
+                    perf->essentSingleParentRejectedSize = singleParentStats.rejectedSize;
+                    perf->essentSingleParentRejectedCycle = singleParentStats.rejectedCycle;
+                    perf->essentSingleParentRejectedBounded = singleParentStats.rejectedBounded;
+                    perf->essentSingleParentRejectedTopo = singleParentStats.rejectedTopo;
+                    perf->essentClustersAfterSingleParent = clusters.size();
+
+                    std::size_t smallSiblingMerges = 0;
+                    EssentMergeStats smallSiblingStats;
+                    const auto smallSiblingStart = std::chrono::steady_clock::now();
+                    if (options.enableEssentSmallSiblingMerge)
+                    {
+                        logPhase("small_sibling start clusters=" + std::to_string(clusters.size()));
+                        (void)tryEssentMergeSmallSiblings(clusters,
+                                                          rewrite.computeDag,
+                                                          rewrite.computeNodes.size(),
+                                                          nodeTopoPos,
+                                                          nodeOpSizes,
+                                                          maxOpsPerComputeSupernode,
+                                                          options.essentSmallPartCutoff,
+                                                          options.essentSmallSiblingMaxPreds,
+                                                          options.essentSmallSiblingCandidateBudget,
+                                                          rewrite,
+                                                          graph,
+                                                          &smallSiblingMerges,
+                                                          &smallSiblingStats);
+                        logPhase("small_sibling done clusters=" + std::to_string(clusters.size()) +
+                                 " merges=" + std::to_string(smallSiblingMerges) +
+                                 " candidates=" + std::to_string(smallSiblingStats.candidates) +
+                                 " max_preds=" + std::to_string(options.essentSmallSiblingMaxPreds) +
+                                 " candidate_budget=" +
+                                 std::to_string(options.essentSmallSiblingCandidateBudget) +
+                                 " elapsed_ms=" + std::to_string(elapsedMs(smallSiblingStart)));
+                    }
+                    perf->essentSmallSiblingMs = elapsedMs(smallSiblingStart);
+                    accumulateEssentMergeStats(totalMergeStats, smallSiblingStats);
+                    perf->essentSmallSiblingMerges = smallSiblingMerges;
+                    perf->essentSmallSiblingCandidates = smallSiblingStats.candidates;
+                    perf->essentSmallSiblingRejectedSize = smallSiblingStats.rejectedSize;
+                    perf->essentSmallSiblingRejectedCycle = smallSiblingStats.rejectedCycle;
+                    perf->essentSmallSiblingRejectedBounded = smallSiblingStats.rejectedBounded;
+                    perf->essentSmallSiblingRejectedTopo = smallSiblingStats.rejectedTopo;
+                    perf->essentClustersAfterSmallSiblings = clusters.size();
+
+                    std::size_t smallOverlapMerges = 0;
+                    EssentMergeStats smallOverlapStats;
+                    const auto smallOverlapStart = std::chrono::steady_clock::now();
+                    if (options.enableEssentSmallOverlapMerge)
+                    {
+                        logPhase("small_overlap start clusters=" + std::to_string(clusters.size()));
+                        for (const double threshold : {options.essentOverlapThreshold1,
+                                                       options.essentOverlapThreshold2})
+                        {
+                            if (threshold <= 0.0)
+                            {
+                                continue;
+                            }
+                            bool smallOverlapChanged = true;
+                            while (smallOverlapChanged)
+                            {
+                                smallOverlapChanged =
+                                    tryEssentMergeSmallOverlap(clusters,
                                                                rewrite.computeDag,
                                                                rewrite.computeNodes.size(),
                                                                nodeTopoPos,
+                                                               nodeOpSizes,
                                                                maxOpsPerComputeSupernode,
+                                                               options.essentSmallPartCutoff,
+                                                               threshold,
+                                                               options.essentCycleGuardMaxVisits,
                                                                rewrite,
-                                                               graph);
-                    if (boundaryChanged && perf)
-                    {
-                        perf->coarsenBoundaryMerges += clustersBeforeBoundary >= clusters.size()
-                                                           ? clustersBeforeBoundary - clusters.size()
-                                                           : 0;
+                                                               graph,
+                                                               &smallOverlapMerges,
+                                                               &smallOverlapStats);
+                            }
+                        }
+                        logPhase("small_overlap done clusters=" + std::to_string(clusters.size()) +
+                                 " merges=" + std::to_string(smallOverlapMerges) +
+                                 " candidates=" + std::to_string(smallOverlapStats.candidates) +
+                                 " elapsed_ms=" + std::to_string(elapsedMs(smallOverlapStart)));
                     }
-                    changed = boundaryChanged || changed;
-                    if (perf)
+                    perf->essentSmallOverlapMs = elapsedMs(smallOverlapStart);
+                    accumulateEssentMergeStats(totalMergeStats, smallOverlapStats);
+                    perf->essentSmallOverlapMerges = smallOverlapMerges;
+                    perf->essentSmallOverlapCandidates = smallOverlapStats.candidates;
+                    perf->essentSmallOverlapRejectedSize = smallOverlapStats.rejectedSize;
+                    perf->essentSmallOverlapRejectedCycle = smallOverlapStats.rejectedCycle;
+                    perf->essentSmallOverlapRejectedBounded = smallOverlapStats.rejectedBounded;
+                    perf->essentSmallOverlapRejectedTopo = smallOverlapStats.rejectedTopo;
+                    perf->essentClustersAfterSmallOverlap = clusters.size();
+
+                    std::size_t downMerges = 0;
+                    EssentMergeStats downStats;
+                    const auto downStart = std::chrono::steady_clock::now();
+                    if (options.enableEssentDownMerge)
                     {
-                        const std::size_t clustersAfterIter = clusters.size();
-                        const std::size_t clusterDelta =
-                            clustersBeforeIter >= clustersAfterIter ? clustersBeforeIter - clustersAfterIter : 0;
-                        ++perf->coarsenIterations;
-                        perf->coarsenIterationStats.push_back({
-                            .iteration = perf->coarsenIterations,
-                            .clusters = clustersAfterIter,
-                            .clusterDelta = clusterDelta,
-                            .changed = changed,
-                            .out1Changed = out1Changed,
-                            .in1Changed = in1Changed,
-                            .boundaryChanged = boundaryChanged,
-                            .elapsedMs = elapsedMs(iterStart),
-                        });
+                        logPhase("down start clusters=" + std::to_string(clusters.size()));
+                        bool downChanged = true;
+                        while (downChanged)
+                        {
+                            downChanged =
+                                tryEssentMergeDown(clusters,
+                                                   rewrite.computeDag,
+                                                   rewrite.computeNodes.size(),
+                                                   nodeTopoPos,
+                                                   nodeOpSizes,
+                                                   maxOpsPerComputeSupernode,
+                                                   options.essentSmallPartCutoff,
+                                                   options.essentCycleGuardMaxVisits,
+                                                   rewrite,
+                                                   graph,
+                                                   &downMerges,
+                                                   &downStats);
+                        }
+                        logPhase("down done clusters=" + std::to_string(clusters.size()) +
+                                 " merges=" + std::to_string(downMerges) +
+                                 " candidates=" + std::to_string(downStats.candidates) +
+                                 " elapsed_ms=" + std::to_string(elapsedMs(downStart)));
+                    }
+                    perf->essentDownMs = elapsedMs(downStart);
+                    accumulateEssentMergeStats(totalMergeStats, downStats);
+                    perf->essentDownMerges = downMerges;
+                    perf->essentDownCandidates = downStats.candidates;
+                    perf->essentDownRejectedSize = downStats.rejectedSize;
+                    perf->essentDownRejectedCycle = downStats.rejectedCycle;
+                    perf->essentDownRejectedBounded = downStats.rejectedBounded;
+                    perf->essentDownRejectedTopo = downStats.rejectedTopo;
+                    perf->essentClustersAfterDown = clusters.size();
+                    perf->clustersAfterEssentCoarsen = clusters.size();
+                    perf->essentMergeCandidates = totalMergeStats.candidates;
+                    perf->essentMergeRejectedSize = totalMergeStats.rejectedSize;
+                    perf->essentMergeRejectedCycle = totalMergeStats.rejectedCycle;
+                    perf->essentMergeRejectedBounded = totalMergeStats.rejectedBounded;
+                    perf->essentMergeRejectedTopo = totalMergeStats.rejectedTopo;
+                    rewrite.stats.essentClustersBeforeCoarsen = perf->essentClustersBeforeCoarsen;
+                    rewrite.stats.essentClustersAfterMffc = perf->essentClustersAfterMffc;
+                    rewrite.stats.essentClustersAfterSingleParent =
+                        perf->essentClustersAfterSingleParent;
+                    rewrite.stats.essentClustersAfterSmallSiblings =
+                        perf->essentClustersAfterSmallSiblings;
+                    rewrite.stats.essentClustersAfterSmallOverlap =
+                        perf->essentClustersAfterSmallOverlap;
+                    rewrite.stats.essentClustersAfterDown = perf->essentClustersAfterDown;
+                    rewrite.stats.clustersAfterEssentCoarsen =
+                        perf->clustersAfterEssentCoarsen;
+                    rewrite.stats.essentSingleParentMerges = perf->essentSingleParentMerges;
+                    rewrite.stats.essentSmallSiblingMerges = perf->essentSmallSiblingMerges;
+                    rewrite.stats.essentSmallOverlapMerges = perf->essentSmallOverlapMerges;
+                    rewrite.stats.essentDownMerges = perf->essentDownMerges;
+                    rewrite.stats.essentMergeCandidates = perf->essentMergeCandidates;
+                    rewrite.stats.essentMergeRejectedSize = perf->essentMergeRejectedSize;
+                    rewrite.stats.essentMergeRejectedCycle = perf->essentMergeRejectedCycle;
+                    rewrite.stats.essentMergeRejectedBounded = perf->essentMergeRejectedBounded;
+                    rewrite.stats.essentMergeRejectedTopo = perf->essentMergeRejectedTopo;
+                    rewrite.stats.essentSingleParentCandidates = perf->essentSingleParentCandidates;
+                    rewrite.stats.essentSingleParentRejectedSize = perf->essentSingleParentRejectedSize;
+                    rewrite.stats.essentSingleParentRejectedCycle = perf->essentSingleParentRejectedCycle;
+                    rewrite.stats.essentSingleParentRejectedBounded =
+                        perf->essentSingleParentRejectedBounded;
+                    rewrite.stats.essentSingleParentRejectedTopo = perf->essentSingleParentRejectedTopo;
+                    rewrite.stats.essentSmallSiblingCandidates = perf->essentSmallSiblingCandidates;
+                    rewrite.stats.essentSmallSiblingRejectedSize = perf->essentSmallSiblingRejectedSize;
+                    rewrite.stats.essentSmallSiblingRejectedCycle = perf->essentSmallSiblingRejectedCycle;
+                    rewrite.stats.essentSmallSiblingRejectedBounded =
+                        perf->essentSmallSiblingRejectedBounded;
+                    rewrite.stats.essentSmallSiblingRejectedTopo = perf->essentSmallSiblingRejectedTopo;
+                    rewrite.stats.essentSmallOverlapCandidates = perf->essentSmallOverlapCandidates;
+                    rewrite.stats.essentSmallOverlapRejectedSize = perf->essentSmallOverlapRejectedSize;
+                    rewrite.stats.essentSmallOverlapRejectedCycle = perf->essentSmallOverlapRejectedCycle;
+                    rewrite.stats.essentSmallOverlapRejectedBounded =
+                        perf->essentSmallOverlapRejectedBounded;
+                    rewrite.stats.essentSmallOverlapRejectedTopo = perf->essentSmallOverlapRejectedTopo;
+                    rewrite.stats.essentDownCandidates = perf->essentDownCandidates;
+                    rewrite.stats.essentDownRejectedSize = perf->essentDownRejectedSize;
+                    rewrite.stats.essentDownRejectedCycle = perf->essentDownRejectedCycle;
+                    rewrite.stats.essentDownRejectedBounded = perf->essentDownRejectedBounded;
+                    rewrite.stats.essentDownRejectedTopo = perf->essentDownRejectedTopo;
+                }
+                else
+                {
+                    bool changed = true;
+                    while (changed)
+                    {
+                        const auto iterStart = std::chrono::steady_clock::now();
+                        const std::size_t clustersBeforeIter = clusters.size();
+                        changed = false;
+                        bool out1Changed = false;
+                        bool in1Changed = false;
+                        bool boundaryChanged = false;
+                        if (options.enableChainMerge)
+                        {
+                            const std::size_t clustersBeforeOut1 = clusters.size();
+                            out1Changed = tryMergeNodeOut1(clusters,
+                                                           rewrite.computeDag,
+                                                           rewrite.computeNodes.size(),
+                                                           nodeTopoPos,
+                                                           maxOpsPerComputeSupernode,
+                                                           rewrite,
+                                                           graph);
+                            if (out1Changed && perf)
+                            {
+                                perf->coarsenOut1Merges += clustersBeforeOut1 >= clusters.size()
+                                                               ? clustersBeforeOut1 - clusters.size()
+                                                               : 0;
+                            }
+                            changed = out1Changed || changed;
+
+                            const std::size_t clustersBeforeIn1 = clusters.size();
+                            in1Changed = tryMergeNodeIn1(clusters,
+                                                         rewrite.computeDag,
+                                                         rewrite.computeNodes.size(),
+                                                         nodeTopoPos,
+                                                         maxOpsPerComputeSupernode,
+                                                         rewrite,
+                                                         graph);
+                            if (in1Changed && perf)
+                            {
+                                perf->coarsenIn1Merges += clustersBeforeIn1 >= clusters.size()
+                                                              ? clustersBeforeIn1 - clusters.size()
+                                                              : 0;
+                            }
+                            changed = in1Changed || changed;
+                        }
+                        const std::size_t clustersBeforeBoundary = clusters.size();
+                        boundaryChanged = tryMergeNodeBoundaryGain(clusters,
+                                                                   rewrite.computeDag,
+                                                                   rewrite.computeNodes.size(),
+                                                                   nodeTopoPos,
+                                                                   maxOpsPerComputeSupernode,
+                                                                   rewrite,
+                                                                   graph);
+                        if (boundaryChanged && perf)
+                        {
+                            perf->coarsenBoundaryMerges += clustersBeforeBoundary >= clusters.size()
+                                                               ? clustersBeforeBoundary - clusters.size()
+                                                               : 0;
+                        }
+                        changed = boundaryChanged || changed;
+                        if (perf)
+                        {
+                            const std::size_t clustersAfterIter = clusters.size();
+                            const std::size_t clusterDelta =
+                                clustersBeforeIter >= clustersAfterIter ? (clustersBeforeIter - clustersAfterIter) : 0;
+                            ++perf->coarsenIterations;
+                            perf->coarsenIterationStats.push_back({
+                                .iteration = perf->coarsenIterations,
+                                .clusters = clustersAfterIter,
+                                .clusterDelta = clusterDelta,
+                                .changed = changed,
+                                .out1Changed = out1Changed,
+                                .in1Changed = in1Changed,
+                                .boundaryChanged = boundaryChanged,
+                                .elapsedMs = elapsedMs(iterStart),
+                            });
+                        }
                     }
                 }
             }
@@ -4429,7 +6382,7 @@ namespace wolvrix::lib::transform
             const auto dpSegmentStart = std::chrono::steady_clock::now();
             const auto clusterValueEdges = buildClusterValueEdges(clusterView, rewrite, graph);
             const auto segments =
-                buildComputeSupernodeSegments(clusterView, clusterValueEdges, maxOpsPerComputeSupernode);
+                buildComputeSupernodeSegments(clusterView, clusterValueEdges, nodeOpSizes, maxOpsPerComputeSupernode);
             if (perf)
             {
                 perf->dpSegmentMs = elapsedMs(dpSegmentStart);
@@ -4449,28 +6402,94 @@ namespace wolvrix::lib::transform
             build.supernodeToOps.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
             build.supernodeKinds.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
             build.computeNodesBySupernode.reserve(computeSupernodes.size() + rewrite.commitNodes.size());
-            std::vector<uint32_t> finalSupernodeByComputeNode(rewrite.computeNodes.size(), kInvalidActivitySupernodeId);
-            for (uint32_t supernodeId = 0; supernodeId < computeSupernodes.size(); ++supernodeId)
+            std::vector<uint32_t> splitOwnerComputeNodeBySupernode;
+            std::vector<uint32_t> splitOrdinalBySupernode;
+            std::vector<uint32_t> splitCountByComputeNode(rewrite.computeNodes.size(), 0);
+            auto noteNonSplitSupernode = [&]()
+            {
+                splitOwnerComputeNodeBySupernode.push_back(kInvalidActivitySupernodeId);
+                splitOrdinalBySupernode.push_back(kInvalidActivitySupernodeId);
+            };
+            for (uint32_t segmentId = 0; segmentId < computeSupernodes.size(); ++segmentId)
             {
                 std::vector<wolvrix::lib::grh::OperationId> ops;
-                build.computeNodesBySupernode.push_back(computeSupernodes[supernodeId]);
-                for (const auto computeNodeId : computeSupernodes[supernodeId])
+                std::vector<uint32_t> supernodeComputeNodes;
+                std::size_t supernodeOpCount = 0;
+                auto flushComputeSupernode = [&]() -> bool
+                {
+                    if (ops.empty())
+                    {
+                        return true;
+                    }
+                    std::vector<wolvrix::lib::grh::OperationId> orderedOps;
+                    if (!topoSortLocalOps(graph, ops, orderedOps, error))
+                    {
+                        return false;
+                    }
+                    build.supernodeToOps.push_back(std::move(orderedOps));
+                    build.supernodeKinds.push_back(ActivityScheduleSupernodeKind::Compute);
+                    build.computeNodesBySupernode.push_back(supernodeComputeNodes);
+                    noteNonSplitSupernode();
+                    ops.clear();
+                    supernodeComputeNodes.clear();
+                    supernodeOpCount = 0;
+                    return true;
+                };
+
+                for (const auto computeNodeId : computeSupernodes[segmentId])
                 {
                     if (computeNodeId >= rewrite.computeNodes.size())
                     {
                         continue;
                     }
-                    finalSupernodeByComputeNode[computeNodeId] = supernodeId;
                     const auto &nodeOps = rewrite.computeNodes[computeNodeId].ops;
+                    if (maxOpsPerComputeSupernode != 0 &&
+                        !ops.empty() &&
+                        supernodeOpCount + nodeOps.size() > maxOpsPerComputeSupernode)
+                    {
+                        if (!flushComputeSupernode())
+                        {
+                            return false;
+                        }
+                    }
+                    if (options.splitOversizeComputeNodes &&
+                        maxOpsPerSplitComputeNode != 0 &&
+                        nodeOps.size() > maxOpsPerSplitComputeNode)
+                    {
+                        std::vector<wolvrix::lib::grh::OperationId> orderedNodeOps;
+                        if (!topoSortLocalOps(graph, nodeOps, orderedNodeOps, error))
+                        {
+                            return false;
+                        }
+                        ++perf->splitOversizeComputeNodes;
+                        for (std::size_t begin = 0; begin < orderedNodeOps.size(); begin += maxOpsPerSplitComputeNode)
+                        {
+                            if (!flushComputeSupernode())
+                            {
+                                return false;
+                            }
+                            const std::size_t end =
+                                std::min(orderedNodeOps.size(), begin + maxOpsPerSplitComputeNode);
+                            std::vector<wolvrix::lib::grh::OperationId> chunkOps(
+                                orderedNodeOps.begin() + static_cast<std::ptrdiff_t>(begin),
+                                orderedNodeOps.begin() + static_cast<std::ptrdiff_t>(end));
+                            build.supernodeToOps.push_back(std::move(chunkOps));
+                            build.supernodeKinds.push_back(ActivityScheduleSupernodeKind::Compute);
+                            build.computeNodesBySupernode.push_back({computeNodeId});
+                            splitOwnerComputeNodeBySupernode.push_back(computeNodeId);
+                            splitOrdinalBySupernode.push_back(splitCountByComputeNode[computeNodeId]++);
+                            ++perf->splitOversizeComputeNodeSupernodes;
+                        }
+                        continue;
+                    }
                     ops.insert(ops.end(), nodeOps.begin(), nodeOps.end());
+                    supernodeComputeNodes.push_back(computeNodeId);
+                    supernodeOpCount += nodeOps.size();
                 }
-                std::vector<wolvrix::lib::grh::OperationId> orderedOps;
-                if (!topoSortLocalOps(graph, ops, orderedOps, error))
+                if (!flushComputeSupernode())
                 {
                     return false;
                 }
-                build.supernodeToOps.push_back(std::move(orderedOps));
-                build.supernodeKinds.push_back(ActivityScheduleSupernodeKind::Compute);
             }
             const uint32_t commitBase = static_cast<uint32_t>(build.supernodeToOps.size());
             for (const auto &commit : rewrite.commitNodes)
@@ -4478,6 +6497,7 @@ namespace wolvrix::lib::transform
                 build.supernodeToOps.push_back(commit.ops);
                 build.supernodeKinds.push_back(ActivityScheduleSupernodeKind::Commit);
                 build.computeNodesBySupernode.push_back({});
+                noteNonSplitSupernode();
             }
             if (perf)
             {
@@ -4544,6 +6564,29 @@ namespace wolvrix::lib::transform
                         }
                         const uint32_t from = supernodeOfOp[defOp.index];
                         const uint32_t to = supernodeId;
+                        if (defOp.index < rewrite.computeNodeOfOp.size() &&
+                            toOpId.index < rewrite.computeNodeOfOp.size())
+                        {
+                            const uint32_t defComputeNode = rewrite.computeNodeOfOp[defOp.index];
+                            const uint32_t useComputeNode = rewrite.computeNodeOfOp[toOpId.index];
+                            if (defComputeNode != kInvalidActivitySupernodeId &&
+                                defComputeNode == useComputeNode &&
+                                from != to)
+                            {
+                                const bool splitForward =
+                                    from < splitOwnerComputeNodeBySupernode.size() &&
+                                    to < splitOwnerComputeNodeBySupernode.size() &&
+                                    splitOwnerComputeNodeBySupernode[from] == defComputeNode &&
+                                    splitOwnerComputeNodeBySupernode[to] == defComputeNode &&
+                                    from < splitOrdinalBySupernode.size() &&
+                                    to < splitOrdinalBySupernode.size() &&
+                                    splitOrdinalBySupernode[from] < splitOrdinalBySupernode[to];
+                                if (!splitForward)
+                                {
+                                    continue;
+                                }
+                            }
+                        }
                         if (from == kInvalidActivitySupernodeId || from == to)
                         {
                             continue;
@@ -4736,6 +6779,7 @@ namespace wolvrix::lib::transform
         }
 
         const auto buildOpDataStart = std::chrono::steady_clock::now();
+        logInfo("activity-schedule progress: build_op_data start graph=" + *targetGraphName);
         graph->freeze();
         std::string buildError;
         ActivityOpData opData = buildActivityOpData(*graph, buildError);
@@ -4746,11 +6790,17 @@ namespace wolvrix::lib::transform
             result.failed = true;
             return result;
         }
+        logInfo("activity-schedule progress: build_op_data done ops=" +
+                std::to_string(opData.topoOps.size()) +
+                " topo_edges=" + std::to_string(opData.topoEdges.size()) +
+                " elapsed_ms=" + std::to_string(buildOpDataMs));
 
         std::vector<ActivityOpClass> opClasses = buildOpClasses(*graph, opData.maxOpIndex);
         ComputeNodeRewriteStats precloneStats;
         ValueCanonicalMap canonicalValues;
         bool sourceCloneGraphChanged = false;
+        const auto sourceCloneStart = std::chrono::steady_clock::now();
+        logInfo("activity-schedule progress: source_clone start");
         if (!cloneSourceUsesForCompute(*graph,
                                        opClasses,
                                        precloneStats,
@@ -4762,12 +6812,16 @@ namespace wolvrix::lib::transform
             result.failed = true;
             return result;
         }
+        logInfo("activity-schedule progress: source_clone done clones=" +
+                std::to_string(precloneStats.sourceClonesInComputeNodes) +
+                " graph_changed=" + std::string(sourceCloneGraphChanged ? "true" : "false") +
+                " elapsed_ms=" + std::to_string(elapsedMs(sourceCloneStart)));
         if (sourceCloneGraphChanged)
         {
             graphChanged = true;
             const auto refreezeStart = std::chrono::steady_clock::now();
+            logInfo("activity-schedule progress: source_clone_refreeze start");
             graph->freeze();
-            (void)refreezeStart;
             opData = buildActivityOpData(*graph, buildError);
             if (!buildError.empty())
             {
@@ -4776,10 +6830,32 @@ namespace wolvrix::lib::transform
                 return result;
             }
             opClasses = buildOpClasses(*graph, opData.maxOpIndex);
+            logInfo("activity-schedule progress: source_clone_refreeze done ops=" +
+                    std::to_string(opData.topoOps.size()) +
+                    " topo_edges=" + std::to_string(opData.topoEdges.size()) +
+                    " elapsed_ms=" + std::to_string(elapsedMs(refreezeStart)));
         }
         ComputeRewriteBuild rewrite;
         const auto computeNodeStart = std::chrono::steady_clock::now();
-        if (!buildComputeNodeRewrite(*graph, options_, opData, opClasses, canonicalValues, rewrite, buildError))
+        logInfo("activity-schedule progress: compute_node_build start mode=" +
+                std::string(options_.enableEssentMffcBuild ? "essent_mffc" : "default"));
+        const bool computeNodeBuildOk =
+            options_.enableEssentMffcBuild
+                ? buildEssentMffcComputeNodeRewrite(*graph,
+                                                    options_,
+                                                    opData,
+                                                    opClasses,
+                                                    canonicalValues,
+                                                    rewrite,
+                                                    buildError)
+                : buildComputeNodeRewrite(*graph,
+                                          options_,
+                                          opData,
+                                          opClasses,
+                                          canonicalValues,
+                                          rewrite,
+                                          buildError);
+        if (!computeNodeBuildOk)
         {
             error(*graph, buildError);
             result.failed = true;
@@ -4787,18 +6863,26 @@ namespace wolvrix::lib::transform
         }
         rewrite.stats.sourceClonesInComputeNodes = precloneStats.sourceClonesInComputeNodes;
         const std::uint64_t computeNodeMs = elapsedMs(computeNodeStart);
+        logInfo("activity-schedule progress: compute_node_build done compute_nodes=" +
+                std::to_string(rewrite.computeNodes.size()) +
+                " commit_nodes=" + std::to_string(rewrite.commitNodes.size()) +
+                " elapsed_ms=" + std::to_string(computeNodeMs));
         if (rewrite.stats.sourceClonesInComputeNodes != 0)
         {
             graphChanged = true;
         }
 
         const auto freezeStart = std::chrono::steady_clock::now();
+        logInfo("activity-schedule progress: freeze_after_compute_node start");
         graph->freeze();
         const std::uint64_t freezeMs = elapsedMs(freezeStart);
+        logInfo("activity-schedule progress: freeze_after_compute_node done elapsed_ms=" +
+                std::to_string(freezeMs));
 
         ActivityScheduleBuild build;
         ComputeNodeMaterializePerfStats materializePerf;
         const auto materializeStart = std::chrono::steady_clock::now();
+        logInfo("activity-schedule progress: final_materialize start");
         if (!materializeComputeNodeSchedule(*graph, options_, rewrite, build, &materializePerf, buildError))
         {
             error(*graph, buildError);
@@ -4806,9 +6890,13 @@ namespace wolvrix::lib::transform
             return result;
         }
         const std::uint64_t materializeMs = elapsedMs(materializeStart);
+        logInfo("activity-schedule progress: final_materialize done supernodes=" +
+                std::to_string(build.supernodeToOps.size()) +
+                " elapsed_ms=" + std::to_string(materializeMs));
 
         const std::string keyPrefix = options_.path + ".activity_schedule.";
         const auto exportStart = std::chrono::steady_clock::now();
+        logInfo("activity-schedule progress: export_session start");
         setSessionValue(keyPrefix + "supernode_to_ops",
                         build.supernodeToOps,
                         "activity-schedule.supernode-to-ops");
@@ -4833,6 +6921,8 @@ namespace wolvrix::lib::transform
                         encodeActivityScheduleSummaryStatsJson(summaryStats),
                         "stats");
         const std::uint64_t exportMs = elapsedMs(exportStart);
+        logInfo("activity-schedule progress: export_session done elapsed_ms=" +
+                std::to_string(exportMs));
 
         const std::size_t computeSupernodes =
             std::count(build.supernodeKinds.begin(),
@@ -4853,6 +6943,10 @@ namespace wolvrix::lib::transform
                 std::to_string(materializePerf.initClustersMs) +
                 " topo_before_coarsen=" + std::to_string(materializePerf.topoBeforeCoarsenMs) +
                 " coarsen=" + std::to_string(materializePerf.coarsenMs) +
+                " essent_single_parent=" + std::to_string(materializePerf.essentSingleParentMs) +
+                " essent_small_sibling=" + std::to_string(materializePerf.essentSmallSiblingMs) +
+                " essent_small_overlap=" + std::to_string(materializePerf.essentSmallOverlapMs) +
+                " essent_down=" + std::to_string(materializePerf.essentDownMs) +
                 " topo_after_coarsen=" + std::to_string(materializePerf.topoAfterCoarsenMs) +
                 " build_cluster_view=" + std::to_string(materializePerf.buildClusterViewMs) +
                 " dp_segment=" + std::to_string(materializePerf.dpSegmentMs) +
@@ -4861,6 +6955,10 @@ namespace wolvrix::lib::transform
                 " build_final_dag=" + std::to_string(materializePerf.buildFinalDagMs) +
                 " build_state_read_sets=" + std::to_string(materializePerf.buildStateReadSetsMs) +
                 " final_topo=" + std::to_string(materializePerf.finalTopoMs));
+        logInfo("activity-schedule compute-node final split detail: oversize_compute_nodes=" +
+                std::to_string(materializePerf.splitOversizeComputeNodes) +
+                " split_supernodes=" +
+                std::to_string(materializePerf.splitOversizeComputeNodeSupernodes));
         logInfo("activity-schedule compute-node coarsen detail: enabled=" +
                 std::string(options_.enableCoarsen ? "true" : "false") +
                 " chain_merge=" + std::string(options_.enableChainMerge ? "true" : "false") +
@@ -4870,8 +6968,75 @@ namespace wolvrix::lib::transform
                 " boundary_merges=" + std::to_string(materializePerf.coarsenBoundaryMerges) +
                 " clusters_before=" + std::to_string(materializePerf.clustersBeforeCoarsen) +
                 " clusters_after=" + std::to_string(materializePerf.clustersAfterCoarsen) +
+                " essent_clusters_before_coarsen=" +
+                std::to_string(materializePerf.essentClustersBeforeCoarsen) +
+                " essent_clusters_after_mffc=" +
+                std::to_string(materializePerf.essentClustersAfterMffc) +
+                " essent_single_parent_merges=" +
+                std::to_string(materializePerf.essentSingleParentMerges) +
+                " essent_clusters_after_single_parent=" +
+                std::to_string(materializePerf.essentClustersAfterSingleParent) +
+                " essent_small_sibling_merges=" +
+                std::to_string(materializePerf.essentSmallSiblingMerges) +
+                " essent_small_sibling_max_preds=" +
+                std::to_string(options_.essentSmallSiblingMaxPreds) +
+                " essent_small_sibling_candidate_budget=" +
+                std::to_string(options_.essentSmallSiblingCandidateBudget) +
+                " essent_clusters_after_small_siblings=" +
+                std::to_string(materializePerf.essentClustersAfterSmallSiblings) +
+                " essent_small_overlap_merges=" +
+                std::to_string(materializePerf.essentSmallOverlapMerges) +
+                " essent_clusters_after_small_overlap=" +
+                std::to_string(materializePerf.essentClustersAfterSmallOverlap) +
+                " essent_down_merges=" +
+                std::to_string(materializePerf.essentDownMerges) +
+                " essent_merge_candidates=" +
+                std::to_string(materializePerf.essentMergeCandidates) +
+                " essent_merge_rejected_size=" +
+                std::to_string(materializePerf.essentMergeRejectedSize) +
+                " essent_merge_rejected_cycle=" +
+                std::to_string(materializePerf.essentMergeRejectedCycle) +
+                " essent_merge_rejected_bounded=" +
+                std::to_string(materializePerf.essentMergeRejectedBounded) +
+                " essent_merge_rejected_topo=" +
+                std::to_string(materializePerf.essentMergeRejectedTopo) +
+                " essent_clusters_after_down=" +
+                std::to_string(materializePerf.essentClustersAfterDown) +
+                " clusters_after_essent_coarsen=" +
+                std::to_string(materializePerf.clustersAfterEssentCoarsen) +
                 " segments=" + std::to_string(materializePerf.segments) +
                 " compute_supernodes=" + std::to_string(materializePerf.computeSupernodes));
+        logInfo("activity-schedule essent phase detail: single_parent_candidates=" +
+                std::to_string(materializePerf.essentSingleParentCandidates) +
+                " single_parent_rejected_size=" +
+                std::to_string(materializePerf.essentSingleParentRejectedSize) +
+                " single_parent_rejected_cycle=" +
+                std::to_string(materializePerf.essentSingleParentRejectedCycle) +
+                " single_parent_rejected_bounded=" +
+                std::to_string(materializePerf.essentSingleParentRejectedBounded) +
+                " small_sibling_candidates=" +
+                std::to_string(materializePerf.essentSmallSiblingCandidates) +
+                " small_sibling_rejected_size=" +
+                std::to_string(materializePerf.essentSmallSiblingRejectedSize) +
+                " small_sibling_rejected_cycle=" +
+                std::to_string(materializePerf.essentSmallSiblingRejectedCycle) +
+                " small_sibling_rejected_bounded=" +
+                std::to_string(materializePerf.essentSmallSiblingRejectedBounded) +
+                " small_overlap_candidates=" +
+                std::to_string(materializePerf.essentSmallOverlapCandidates) +
+                " small_overlap_rejected_size=" +
+                std::to_string(materializePerf.essentSmallOverlapRejectedSize) +
+                " small_overlap_rejected_cycle=" +
+                std::to_string(materializePerf.essentSmallOverlapRejectedCycle) +
+                " small_overlap_rejected_bounded=" +
+                std::to_string(materializePerf.essentSmallOverlapRejectedBounded) +
+                " down_candidates=" + std::to_string(materializePerf.essentDownCandidates) +
+                " down_rejected_size=" +
+                std::to_string(materializePerf.essentDownRejectedSize) +
+                " down_rejected_cycle=" +
+                std::to_string(materializePerf.essentDownRejectedCycle) +
+                " down_rejected_bounded=" +
+                std::to_string(materializePerf.essentDownRejectedBounded));
         for (const auto &iter : materializePerf.coarsenIterationStats)
         {
             logInfo("activity-schedule timing: compute_node_coarsen_iter=" +
@@ -4887,6 +7052,50 @@ namespace wolvrix::lib::transform
         logInfo("activity-schedule timing detail: compute_nodes=" +
                 std::to_string(rewrite.stats.computeNodes) +
                 " compute_node_ops_total=" + std::to_string(rewrite.stats.computeNodeOpsTotal) +
+                " essent_mffc_build=" + std::string(options_.enableEssentMffcBuild ? "true" : "false") +
+                " essent_coarsen=" + std::string(options_.enableEssentCoarsen ? "true" : "false") +
+                " initial_compute_supernodes=" +
+                std::to_string(rewrite.stats.initialComputeSupernodes) +
+                " initial_compute_supernode_ops_total=" +
+                std::to_string(rewrite.stats.initialComputeSupernodeOpsTotal) +
+                " initial_compute_supernode_dag_edges=" +
+                std::to_string(rewrite.stats.initialComputeSupernodeDagEdges) +
+                " initial_boundary_values=" +
+                std::to_string(rewrite.stats.initialBoundaryValues) +
+                " initial_boundary_activation_edges=" +
+                std::to_string(rewrite.stats.initialBoundaryActivationEdges) +
+                " essent_clusters_before_coarsen=" +
+                std::to_string(rewrite.stats.essentClustersBeforeCoarsen) +
+                " essent_clusters_after_mffc=" +
+                std::to_string(rewrite.stats.essentClustersAfterMffc) +
+                " essent_clusters_after_single_parent=" +
+                std::to_string(rewrite.stats.essentClustersAfterSingleParent) +
+                " essent_clusters_after_small_siblings=" +
+                std::to_string(rewrite.stats.essentClustersAfterSmallSiblings) +
+                " essent_clusters_after_small_overlap=" +
+                std::to_string(rewrite.stats.essentClustersAfterSmallOverlap) +
+                " essent_clusters_after_down=" +
+                std::to_string(rewrite.stats.essentClustersAfterDown) +
+                " clusters_after_essent_coarsen=" +
+                std::to_string(rewrite.stats.clustersAfterEssentCoarsen) +
+                " essent_single_parent_merges=" +
+                std::to_string(rewrite.stats.essentSingleParentMerges) +
+                " essent_small_sibling_merges=" +
+                std::to_string(rewrite.stats.essentSmallSiblingMerges) +
+                " essent_small_overlap_merges=" +
+                std::to_string(rewrite.stats.essentSmallOverlapMerges) +
+                " essent_down_merges=" +
+                std::to_string(rewrite.stats.essentDownMerges) +
+                " essent_merge_candidates=" +
+                std::to_string(rewrite.stats.essentMergeCandidates) +
+                " essent_merge_rejected_size=" +
+                std::to_string(rewrite.stats.essentMergeRejectedSize) +
+                " essent_merge_rejected_cycle=" +
+                std::to_string(rewrite.stats.essentMergeRejectedCycle) +
+                " essent_merge_rejected_bounded=" +
+                std::to_string(rewrite.stats.essentMergeRejectedBounded) +
+                " essent_merge_rejected_topo=" +
+                std::to_string(rewrite.stats.essentMergeRejectedTopo) +
                 " source_clones_in_compute_nodes=" +
                 std::to_string(rewrite.stats.sourceClonesInComputeNodes) +
                 " local_shared_compute_clones_in_compute_nodes=" +
@@ -4935,6 +7144,7 @@ namespace wolvrix::lib::transform
                 << " compute_supernodes=" << computeSupernodes
                 << " commit_supernodes=" << commitSupernodes
                 << " compute_nodes=" << rewrite.stats.computeNodes
+                << " essent_mffc_build=" << (options_.enableEssentMffcBuild ? "true" : "false")
                 << " source_clones=" << rewrite.stats.sourceClonesInComputeNodes
                 << " local_shared_compute_clones=" << rewrite.stats.localSharedComputeClonesInComputeNodes
                 << " eligible_ops=" << opData.topoOps.size()
