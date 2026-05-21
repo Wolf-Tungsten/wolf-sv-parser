@@ -4866,7 +4866,7 @@ namespace wolvrix::lib::transform
                 }
                 groups.push_back(SiblingGroup{std::move(ids), edgesRemoved});
             };
-            if (maxPreds == 1)
+            const auto addSinglePredSiblingGroups = [&]()
             {
                 groups.reserve(view.members.size() / 8 + 1);
                 for (uint32_t parent = 0; parent < view.succs.size(); ++parent)
@@ -4888,9 +4888,14 @@ namespace wolvrix::lib::transform
                         addSiblingGroup(std::move(group));
                     }
                 }
+            };
+            if (maxPreds == 1)
+            {
+                addSinglePredSiblingGroups();
             }
             else
             {
+                addSinglePredSiblingGroups();
                 struct Entry
                 {
                     std::uint64_t signature = 0;
@@ -4905,6 +4910,10 @@ namespace wolvrix::lib::transform
                 {
                     if (clusterOpSize(view.members[id], nodeOpSizes) >= smallPartCutoff ||
                         view.preds[id].empty())
+                    {
+                        return false;
+                    }
+                    if (view.preds[id].size() == 1)
                     {
                         return false;
                     }
@@ -4933,7 +4942,7 @@ namespace wolvrix::lib::transform
                 }
                 else
                 {
-                    for (std::size_t predCount = 1; predCount <= maxPreds; ++predCount)
+                    for (std::size_t predCount = 2; predCount <= maxPreds; ++predCount)
                     {
                         for (uint32_t id = 0; id < view.members.size(); ++id)
                         {
@@ -7075,6 +7084,7 @@ namespace wolvrix::lib::transform
                         }
                         const uint32_t from = supernodeOfOp[defOp.index];
                         const uint32_t to = supernodeId;
+                        bool skipDagEdge = false;
                         if (defOp.index < rewrite.computeNodeOfOp.size() &&
                             toOpId.index < rewrite.computeNodeOfOp.size())
                         {
@@ -7092,10 +7102,7 @@ namespace wolvrix::lib::transform
                                     from < splitOrdinalBySupernode.size() &&
                                     to < splitOrdinalBySupernode.size() &&
                                     splitOrdinalBySupernode[from] < splitOrdinalBySupernode[to];
-                                if (!splitForward)
-                                {
-                                    continue;
-                                }
+                                skipDagEdge = !splitForward;
                             }
                         }
                         if (from == kInvalidActivitySupernodeId || from == to)
@@ -7107,12 +7114,15 @@ namespace wolvrix::lib::transform
                         {
                             continue;
                         }
-                        const uint64_t packed = (static_cast<uint64_t>(from) << 32) | to;
-                        if (seenEdges.insert(packed).second)
+                        if (!skipDagEdge)
                         {
-                            build.dag[from].push_back(to);
+                            const uint64_t packed = (static_cast<uint64_t>(from) << 32) | to;
+                            if (seenEdges.insert(packed).second)
+                            {
+                                build.dag[from].push_back(to);
+                            }
                         }
-                        if (operand.index > 0 && operand.index <= build.valueFanout.size())
+                        if (!skipDagEdge && operand.index > 0 && operand.index <= build.valueFanout.size())
                         {
                             build.valueFanout[operand.index - 1].push_back(to);
                         }

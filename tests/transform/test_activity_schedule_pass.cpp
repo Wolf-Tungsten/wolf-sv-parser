@@ -644,6 +644,76 @@ int main()
     }
 
     {
+        currentCase = "essent_coarsen_small_siblings_budget_preserves_single_pred";
+        wolvrix::lib::grh::Design design;
+        auto &graph = design.createGraph("essent_coarsen_small_siblings_budget_preserves_single_pred");
+        design.markAsTop("essent_coarsen_small_siblings_budget_preserves_single_pred");
+
+        const auto a = makeValue(graph, "a", 8);
+        const auto b = makeValue(graph, "b", 8);
+        const auto c = makeValue(graph, "c", 8);
+        graph.bindInputPort("a", a);
+        graph.bindInputPort("b", b);
+        graph.bindInputPort("c", c);
+
+        const auto parent = makeValue(graph, "parent", 8);
+        const auto parentOp = graph.createOperation(wolvrix::lib::grh::OperationKind::kOr,
+                                                    graph.internSymbol("budget_single_parent_op"));
+        graph.addOperand(parentOp, a);
+        graph.addOperand(parentOp, b);
+        graph.addResult(parentOp, parent);
+
+        const auto child0 = makeValue(graph, "child0", 8);
+        const auto child0Op = graph.createOperation(wolvrix::lib::grh::OperationKind::kXor,
+                                                    graph.internSymbol("budget_single_child0_op"));
+        graph.addOperand(child0Op, parent);
+        graph.addOperand(child0Op, a);
+        graph.addResult(child0Op, child0);
+        graph.bindOutputPort("child0", child0);
+
+        const auto child1 = makeValue(graph, "child1", 8);
+        const auto child1Op = graph.createOperation(wolvrix::lib::grh::OperationKind::kAdd,
+                                                    graph.internSymbol("budget_single_child1_op"));
+        graph.addOperand(child1Op, parent);
+        graph.addOperand(child1Op, c);
+        graph.addResult(child1Op, child1);
+        graph.bindOutputPort("child1", child1);
+
+        SessionStore session;
+        PassManager manager;
+        manager.options().session = &session;
+        manager.addPass(std::make_unique<ActivitySchedulePass>(ActivityScheduleOptions{
+            .path = "essent_coarsen_small_siblings_budget_preserves_single_pred",
+            .maxOpInComputeSupernode = 8,
+            .maxOpInComputeNode = 16,
+            .essentSmallPartCutoff = 8,
+            .essentSmallSiblingMaxPreds = 2,
+            .essentSmallSiblingCandidateBudget = 1,
+            .enableCoarsen = true,
+            .enableEssentMffcBuild = true,
+            .enableEssentCoarsen = true,
+            .enableEssentSingleParentMerge = false,
+            .enableEssentSmallOverlapMerge = false,
+            .enableEssentDownMerge = false,
+        }));
+        PassDiagnostics diags;
+        const PassManagerResult runResult = manager.run(design, diags);
+        if (!runResult.success || diags.hasError())
+        {
+            return fail("Expected single-pred preserving small-sibling schedule to succeed");
+        }
+        const auto schedule = loadSchedule(session, "essent_coarsen_small_siblings_budget_preserves_single_pred");
+        if (const int rc = validateCommonScheduleShape(graph, schedule); rc != 0)
+        {
+            return rc;
+        }
+        if (schedule.summaryStats->find("\"essent_small_sibling_merges\":1") == std::string::npos)
+        {
+            return fail("Expected maxPreds>1 small-sibling path to preserve single-pred sibling merge");
+        }
+    }
+
+    {
         currentCase = "essent_coarsen_small_overlap";
         wolvrix::lib::grh::Design design;
         auto &graph = design.createGraph("essent_coarsen_small_overlap");
